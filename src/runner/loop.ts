@@ -177,8 +177,8 @@ async function applyLLMCompaction(state: LoopState, phase: "pre-turn" | "post-tu
   const beforeEstimate = estimatePromptTokens(state.conversation)
 
   const summaryProvider = configuredSummaryProvider()
-  if (!summaryProvider.client || !summaryProvider.model) {
-    console.warn(`[context] ${phase}: no summary client available; skipping llm compaction`)
+  if (!summaryProvider.model) {
+    console.warn(`[context] ${phase}: no summary model available; skipping llm compaction`)
     return false
   }
 
@@ -186,8 +186,8 @@ async function applyLLMCompaction(state: LoopState, phase: "pre-turn" | "post-tu
   const agentContext = await loadAgentSummaryContext()
   const summarized = await summarizeConversationViaLLM(
     state.conversation,
-    summaryProvider.client,
     summaryProvider.model,
+    summaryProvider.apiKey,
     {
       recentMinKeep: LLM_RECENT_MIN_KEEP,
       recentMaxKeep: LLM_RECENT_MAX_KEEP,

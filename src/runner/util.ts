@@ -1,7 +1,10 @@
 import fs from "fs/promises"
 import path from "path"
 import { fileURLToPath } from "url"
-import OpenAI from "openai"
+import type OpenAI from "openai"
+import { complete, getEnvApiKey, getModel as piGetModel, getModels as piGetModels } from "@earendil-works/pi-ai"
+import type { AssistantMessage as PiAssistantMessage, Context, KnownProvider, Model, TextContent, ThinkingContent, ToolCall as PiToolCall, ImageContent, Usage as PiUsage } from "@earendil-works/pi-ai"
+import type { OpenAICompletionsOptions } from "@earendil-works/pi-ai/openai-completions"
 import { HOME_DIR } from "../container/config"
 import { imageRootForModelInput } from "../container/index"
 import type { Message } from "../types"
@@ -22,15 +25,6 @@ export const USE_FALLBACK = NIRI_ENV === "local"
 /** Display name for the agent, used in the summarizer prompt and grounding. */
 export const AGENT_NAME = (process.env.AGENT_NAME ?? "").trim() || "niri"
 
-export const API_BASE = process.env.OPENAI_BASE_URL ?? "https://api.openai.com/v1"
-export const MODEL = process.env.MODEL ?? ""
-export const PRIMARY_PROVIDER_REQUIRES_REASONING_REPLAY =
-  API_BASE.toLowerCase().includes("deepseek") || MODEL.toLowerCase().includes("deepseek")
-const DEFAULT_FALLBACK_BASE = "http://localhost:1234/v1"
-const isLikelyLocalBase = (baseUrl: string): boolean => {
-  const lowered = baseUrl.trim().toLowerCase()
-  return lowered.includes("localhost") || lowered.includes("127.0.0.1")
-}
 const parseBooleanEnv = (value: string | undefined, fallback: boolean): boolean => {
   if (typeof value !== "string") return fallback
   const normalized = value.trim().toLowerCase()
@@ -39,9 +33,10 @@ const parseBooleanEnv = (value: string | undefined, fallback: boolean): boolean 
   if (normalized === "false" || normalized === "0" || normalized === "no" || normalized === "off") return false
   return fallback
 }
-
-/** Controls whether model reasoning/thinking is requested and streamed to clients. */
-export const ENABLE_THINKING = parseBooleanEnv(process.env.ENABLE_THINKING, true)
+const isLikelyLocalBase = (baseUrl: string): boolean => {
+  const lowered = baseUrl.trim().toLowerCase()
+  return lowered.includes("localhost") || lowered.includes("127.0.0.1")
+}
 const parseToolChoiceEnv = (value: string | undefined, fallback: "required" | "auto" | "none"): "required" | "auto" | "none" => {
   if (typeof value !== "string") return fallback
   const normalized = value.trim().toLowerCase()
@@ -49,40 +44,50 @@ const parseToolChoiceEnv = (value: string | undefined, fallback: "required" | "a
   return fallback
 }
 
-export const FALLBACK_BASE =
-  process.env.FALLBACK_OPENAI_BASE_URL ?? process.env.OPENROUTER_BASE_URL ?? process.env.LMSTUDIO_BASE_URL ?? DEFAULT_FALLBACK_BASE
-export const FALLBACK_MODEL =
-  process.env.FALLBACK_MODEL ?? process.env.OPENROUTER_MODEL ?? process.env.LMSTUDIO_MODEL ?? "zai-org/glm-4.7-flash"
-export const FALLBACK_PROVIDER_REQUIRES_REASONING_REPLAY =
-  FALLBACK_BASE.toLowerCase().includes("deepseek") || FALLBACK_MODEL.toLowerCase().includes("deepseek")
-export const SUMMARY_BASE =
-  process.env.SUMMARY_OPENAI_BASE_URL ?? process.env.SUMMARY_BASE_URL ?? ""
-export const SUMMARY_MODEL = process.env.SUMMARY_MODEL ?? ""
+// ── Primary model ─────────────────────────────────────────────────────────────
+// Preferred: MODEL_PROVIDER + MODEL (uses pi's registry for base URL, compat,
+// reasoning flags, and env key lookup — unambiguous across providers).
+//
+//   MODEL_PROVIDER=openrouter   MODEL=deepseek/deepseek-r1  → OPENROUTER_API_KEY
+//   MODEL_PROVIDER=deepseek     MODEL=deepseek-v4-pro        → DEEPSEEK_API_KEY
+//   MODEL_PROVIDER=openai       MODEL=gpt-4o                 → OPENAI_API_KEY
+//
+// Escape hatch for unlisted/custom endpoints: set MODEL_BASE_URL.
+// If MODEL_PROVIDER is also set, it overrides provider detection from the URL.
+export const MODEL_PROVIDER = (process.env.MODEL_PROVIDER ?? "").trim()
+export const MODEL = (process.env.MODEL ?? "").trim()
+// MODEL_BASE_URL is only for unlisted/custom endpoints. Do NOT fall back to
+// OPENAI_BASE_URL — that would silently override the provider's own base URL.
+const MODEL_BASE_URL = (process.env.MODEL_BASE_URL ?? "").trim()
+
+// ── Fallback model ────────────────────────────────────────────────────────────
+export const FALLBACK_PROVIDER = (process.env.FALLBACK_PROVIDER ?? "").trim()
+export const FALLBACK_MODEL = (process.env.FALLBACK_MODEL || "zai-org/glm-4.7-flash").trim()
+const FALLBACK_BASE_URL = (process.env.FALLBACK_BASE_URL ?? process.env.FALLBACK_OPENAI_BASE_URL ?? "").trim()
+const FALLBACK_N_CTX = parseInt(process.env.FALLBACK_N_CTX ?? "4096")
+const FALLBACK_CONTEXT_MARGIN = parseInt(process.env.FALLBACK_CONTEXT_MARGIN ?? "256")
+const FALLBACK_HARD_OVERFLOW_TOKENS = parseInt(process.env.FALLBACK_HARD_OVERFLOW_TOKENS ?? "1024")
+const FALLBACK_ENFORCE_CONTEXT_LIMIT = parseBooleanEnv(process.env.FALLBACK_ENFORCE_CONTEXT_LIMIT, isLikelyLocalBase(FALLBACK_BASE_URL))
+
+// ── Summary model ─────────────────────────────────────────────────────────────
+export const SUMMARY_PROVIDER = (process.env.SUMMARY_PROVIDER ?? "").trim()
+export const SUMMARY_MODEL = (process.env.SUMMARY_MODEL || "").trim()
+const SUMMARY_BASE_URL = (process.env.SUMMARY_BASE_URL ?? process.env.SUMMARY_OPENAI_BASE_URL ?? "").trim()
+
+// ── Tool choice ───────────────────────────────────────────────────────────────
 export const PRIMARY_TOOL_CHOICE = parseToolChoiceEnv(process.env.PRIMARY_TOOL_CHOICE ?? process.env.TOOL_CHOICE, "required")
 export const FALLBACK_TOOL_CHOICE = parseToolChoiceEnv(process.env.FALLBACK_TOOL_CHOICE, "required")
-const FALLBACK_N_CTX = parseInt(process.env.FALLBACK_N_CTX ?? process.env.LMSTUDIO_N_CTX ?? "4096")
-const FALLBACK_CONTEXT_MARGIN = parseInt(process.env.FALLBACK_CONTEXT_MARGIN ?? process.env.LMSTUDIO_CONTEXT_MARGIN ?? "256")
-const FALLBACK_HARD_OVERFLOW_TOKENS = parseInt(
-  process.env.FALLBACK_HARD_OVERFLOW_TOKENS ?? process.env.LMSTUDIO_HARD_OVERFLOW_TOKENS ?? "1024",
-)
-const FALLBACK_ENFORCE_CONTEXT_LIMIT = parseBooleanEnv(
-  process.env.FALLBACK_ENFORCE_CONTEXT_LIMIT,
-  isLikelyLocalBase(FALLBACK_BASE),
-)
 
-const fallbackApiKey =
-  process.env.FALLBACK_OPENAI_API_KEY ??
-  process.env.OPENROUTER_API_KEY ??
-  process.env.LMSTUDIO_API_KEY ??
-  process.env.OPENAI_API_KEY ??
-  (isLikelyLocalBase(FALLBACK_BASE) ? "lm-studio" : "")
-const summaryApiKey =
-  process.env.SUMMARY_OPENAI_API_KEY ??
-  process.env.SUMMARY_API_KEY ??
-  (SUMMARY_BASE === process.env.OPENROUTER_BASE_URL ? process.env.OPENROUTER_API_KEY : undefined) ??
-  (SUMMARY_BASE === process.env.LMSTUDIO_BASE_URL ? process.env.LMSTUDIO_API_KEY : undefined) ??
-  process.env.OPENAI_API_KEY ??
-  (SUMMARY_BASE && isLikelyLocalBase(SUMMARY_BASE) ? "lm-studio" : "")
+// ── Thinking ──────────────────────────────────────────────────────────────────
+/** Whether to request thinking on each call. */
+export const ENABLE_THINKING = parseBooleanEnv(process.env.ENABLE_THINKING, true)
+/** Reasoning effort level: minimal | low | medium | high | xhigh. */
+export const THINKING_EFFORT = (() => {
+  const v = (process.env.THINKING_EFFORT ?? "low").trim().toLowerCase()
+  return (["minimal", "low", "medium", "high", "xhigh"].includes(v) ? v : "low") as "minimal" | "low" | "medium" | "high" | "xhigh"
+})()
+
+// ── Extra headers ─────────────────────────────────────────────────────────────
 const fallbackHeaders: Record<string, string> = {}
 if (process.env.FALLBACK_OPENAI_REFERER) fallbackHeaders["HTTP-Referer"] = process.env.FALLBACK_OPENAI_REFERER
 if (process.env.FALLBACK_OPENAI_TITLE) fallbackHeaders["X-Title"] = process.env.FALLBACK_OPENAI_TITLE
@@ -90,57 +95,142 @@ const summaryHeaders: Record<string, string> = {}
 if (process.env.SUMMARY_OPENAI_REFERER) summaryHeaders["HTTP-Referer"] = process.env.SUMMARY_OPENAI_REFERER
 if (process.env.SUMMARY_OPENAI_TITLE) summaryHeaders["X-Title"] = process.env.SUMMARY_OPENAI_TITLE
 
+// ── Model construction ────────────────────────────────────────────────────────
+
+/**
+ * Look up a model in pi's registry. Returns undefined for unknown combinations.
+ * The registry has correct base URLs, compat settings, and reasoning flags.
+ */
+function lookupRegisteredModel(provider: string, modelId: string): Model<"openai-completions"> | undefined {
+  if (!provider || !modelId) return undefined
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  // @ts-expect-error — runtime lookup with unknown modelId; returns undefined for unregistered combinations
+  return piGetModel(provider as KnownProvider, modelId) as Model<"openai-completions"> | undefined
+}
+
+/**
+ * Get the canonical base URL for a pi provider from its registered models.
+ * Falls back to undefined for unknown providers.
+ */
+function providerBaseUrl(provider: string): string | undefined {
+  const models = piGetModels(provider as KnownProvider)
+  return models[0]?.baseUrl
+}
+
+/**
+ * Build a Model<"openai-completions"> from provider + model ID.
+ *
+ * Strategy:
+ * 1. Try pi's registry — if found, all settings (baseUrl, compat, reasoning)
+ *    are correct and we just pass it through.
+ * 2. If not in registry, build a custom model using the provider's known
+ *    base URL (from pi) or an explicit baseUrlOverride.
+ */
+function buildModel(
+  provider: string,
+  modelId: string,
+  baseUrlOverride?: string,
+  headers?: Record<string, string>,
+  contextWindowOverride?: number,
+): Model<"openai-completions"> | null {
+  if (!modelId) return null
+
+  const registered = lookupRegisteredModel(provider, modelId)
+  if (registered && !baseUrlOverride) {
+    // Use pi's registered model directly — reasoning, compat, baseUrl all correct.
+    return headers && Object.keys(headers).length ? { ...registered, headers } : registered
+  }
+
+  // Not in registry or explicit base URL override: construct manually.
+  const baseUrl = baseUrlOverride || providerBaseUrl(provider) || "https://api.openai.com/v1"
+  const resolvedProvider = provider || (isLikelyLocalBase(baseUrl) ? "lm-studio" : "openai")
+  return {
+    id: modelId,
+    name: modelId,
+    api: "openai-completions",
+    provider: resolvedProvider,
+    baseUrl,
+    // For unregistered models, assume reasoning is on — pi will only actually
+    // send reasoning params if ENABLE_THINKING is also true at call time.
+    reasoning: true,
+    input: ["text", "image"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: contextWindowOverride ?? 200_000,
+    maxTokens: 8192,
+    ...(headers && Object.keys(headers).length ? { headers } : {}),
+  }
+}
+
+// Backwards-compat: API_BASE still exported for logging / fallbackContextWindow
+export const API_BASE = MODEL_BASE_URL || providerBaseUrl(MODEL_PROVIDER) || "(unknown)"
+export const FALLBACK_BASE = FALLBACK_BASE_URL
+export const SUMMARY_BASE = SUMMARY_BASE_URL
+
 if (!USE_FALLBACK && !MODEL) {
   throw new Error("MODEL is required unless fallback is forced (NIRI_ENV=local).")
 }
-
-if (!USE_FALLBACK && !process.env.OPENAI_API_KEY) {
-  throw new Error("OPENAI_API_KEY is required unless fallback is forced (NIRI_ENV=local).")
+if (!USE_FALLBACK && !MODEL_PROVIDER && !MODEL_BASE_URL) {
+  throw new Error("MODEL_PROVIDER or MODEL_BASE_URL is required. Example: MODEL_PROVIDER=openrouter")
 }
-
-if (USE_FALLBACK && !fallbackApiKey) {
-  throw new Error(
-    "Fallback API key is required in local mode. Set FALLBACK_OPENAI_API_KEY (or OPENROUTER_API_KEY / LMSTUDIO_API_KEY).",
+if (!USE_FALLBACK) {
+  const builtModel = buildModel(MODEL_PROVIDER, MODEL, MODEL_BASE_URL || undefined)
+  if (!builtModel) throw new Error("Failed to construct primary model. Check MODEL and MODEL_PROVIDER.")
+  const key = getEnvApiKey(builtModel.provider)
+  if (!key) throw new Error(
+    `No API key found for provider "${builtModel.provider}". Set the standard key (e.g. OPENROUTER_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY).`,
   )
 }
 
-if ((SUMMARY_BASE || SUMMARY_MODEL) && (!SUMMARY_BASE || !SUMMARY_MODEL || !summaryApiKey)) {
-  throw new Error(
-    "Summary provider requires SUMMARY_OPENAI_BASE_URL (or SUMMARY_BASE_URL), SUMMARY_MODEL, and SUMMARY_OPENAI_API_KEY (or SUMMARY_API_KEY).",
-  )
-}
-
-export const client = USE_FALLBACK
+export const primaryModel: Model<"openai-completions"> | null = USE_FALLBACK
   ? null
-  : new OpenAI({
-      baseURL: API_BASE,
-      apiKey: process.env.OPENAI_API_KEY!,
-    })
+  : buildModel(MODEL_PROVIDER, MODEL, MODEL_BASE_URL || undefined)!
 
-export const fallbackClient = new OpenAI({
-  baseURL: FALLBACK_BASE,
-  apiKey: fallbackApiKey || "lm-studio", // Keep LM Studio default when running against localhost.
-  defaultHeaders: Object.keys(fallbackHeaders).length ? fallbackHeaders : undefined,
-})
+export const fallbackModel: Model<"openai-completions"> = (
+  buildModel(
+    FALLBACK_PROVIDER,
+    FALLBACK_MODEL,
+    FALLBACK_BASE_URL || undefined,
+    Object.keys(fallbackHeaders).length ? fallbackHeaders : undefined,
+    // Only apply FALLBACK_N_CTX when we have a local/custom base URL where the
+    // context window actually matters for guardrails. Registered models already
+    // have the right contextWindow from pi's registry.
+    FALLBACK_BASE_URL ? FALLBACK_N_CTX : undefined,
+  ) ?? {
+    id: FALLBACK_MODEL,
+    name: FALLBACK_MODEL,
+    api: "openai-completions" as const,
+    provider: "openai",
+    baseUrl: "http://localhost:1234/v1",
+    reasoning: false,
+    input: ["text" as const, "image" as const],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: FALLBACK_N_CTX,
+    maxTokens: 4096,
+  }
+)
 
-export const summaryClient =
-  SUMMARY_BASE && SUMMARY_MODEL
-    ? new OpenAI({
-        baseURL: SUMMARY_BASE,
-        apiKey: summaryApiKey,
-        defaultHeaders: Object.keys(summaryHeaders).length ? summaryHeaders : undefined,
-      })
+export const summaryModel: Model<"openai-completions"> | null =
+  SUMMARY_MODEL
+    ? buildModel(SUMMARY_PROVIDER, SUMMARY_MODEL, SUMMARY_BASE_URL || undefined, Object.keys(summaryHeaders).length ? summaryHeaders : undefined) ?? null
     : null
 
-console.log(`[config] primary=${MODEL} @ ${API_BASE}`)
-console.log(`[config] fallback=${FALLBACK_MODEL} @ ${FALLBACK_BASE}`)
-if (summaryClient) console.log(`[config] summary=${SUMMARY_MODEL} @ ${SUMMARY_BASE}`)
+// Explicit API key overrides — only needed when the standard provider env var
+// isn't usable (e.g. same key variable serves multiple providers).
+export const PRIMARY_API_KEY: string | undefined = process.env.MODEL_API_KEY
+export const FALLBACK_API_KEY: string | undefined = process.env.FALLBACK_API_KEY
+export const SUMMARY_API_KEY: string | undefined = process.env.SUMMARY_API_KEY
+
+console.log(`[config] primary=${MODEL} provider=${primaryModel?.provider ?? "none"} @ ${primaryModel?.baseUrl ?? "none"}`)
+console.log(`[config] fallback=${FALLBACK_MODEL} provider=${fallbackModel.provider} @ ${fallbackModel.baseUrl}`)
+if (summaryModel) console.log(`[config] summary=${SUMMARY_MODEL} provider=${summaryModel.provider} @ ${summaryModel.baseUrl}`)
 console.log(`[config] env=${NIRI_ENV} use_fallback=${USE_FALLBACK}`)
 console.log(`[config] thinking=${ENABLE_THINKING}`)
 
 const IMAGE_ROOT_HINT = imageRootForModelInput()
 
-export const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
+type NiriTool = { type: "function"; function: { name: string; description: string; parameters: Record<string, unknown> } }
+
+export const TOOLS: NiriTool[] = [
   {
     type: "function",
     function: {
@@ -500,6 +590,136 @@ export const TOOLS: OpenAI.Chat.ChatCompletionTool[] = [
 ]
 
 /**
+ * Build a pi-ai Context from the internal OpenAI-compatible message list.
+ * System messages are folded into systemPrompt; everything else is converted
+ * to the corresponding pi-ai message type.
+ */
+export function buildContext(messages: Message[], tools: NiriTool[]): Context {
+  const systemParts: string[] = []
+  const piMessages: NonNullable<Context["messages"]> = []
+
+  for (const msg of messages) {
+    if (msg.role === "system") {
+      const text = typeof msg.content === "string" ? msg.content : ""
+      if (text) systemParts.push(text)
+      continue
+    }
+
+    if (msg.role === "user") {
+      if (typeof msg.content === "string") {
+        piMessages.push({ role: "user", content: msg.content, timestamp: Date.now() })
+      } else if (Array.isArray(msg.content)) {
+        const parts: (TextContent | ImageContent)[] = []
+        for (const p of msg.content as Array<{ type: string; text?: string; image_url?: { url: string } | string }>) {
+          if (p.type === "text" && typeof p.text === "string") {
+            parts.push({ type: "text", text: p.text })
+          } else if (p.type === "image_url") {
+            const url = typeof p.image_url === "string" ? p.image_url : (p.image_url?.url ?? "")
+            if (url.startsWith("data:")) {
+              const semi = url.indexOf(";")
+              const comma = url.indexOf(",")
+              const mimeType = semi > 5 ? url.slice(5, semi) : "image/jpeg"
+              const data = comma >= 0 ? url.slice(comma + 1) : ""
+              parts.push({ type: "image", data, mimeType } as ImageContent)
+            }
+          }
+        }
+        piMessages.push({ role: "user", content: parts, timestamp: Date.now() })
+      }
+      continue
+    }
+
+    if (msg.role === "assistant") {
+      const aMsg = msg as OpenAI.Chat.ChatCompletionAssistantMessageParam & { reasoning_content?: string }
+      const content: (TextContent | ThinkingContent | PiToolCall)[] = []
+      if (typeof aMsg.reasoning_content === "string" && aMsg.reasoning_content) {
+        content.push({ type: "thinking", thinking: aMsg.reasoning_content })
+      }
+      const text = typeof aMsg.content === "string" ? aMsg.content : ""
+      if (text) content.push({ type: "text", text })
+      for (const tc of aMsg.tool_calls ?? []) {
+        if (tc.type === "function") {
+          let args: Record<string, unknown> = {}
+          try { args = JSON.parse(tc.function.arguments || "{}") } catch { /* keep empty */ }
+          content.push({ type: "toolCall", id: tc.id, name: tc.function.name, arguments: args } as PiToolCall)
+        }
+      }
+      if (content.length === 0) content.push({ type: "text", text: "" })
+      piMessages.push({
+        role: "assistant",
+        content,
+        api: "openai-completions",
+        provider: "openai",
+        model: MODEL,
+        usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+        stopReason: "stop",
+        timestamp: Date.now(),
+      } as PiAssistantMessage)
+      continue
+    }
+
+    if (msg.role === "tool") {
+      const tMsg = msg as OpenAI.Chat.ChatCompletionToolMessageParam
+      const text = typeof tMsg.content === "string" ? tMsg.content :
+        Array.isArray(tMsg.content) ? (tMsg.content as { text?: string }[]).map(p => p.text ?? "").join("") : ""
+      piMessages.push({
+        role: "toolResult",
+        toolCallId: tMsg.tool_call_id,
+        toolName: "",
+        content: [{ type: "text", text }],
+        isError: false,
+        timestamp: Date.now(),
+      })
+    }
+  }
+
+  return {
+    systemPrompt: systemParts.length > 0 ? systemParts.join("\n\n") : undefined,
+    messages: piMessages,
+    tools: tools.map(t => ({ name: t.function.name, description: t.function.description, parameters: t.function.parameters as any })),
+  }
+}
+
+/**
+ * Convert a pi-ai AssistantMessage back to the internal OAI-compatible format.
+ */
+export function fromAssistantMessage(
+  msg: PiAssistantMessage,
+): OpenAI.Chat.ChatCompletionMessage & { reasoning_content?: string } {
+  let text = ""
+  let reasoning = ""
+  const toolCalls: OpenAI.Chat.ChatCompletionMessageToolCall[] = []
+
+  for (const part of msg.content) {
+    if (part.type === "text") text += (part as TextContent).text
+    else if (part.type === "thinking") reasoning += (part as ThinkingContent).thinking
+    else if (part.type === "toolCall") {
+      const tc = part as PiToolCall
+      toolCalls.push({
+        id: tc.id,
+        type: "function",
+        function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+      })
+    }
+  }
+
+  return {
+    role: "assistant",
+    content: text || null,
+    refusal: null,
+    ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+    ...(reasoning ? { reasoning_content: reasoning } : {}),
+  }
+}
+
+/**
+ * Convert pi-ai Usage to OAI CompletionUsage.
+ */
+export function fromUsage(usage: PiUsage): OpenAI.Completions.CompletionUsage {
+  return { prompt_tokens: usage.input, completion_tokens: usage.output, total_tokens: usage.totalTokens }
+}
+
+/**
  * Persists the current message array as the resumable session snapshot.
  *
  * @param messages - Conversation messages to serialize.
@@ -548,42 +768,8 @@ export async function consumeRestSnapshot(): Promise<RestSnapshot | null> {
   }
 }
 
-function normalizeReasoningReplay(msgs: Message[]): Message[] {
-  if (!ENABLE_THINKING) return msgs
-  const needsReplayNormalization =
-    PRIMARY_PROVIDER_REQUIRES_REASONING_REPLAY ||
-    FALLBACK_PROVIDER_REQUIRES_REASONING_REPLAY ||
-    msgs.some(
-      (msg) =>
-        msg.role === "assistant" &&
-        typeof (msg as OpenAI.Chat.ChatCompletionMessage & { reasoning_content?: string }).reasoning_content === "string",
-    )
-  if (!needsReplayNormalization) return msgs
-
-  let changed = false
-  const normalized = msgs.map((msg) => {
-    if (msg.role !== "assistant") return msg
-
-    const assistant = msg as OpenAI.Chat.ChatCompletionMessage & { reasoning_content?: string }
-    if (typeof assistant.reasoning_content === "string") return msg
-
-    changed = true
-    return {
-      ...assistant,
-      reasoning_content: "",
-    }
-  })
-
-  if (changed) {
-    console.log("[runner] backfilled empty reasoning_content on assistant history for provider compatibility")
-  }
-
-  return normalized
-}
-
 /** Move mis-ordered tool responses back into place and synthesize missing ones. */
 export function sanitizeMessages(msgs: Message[]): Message[] {
-  msgs = normalizeReasoningReplay(msgs)
   let i = 0
   while (i < msgs.length) {
     const msg = msgs[i]
@@ -676,41 +862,6 @@ export async function loadSession(): Promise<Message[] | null> {
  * @param err - Error thrown by the primary API call.
  * @returns `true` when fallback should be attempted.
  */
-export function shouldFallback(err: unknown): boolean {
-  if (err instanceof OpenAI.APIError) {
-    // 429 + 5xx = overloaded or down; 0/undefined = network-level failure
-    if (!err.status || err.status === 429 || err.status >= 500) return true
-    return false
-  }
-  return isTransientTransportError(err)
-}
-
-function errorCauseChainText(err: unknown): string {
-  const parts: string[] = []
-  let current: unknown = err
-
-  for (let depth = 0; depth < 4 && current instanceof Error; depth++) {
-    parts.push(current.name, current.message)
-    const withMetadata = current as Error & { code?: unknown; cause?: unknown }
-    if (typeof withMetadata.code === "string") parts.push(withMetadata.code)
-    current = withMetadata.cause
-  }
-
-  return parts.join("\n")
-}
-
-/**
- * Detects retryable network/stream failures thrown below the OpenAI SDK.
- */
-export function isTransientTransportError(err: unknown): boolean {
-  if (!(err instanceof Error)) return false
-
-  const text = errorCauseChainText(err)
-  return /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EPIPE|UND_ERR|fetch failed|terminated|socket hang up|other side closed|aborted/i.test(
-    text,
-  )
-}
-
 const PROMPT_TOO_LARGE_PHRASES = [
   "prompt exceeds max length",
   "prompt is too long",
@@ -725,28 +876,6 @@ const PROMPT_TOO_LARGE_PHRASES = [
   "request too large",
 ]
 
-const PROMPT_TOO_LARGE_CODES = new Set(["context_length_exceeded", "1261", "string_above_max_length"])
-
-/**
- * Detects prompt-length-exceeded errors across OpenAI-compatible providers.
- *
- * @param err - API error from a chat completions request.
- * @returns `true` when the provider rejected the prompt as too large.
- */
-export function isPromptTooLargeError(err: unknown): boolean {
-  if (!(err instanceof OpenAI.APIError)) return false
-  if (err.status !== 400 && err.status !== 413) return false
-
-  const errorRecord = err as unknown as { code?: unknown; error?: { code?: unknown; type?: unknown } }
-  const rootCode = typeof errorRecord.code === "string" ? errorRecord.code.toLowerCase() : ""
-  const innerCode = typeof errorRecord.error?.code === "string" ? (errorRecord.error.code as string).toLowerCase() : ""
-  if (rootCode && PROMPT_TOO_LARGE_CODES.has(rootCode)) return true
-  if (innerCode && PROMPT_TOO_LARGE_CODES.has(innerCode)) return true
-
-  const message = (err.message || "").toLowerCase()
-  return PROMPT_TOO_LARGE_PHRASES.some((phrase) => message.includes(phrase))
-}
-
 const CONTENT_FILTER_PHRASES = [
   "potentially unsafe or sensitive content",
   "sensitive content in input or generation",
@@ -755,31 +884,8 @@ const CONTENT_FILTER_PHRASES = [
   "may generate sensitive content",
 ]
 
-/**
- * Detects provider content-safety rejections (typically 400-class).
- *
- * These errors can stick across turns when the offending content lives in the
- * persisted conversation (e.g. a previously attached image); the caller is
- * expected to scrub the conversation before retrying.
- */
-export function isContentFilterError(err: unknown): boolean {
-  if (!(err instanceof OpenAI.APIError)) return false
-  if (err.status !== 400) return false
-
-  const errorRecord = err as unknown as { code?: unknown; error?: { code?: unknown; type?: unknown } }
-  const rootCode = typeof errorRecord.code === "string" ? errorRecord.code.toLowerCase() : ""
-  const innerCode = typeof errorRecord.error?.code === "string" ? (errorRecord.error.code as string).toLowerCase() : ""
-  const innerType = typeof errorRecord.error?.type === "string" ? (errorRecord.error.type as string).toLowerCase() : ""
-  if (rootCode === "content_filter" || innerCode === "content_filter" || innerType === "content_filter") return true
-
-  const message = (err.message || "").toLowerCase()
-  return CONTENT_FILTER_PHRASES.some((phrase) => message.includes(phrase))
-}
-
-const IMAGE_PARSE_CODES = new Set(["1210"])
-
 const IMAGE_PARSE_PHRASES = [
-  "图片输入格式", // z.ai / GLM: image input format / parse error
+  "图片输入格式",
   "图片解析",
   "图片格式",
   "image parse",
@@ -787,28 +893,41 @@ const IMAGE_PARSE_PHRASES = [
   "invalid image",
   "failed to parse image",
   "decode image",
+  "1210",
 ]
 
 /**
- * Detects provider rejections caused by an unparseable/malformed image part
- * (e.g. z.ai/GLM code 1210 "图片输入格式/解析错误").
- *
- * Like content-filter errors, these stick across turns when the offending image
- * lives in the persisted conversation; the caller is expected to scrub the
- * conversation's image parts before retrying so the loop doesn't crash-loop.
+ * Determines whether an error message string suggests the request should be
+ * retried with the fallback model (rate-limit, server error, or network issue).
  */
-export function isImageParseError(err: unknown): boolean {
-  if (!(err instanceof OpenAI.APIError)) return false
-  if (err.status !== 400) return false
+export function shouldFallback(errorMessage: string): boolean {
+  // Status codes embedded in the message by the OpenAI SDK: "429 Too Many Requests"
+  const statusMatch = errorMessage.match(/\b(\d{3})\b/)
+  if (statusMatch) {
+    const status = parseInt(statusMatch[1])
+    return !status || status === 429 || status >= 500
+  }
+  return /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EPIPE|UND_ERR|fetch failed|terminated|socket hang up|other side closed/i.test(
+    errorMessage,
+  )
+}
 
-  const errorRecord = err as unknown as { code?: unknown; error?: { code?: unknown } }
-  const rootCode = typeof errorRecord.code === "string" ? errorRecord.code.toLowerCase() : ""
-  const innerCode = typeof errorRecord.error?.code === "string" ? (errorRecord.error.code as string).toLowerCase() : ""
-  if (rootCode && IMAGE_PARSE_CODES.has(rootCode)) return true
-  if (innerCode && IMAGE_PARSE_CODES.has(innerCode)) return true
+/** Detects prompt-length-exceeded errors from the error message string. */
+export function isPromptTooLargeError(errorMessage: string): boolean {
+  const lower = errorMessage.toLowerCase()
+  return PROMPT_TOO_LARGE_PHRASES.some((phrase) => lower.includes(phrase))
+}
 
-  const message = (err.message || "").toLowerCase()
-  return IMAGE_PARSE_PHRASES.some((phrase) => message.includes(phrase.toLowerCase()))
+/** Detects provider content-safety rejections from the error message string. */
+export function isContentFilterError(errorMessage: string): boolean {
+  const lower = errorMessage.toLowerCase()
+  return CONTENT_FILTER_PHRASES.some((phrase) => lower.includes(phrase))
+}
+
+/** Detects image-parse/format errors from the error message string. */
+export function isImageParseError(errorMessage: string): boolean {
+  const lower = errorMessage.toLowerCase()
+  return IMAGE_PARSE_PHRASES.some((phrase) => lower.includes(phrase.toLowerCase()))
 }
 
 const SCRUBBED_IMAGE_PLACEHOLDER = "[the system has rejected this :( its not your fault]"
@@ -846,137 +965,14 @@ export function scrubImagesFromConversation(msgs: Message[]): number {
   return scrubbed
 }
 
-/**
- * Produces a concise, log-friendly error summary.
- *
- * @param err - Any thrown error-like value.
- * @returns A compact human-readable error string.
- */
+/** Produces a concise, log-friendly error summary. */
 export function errorSummary(err: unknown): string {
-  if (err instanceof OpenAI.APIError) return `${err.status} ${err.message}`
   if (err instanceof Error) return err.message
   return String(err)
 }
 
-const API_ERROR_DETAIL_MAX_CHARS = 4000
-
-function truncateForLog(value: string): string {
-  if (value.length <= API_ERROR_DETAIL_MAX_CHARS) return value
-  return `${value.slice(0, API_ERROR_DETAIL_MAX_CHARS)}... [truncated ${value.length - API_ERROR_DETAIL_MAX_CHARS} chars]`
-}
-
-function stringifyForLog(value: unknown): string {
-  if (typeof value === "string") return truncateForLog(value)
-  try {
-    return truncateForLog(JSON.stringify(value))
-  } catch {
-    return truncateForLog(String(value))
-  }
-}
-
-function apiErrorRawMetadata(error: unknown): unknown {
-  if (!error || typeof error !== "object") return undefined
-  const metadata = (error as { metadata?: unknown }).metadata
-  if (!metadata || typeof metadata !== "object") return undefined
-  return (metadata as { raw?: unknown }).raw
-}
-
-/**
- * Produces detailed API error lines for provider-specific diagnostics.
- *
- * Some OpenAI-compatible providers wrap the real upstream failure in
- * `error.metadata.raw`; include it explicitly so the root cause appears in logs.
- */
-export function apiErrorDetails(err: unknown): string[] {
-  if (!(err instanceof OpenAI.APIError)) return []
-
-  const details = [
-    `status=${err.status ?? "unknown"}`,
-    `message=${err.message}`,
-  ]
-  if (err.code) details.push(`code=${err.code}`)
-  if (err.type) details.push(`type=${err.type}`)
-  if (err.param) details.push(`param=${err.param}`)
-  if (err.requestID) details.push(`request_id=${err.requestID}`)
-
-  const lines = [`[api] error details: ${details.join(" ")}`]
-
-  if (err.error !== undefined) {
-    lines.push(`[api] error body: ${stringifyForLog(err.error)}`)
-  }
-
-  const raw = apiErrorRawMetadata(err.error)
-  if (raw !== undefined) {
-    lines.push(`[api] provider raw: ${stringifyForLog(raw)}`)
-  }
-
-  return lines
-}
-
-function parseRetryAfterHeaderMs(value: string): number | null {
-  const asNumber = Number(value)
-  if (Number.isFinite(asNumber) && asNumber >= 0) return asNumber * 1000
-
-  const asDate = Date.parse(value)
-  if (Number.isFinite(asDate)) {
-    const delta = asDate - Date.now()
-    if (delta > 0) return delta
-  }
-
-  return null
-}
-
-function parseResetTimestampMs(message: string): number | null {
-  const resetAtMatch = message.match(/reset at\s+(\d{4}-\d{2}-\d{2})[ t](\d{2}:\d{2}:\d{2})/i)
-  if (!resetAtMatch) return null
-
-  const dateParts = resetAtMatch[1].split("-").map((part) => Number(part))
-  const timeParts = resetAtMatch[2].split(":").map((part) => Number(part))
-  if (dateParts.length !== 3 || timeParts.length !== 3) return null
-
-  const [year, month, day] = dateParts
-  const [hour, minute, second] = timeParts
-  const values = [year, month, day, hour, minute, second]
-  if (values.some((value) => !Number.isFinite(value))) return null
-
-  // z.ai returns "reset at YYYY-MM-DD HH:mm:ss" in China Standard Time (UTC+8).
-  // Convert that wall-clock value to UTC before calculating backoff.
-  const chinaOffsetHours = 8
-  const resetAtUtc = Date.UTC(year, month - 1, day, hour - chinaOffsetHours, minute, second)
-  if (!Number.isFinite(resetAtUtc)) return null
-
-  const delta = resetAtUtc - Date.now()
-  if (delta <= 0) return null
-  return delta
-}
-
-/**
- * Computes retry backoff milliseconds from API error metadata/content.
- *
- * @param err - Error returned by the API layer.
- * @returns Delay in milliseconds before retrying primary model calls.
- */
-export function retryDelayMs(err: unknown): number {
-  const defaultMs = 60_000
-  if (!(err instanceof OpenAI.APIError)) return defaultMs
-
-  const retryAfterHeader = err.headers?.["retry-after"]
-  if (retryAfterHeader) {
-    const parsed = parseRetryAfterHeaderMs(retryAfterHeader)
-    if (parsed != null) return parsed
-  }
-
-  const resetAt = parseResetTimestampMs(err.message)
-  if (resetAt != null) return resetAt
-
-  const forHours = err.message.match(/for\s+(\d+)\s*hour/i)
-  if (forHours) {
-    const hours = Number(forHours[1])
-    if (Number.isFinite(hours) && hours > 0) return hours * 60 * 60 * 1000
-  }
-
-  return defaultMs
-}
+/** Default retry backoff — 60 s. Pi-ai surfaces errors as messages so we can't read Retry-After headers here. */
+export const retryDelayMs = 60_000
 
 /**
  * Coerces arbitrary values into a supported image detail level.
@@ -1487,8 +1483,8 @@ export async function loadAgentSummaryContext(): Promise<string | null> {
  */
 export async function summarizeConversationViaLLM(
   messages: Message[],
-  summaryClient: OpenAI,
-  summaryModel: string,
+  model: Model<"openai-completions">,
+  apiKey: string | undefined,
   options: {
     recentMinKeep?: number
     recentMaxKeep?: number
@@ -1543,18 +1539,19 @@ export async function summarizeConversationViaLLM(
       ? `\n\nPrior recollection (already compacted earlier — fold its content into the new summary, do not discard it):\n${priorSummaryText}`
       : "")
 
-  const summaryPrompt: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: "system", content: systemContent },
-    { role: "user", content: transcript },
-  ]
+  const summaryContext: Context = {
+    systemPrompt: systemContent,
+    messages: [{ role: "user", content: transcript, timestamp: Date.now() }],
+  }
 
   try {
-    const resp = await summaryClient.chat.completions.create({
-      model: summaryModel,
-      messages: summaryPrompt,
-    })
-    const summary = resp.choices[0]?.message?.content
-    const summaryText = typeof summary === "string" ? summary.trim() : ""
+    const opts = apiKey ? { apiKey } : {}
+    const resp = await complete(model, summaryContext, opts as unknown as import("@earendil-works/pi-ai").ProviderStreamOptions)
+    const summaryText = resp.content
+      .filter((p): p is TextContent => p.type === "text")
+      .map((p) => p.text)
+      .join("")
+      .trim()
     if (!summaryText) return null
     if (summaryText.length < 80 || looksLikeMetaReply(summaryText)) {
       console.warn(`[context] llm summarization rejected (looks like meta-reply): ${summaryText.slice(0, 200)}`)

@@ -1,50 +1,54 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { __completionTest } from "./loop-completion"
+import { fromAssistantMessage } from "./util"
+import type { AssistantMessage } from "@earendil-works/pi-ai"
 
-test("consumeCompletionStream preserves reasoning_content on assistant messages", async () => {
-  async function* stream() {
-    yield {
-      id: "chunk_1",
-      object: "chat.completion.chunk",
-      created: 0,
-      model: "deepseek-v4-flash",
-      choices: [
-        {
-          index: 0,
-          delta: {
-            reasoning_content: "thinking...",
-          },
-          finish_reason: null,
-        },
-      ],
-    }
-    yield {
-      id: "chunk_2",
-      object: "chat.completion.chunk",
-      created: 0,
-      model: "deepseek-v4-flash",
-      choices: [
-        {
-          index: 0,
-          delta: {
-            content: "hello",
-          },
-          finish_reason: "stop",
-        },
-      ],
-      usage: {
-        prompt_tokens: 10,
-        completion_tokens: 5,
-        total_tokens: 15,
+test("fromAssistantMessage converts text + thinking + tool calls to OAI format", () => {
+  const piMsg: AssistantMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "thinking..." },
+      { type: "text", text: "hello" },
+      {
+        type: "toolCall",
+        id: "call_1",
+        name: "shell",
+        arguments: { command: "ls" },
       },
-    }
+    ],
+    api: "openai-completions",
+    provider: "openai",
+    model: "test-model",
+    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "toolUse",
+    timestamp: Date.now(),
   }
 
-  const result = await __completionTest.consumeCompletionStream(stream() as never)
-  const message = result.message as typeof result.message & { reasoning_content?: string }
+  const result = fromAssistantMessage(piMsg)
 
-  assert.equal(message.content, "hello")
-  assert.equal(message.reasoning_content, "thinking...")
-  assert.equal(result.bufferedThinking, "thinking...")
+  assert.equal(result.role, "assistant")
+  assert.equal(result.content, "hello")
+  assert.equal(result.reasoning_content, "thinking...")
+  assert.equal(result.tool_calls?.length, 1)
+  const tc0 = result.tool_calls?.[0] as { function: { name: string; arguments: string } } | undefined
+  assert.equal(tc0?.function.name, "shell")
+  assert.equal(tc0?.function.arguments, JSON.stringify({ command: "ls" }))
+})
+
+test("fromAssistantMessage handles empty content gracefully", () => {
+  const piMsg: AssistantMessage = {
+    role: "assistant",
+    content: [],
+    api: "openai-completions",
+    provider: "openai",
+    model: "test-model",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  }
+
+  const result = fromAssistantMessage(piMsg)
+  assert.equal(result.content, null)
+  assert.equal(result.tool_calls, undefined)
+  assert.equal(result.reasoning_content, undefined)
 })

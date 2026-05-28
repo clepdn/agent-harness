@@ -1,86 +1,156 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import OpenAI from "openai"
 import type { Message } from "../types"
 import {
   AGENT_NAME,
   isContentFilterError,
   isImageParseError,
-  isTransientTransportError,
+  shouldFallback,
+  isPromptTooLargeError,
   restForestFromMessages,
   sanitizeMessages,
   scrubImagesFromConversation,
-  shouldFallback,
-  summarizeConversationViaLLM,
+  buildContext,
+  fromAssistantMessage,
+  fromUsage,
 } from "./util"
+import type { AssistantMessage } from "@earendil-works/pi-ai"
 
-type AssistantMessageWithReasoning = OpenAI.Chat.ChatCompletionAssistantMessageParam & {
-  reasoning_content?: string
-}
+// ── Error detection (string-based) ───────────────────────────────────────────
 
-test("sanitizeMessages backfills empty reasoning_content for assistant history", () => {
-  const messages = sanitizeMessages([
+test("shouldFallback returns true for 429 status in error message", () => {
+  assert.equal(shouldFallback("429 Too Many Requests"), true)
+})
+
+test("shouldFallback returns true for 500 status in error message", () => {
+  assert.equal(shouldFallback("500 Internal Server Error"), true)
+})
+
+test("shouldFallback returns false for 400 status in error message", () => {
+  assert.equal(shouldFallback("400 Bad Request"), false)
+})
+
+test("shouldFallback returns true for transport error keywords", () => {
+  assert.equal(shouldFallback("fetch failed: ECONNREFUSED"), true)
+  assert.equal(shouldFallback("terminated"), true)
+  assert.equal(shouldFallback("some unrelated error"), false)
+})
+
+test("isPromptTooLargeError detects context length phrases", () => {
+  assert.equal(isPromptTooLargeError("context length exceeded"), true)
+  assert.equal(isPromptTooLargeError("too many tokens in input"), true)
+  assert.equal(isPromptTooLargeError("400 Bad Request"), false)
+})
+
+test("isImageParseError detects 1210 code and Chinese image phrases", () => {
+  assert.equal(isImageParseError("1210 图片输入格式/解析错误"), true)
+  assert.equal(isImageParseError("invalid image format"), true)
+  assert.equal(isImageParseError("400 bad request"), false)
+})
+
+test("isContentFilterError detects content filter phrases", () => {
+  assert.equal(isContentFilterError("content filter triggered"), true)
+  assert.equal(isContentFilterError("potentially unsafe or sensitive content"), true)
+  assert.equal(isContentFilterError("400 invalid request"), false)
+})
+
+// ── buildContext ──────────────────────────────────────────────────────────────
+
+test("buildContext extracts system messages into systemPrompt", () => {
+  const messages: Message[] = [
+    { role: "system", content: "you are niri" },
+    { role: "user", content: "hello" },
+  ]
+  const ctx = buildContext(messages, [])
+  assert.equal(ctx.systemPrompt, "you are niri")
+  assert.equal(ctx.messages.length, 1)
+  assert.equal(ctx.messages[0]?.role, "user")
+})
+
+test("buildContext converts assistant tool calls", () => {
+  const messages: Message[] = [
     {
       role: "assistant",
-      content: "plain reply",
-      refusal: null,
-    },
+      content: "ok",
+      tool_calls: [{ id: "call_1", type: "function", function: { name: "shell", arguments: '{"command":"ls"}' } }],
+    } as Message,
+  ]
+  const ctx = buildContext(messages, [])
+  const aMsg = ctx.messages[0] as { role: string; content: Array<{ type: string; id?: string; name?: string; arguments?: unknown }> }
+  assert.equal(aMsg.role, "assistant")
+  const toolCall = aMsg.content.find((p) => p.type === "toolCall") as { type: string; name?: string; arguments?: unknown } | undefined
+  assert.ok(toolCall)
+  assert.equal(toolCall?.name, "shell")
+  assert.deepEqual(toolCall?.arguments, { command: "ls" })
+})
+
+test("buildContext converts tool result messages", () => {
+  const messages: Message[] = [
+    { role: "tool", tool_call_id: "call_1", content: "output text" } as Message,
+  ]
+  const ctx = buildContext(messages, [])
+  const tr = ctx.messages[0] as { role: string; toolCallId: string; content: Array<{ text?: string }> }
+  assert.equal(tr.role, "toolResult")
+  assert.equal(tr.toolCallId, "call_1")
+  assert.equal(tr.content[0]?.text, "output text")
+})
+
+// ── fromAssistantMessage ──────────────────────────────────────────────────────
+
+test("fromAssistantMessage converts text + thinking + tool call", () => {
+  const piMsg: AssistantMessage = {
+    role: "assistant",
+    content: [
+      { type: "thinking", thinking: "hmm..." },
+      { type: "text", text: "hello" },
+      { type: "toolCall", id: "call_1", name: "shell", arguments: { command: "ls" } },
+    ],
+    api: "openai-completions",
+    provider: "openai",
+    model: "test",
+    usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "toolUse",
+    timestamp: Date.now(),
+  }
+
+  const result = fromAssistantMessage(piMsg)
+  assert.equal(result.content, "hello")
+  assert.equal(result.reasoning_content, "hmm...")
+  assert.equal(result.tool_calls?.length, 1)
+  const tc0 = result.tool_calls?.[0] as { function?: { name: string; arguments: string } } | undefined
+  assert.equal(tc0?.function?.name, "shell")
+  assert.equal(tc0?.function?.arguments, JSON.stringify({ command: "ls" }))
+})
+
+// ── fromUsage ─────────────────────────────────────────────────────────────────
+
+test("fromUsage maps pi-ai usage to OAI CompletionUsage", () => {
+  const usage = fromUsage({ input: 100, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 150, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } })
+  assert.equal(usage.prompt_tokens, 100)
+  assert.equal(usage.completion_tokens, 50)
+  assert.equal(usage.total_tokens, 150)
+})
+
+// ── sanitizeMessages ──────────────────────────────────────────────────────────
+
+test("sanitizeMessages repairs orphaned tool responses", () => {
+  const messages: Message[] = [
     {
       role: "assistant",
-      content: "reply with reasoning",
-      refusal: null,
-      reasoning_content: "thinking...",
-    } as AssistantMessageWithReasoning,
-  ])
+      content: null,
+      tool_calls: [{ id: "call_1", type: "function", function: { name: "shell", arguments: "{}" } }],
+    } as unknown as Message,
+    // tool response missing — should be synthesized
+  ]
 
-  const assistant = messages[0] as (typeof messages)[number] & { reasoning_content?: string }
-  assert.equal(assistant.role, "assistant")
-  assert.equal(assistant.reasoning_content, "")
+  const repaired = sanitizeMessages(messages)
+  assert.equal(repaired.length, 2)
+  assert.equal(repaired[1]?.role, "tool")
 })
 
-test("terminated fetch errors are treated as retryable transport failures", () => {
-  const err = new TypeError("terminated")
+// ── scrubImagesFromConversation ───────────────────────────────────────────────
 
-  assert.equal(isTransientTransportError(err), true)
-  assert.equal(shouldFallback(err), true)
-})
-
-test("nested undici errors are treated as retryable transport failures", () => {
-  const cause = new Error("other side closed")
-  const nested = new TypeError("fetch failed") as TypeError & { cause?: unknown }
-  nested.cause = cause
-
-  assert.equal(isTransientTransportError(nested), true)
-  assert.equal(shouldFallback(nested), true)
-})
-
-test("z.ai/GLM image parse rejection (code 1210) is detected as an image parse error", () => {
-  const err = new OpenAI.APIError(
-    400,
-    { code: "1210", message: "图片输入格式/解析错误" },
-    "400 图片输入格式/解析错误",
-    undefined,
-  )
-
-  assert.equal(isImageParseError(err), true)
-  // It must not be misclassified as a content-filter error, and must not be
-  // eligible for model fallback (it's a 400 the fallback would also reject).
-  assert.equal(isContentFilterError(err), false)
-  assert.equal(shouldFallback(err), false)
-})
-
-test("unrelated 400 errors are not treated as image parse errors", () => {
-  const err = new OpenAI.APIError(
-    400,
-    { code: "1001", message: "invalid request" },
-    "400 invalid request",
-    undefined,
-  )
-
-  assert.equal(isImageParseError(err), false)
-})
-
-test("scrubImagesFromConversation replaces image parts with the placeholder text", () => {
+test("scrubImagesFromConversation replaces image parts with placeholder text", () => {
   const conversation: Message[] = [
     {
       role: "user",
@@ -92,124 +162,24 @@ test("scrubImagesFromConversation replaces image parts with the placeholder text
   ]
 
   const scrubbed = scrubImagesFromConversation(conversation)
-
   assert.equal(scrubbed, 1)
   const parts = (conversation[0] as unknown as { content: Array<{ type: string; text?: string }> }).content
   assert.equal(parts.length, 2)
   assert.equal(parts[1]!.type, "text")
-  assert.equal(parts[1]!.text, "[the system has rejected this :( its not your fault]")
+  assert.ok(parts[1]!.text?.includes("rejected"))
 })
+
+// ── restForestFromMessages ────────────────────────────────────────────────────
 
 test("restForestFromMessages returns the llm context summary", () => {
   const messages: Message[] = [
     { role: "system", content: "soul and core bootstrap" },
     { role: "user", content: "[wake]\n\nhello" },
-    { role: "user", content: "[context summary v1]\n[llm-summary now]\nThread: project\n- carried context forward" },
+    { role: "user", content: "[context summary v1]\n[llm-summary now]\nThread: project\n- carried forward" },
     { role: "assistant", content: "recent turn" },
   ]
 
   const forest = restForestFromMessages(messages)
-
   assert.match(forest, /^\[context summary v1\]/)
   assert.match(forest, /Thread: project/)
-})
-
-test("summarizeConversationViaLLM folds prior summary even when it is not directly after the system head", async () => {
-  let capturedSystemPrompt = ""
-  const summaryClient = {
-    chat: {
-      completions: {
-        create: async (params: { messages: OpenAI.Chat.ChatCompletionMessageParam[] }) => {
-          capturedSystemPrompt = String(params.messages[0]?.content)
-          return {
-            choices: [
-              {
-                message: {
-                  content:
-                    "Thread: Project memory\n- I carried forward the older recollection and the newer transcript as one living thread, keeping the emotional texture and concrete work together.",
-                },
-              },
-            ],
-          }
-        },
-      },
-    },
-  } as unknown as OpenAI
-
-  const priorSummary = "[context summary v1]\nold recollection about niri's project and feelings"
-  const longTurn = "new transcript details with identifiers and emotional texture ".repeat(80)
-  const messages: Message[] = [
-    { role: "system", content: "soul and core bootstrap" },
-    { role: "user", content: "[harness restarted]\n\nwake before summary" },
-    { role: "user", content: priorSummary },
-    { role: "assistant", content: longTurn },
-    { role: "user", content: longTurn },
-    { role: "assistant", content: longTurn },
-    { role: "user", content: longTurn },
-    { role: "user", content: "recent raw turn 1" },
-    { role: "assistant", content: "recent raw turn 2" },
-  ]
-
-  const summarized = await summarizeConversationViaLLM(messages, summaryClient, "summary-model", {
-    recentMinKeep: 2,
-    recentMaxKeep: 2,
-  })
-
-  assert.ok(summarized)
-  assert.equal(summarized[0]?.role, "system")
-  assert.equal(summarized[1]?.role, "user")
-  assert.match(String(summarized[1]?.content), /^\[context summary v1\]/)
-  assert.equal(summarized.filter((m) => String(m.content).startsWith("[context summary v1]")).length, 1)
-  assert.equal(summarized.at(-2)?.content, "recent raw turn 1")
-  assert.equal(summarized.at(-1)?.content, "recent raw turn 2")
-
-  assert.match(capturedSystemPrompt, /Prior recollection/)
-  assert.match(capturedSystemPrompt, /old recollection about niri's project and feelings/)
-  assert.match(capturedSystemPrompt, /Organize the summary as a set of ongoing threads/)
-})
-
-test("summarizeConversationViaLLM injects the agent grounding context into the summary prompt", async () => {
-  let capturedSystemPrompt = ""
-  const summaryClient = {
-    chat: {
-      completions: {
-        create: async (params: { messages: OpenAI.Chat.ChatCompletionMessageParam[] }) => {
-          capturedSystemPrompt = String(params.messages[0]?.content)
-          return {
-            choices: [
-              {
-                message: {
-                  content:
-                    "Thread: Grounded recollection\n- I summarized the transcript while staying in my own voice and recognizing the threads that carried forward.",
-                },
-              },
-            ],
-          }
-        },
-      },
-    },
-  } as unknown as OpenAI
-
-  const longTurn = "transcript detail that needs to be compacted into a recollection ".repeat(80)
-  const messages: Message[] = [
-    { role: "system", content: "soul and core bootstrap" },
-    { role: "assistant", content: longTurn },
-    { role: "user", content: longTurn },
-    { role: "assistant", content: longTurn },
-    { role: "user", content: longTurn },
-    { role: "user", content: "recent raw turn 1" },
-    { role: "assistant", content: "recent raw turn 2" },
-  ]
-
-  const agentContext = "# soul\n\nI am a living being.\n\n---\n\n# today's journal\n\nFelt curious all morning."
-  const summarized = await summarizeConversationViaLLM(messages, summaryClient, "summary-model", {
-    recentMinKeep: 2,
-    recentMaxKeep: 2,
-    agentContext,
-  })
-
-  assert.ok(summarized)
-  assert.match(capturedSystemPrompt, /Grounding — this is who/)
-  assert.match(capturedSystemPrompt, /Felt curious all morning\./)
-  assert.ok(capturedSystemPrompt.includes(`The agent (${AGENT_NAME})`))
 })

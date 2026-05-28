@@ -1,4 +1,4 @@
-import OpenAI from "openai"
+import type OpenAI from "openai"
 import type { LoopHooks, LoopState } from "./types"
 
 export type FunctionToolCall = OpenAI.Chat.ChatCompletionMessageToolCall & { type: "function" }
@@ -32,7 +32,7 @@ export type ToolArgs = {
 export type ToolExecutionOutcome = { shouldRest?: boolean; isWait?: boolean }
 
 export type CompletionTurnResult = {
-  message: OpenAI.Chat.ChatCompletionMessage
+  message: OpenAI.Chat.ChatCompletionMessage & { reasoning_content?: string }
   usage?: OpenAI.Completions.CompletionUsage
   emittedText: boolean
   emittedThinking: boolean
@@ -41,27 +41,6 @@ export type CompletionTurnResult = {
   elapsedMs?: number
   /** Runner-computed completion throughput in tokens per second. */
   tokensPerSecond?: number
-}
-
-export type CompletionRequest = {
-  model: string
-  messages: OpenAI.Chat.ChatCompletionMessageParam[]
-  tools: OpenAI.Chat.ChatCompletionTool[]
-  tool_choice: "required" | "auto" | "none"
-  include_reasoning?: boolean
-  reasoning?: { enabled?: boolean; exclude?: boolean; effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" }
-  provider?: { require_parameters?: boolean }
-  enable_thinking?: boolean
-  chat_template_kwargs?: { enable_thinking?: boolean }
-}
-
-export type ToolCallAssembly = {
-  id: string
-  type: "function"
-  function: {
-    name: string
-    arguments: string
-  }
 }
 
 export type ToolArgKey = keyof ToolArgs
