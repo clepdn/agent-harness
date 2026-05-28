@@ -1,5 +1,4 @@
 import * as pty from "node-pty"
-import { randomBytes } from "crypto"
 import { spawn } from "child_process"
 import {
   CONTAINER_NAME,
@@ -54,145 +53,83 @@ export function cleanOutput(str: string): string {
   return applyTerminalControls(withoutEscapes)
 }
 
-function removeInternalPtyControlEchoes(str: string): string {
-  return str
-    .split("\n")
-    .filter((line) => line !== "stty -echo 2>/dev/null")
-    .join("\n")
+// ── Fixed working directory ───────────────────────────────────────────────────
+
+/**
+ * Every command starts from this directory — no persistence between calls.
+ */
+const ROOT_CWD = USE_DOCKER_SHELL ? `/home/${CONTAINER_USER}` : process.cwd()
+
+/**
+ * Opens a shell session.  No-op — every command runs in its own
+ * fresh PTY so there is no persistent session to open.
+ */
+export async function openBash(): Promise<void> {
+  // No-op: sessions are not reused.
 }
 
-let bash: pty.IPty | null = null
+/**
+ * Closes the shell session.  No-op — there is no persistent session.
+ */
+export function closeBash(): void {
+  // No-op: sessions are not reused.
+}
 
-function spawnBash(): { proc: pty.IPty; backend: string } {
-  const env = {
+/**
+ * Returns the fixed root working directory.  `cd` in one command does not
+ * affect the starting directory of the next — there is no state.
+ */
+export async function currentWorkingDirectory(_timeoutMs?: number): Promise<string> {
+  return ROOT_CWD
+}
+
+// ── PTY helpers ───────────────────────────────────────────────────────────────
+
+function ptyEnv(): Record<string, string> {
+  return {
     ...(process.env as Record<string, string>),
-    // Commands run in a PTY, so Git otherwise assumes an interactive terminal
-    // and may launch a pager for `log`, `show`, `diff`, etc. The pager blocks
-    // the sentinel that marks command completion, causing tool-level timeouts.
     GIT_PAGER: "cat",
     GIT_TERMINAL_PROMPT: "0",
     PAGER: "cat",
     LESS: "FRX",
   }
-  const options = {
-    name: "xterm-256color",
-    cols: 220, // wide enough to avoid line-wrapping sentinels
-    rows: 50,
-    env,
-  }
+}
 
-  if (USE_DOCKER_SHELL) {
-    // docker exec -it allocates a PTY inside the container so bash runs
-    // interactively with job control. Combined with node-pty on the host
-    // this gives us a proper interactive shell where Ctrl+C interrupts
-    // the running command rather than killing bash itself.
-    return {
-      proc: pty.spawn("docker", ["exec", "-it", "-u", CONTAINER_USER, CONTAINER_NAME, "bash"], options),
-      backend: `docker:${CONTAINER_NAME}`,
-    }
-  }
-
+function ptyOptions() {
   return {
-    proc: pty.spawn("bash", ["--noprofile", "--norc", "-i"], {
-      ...options,
-      cwd: process.cwd(),
-    }),
-    backend: "local",
+    name: "xterm-256color",
+    cols: 220,
+    rows: 50,
+    env: ptyEnv(),
   }
 }
 
 /**
- * Opens and initializes the persistent PTY bash session inside the configured container.
- *
- * This performs one-time terminal setup (disable echo, normalize prompt, source bashrc)
- * so subsequent `runRaw` calls can rely on sentinel-based output capture.
- *
- * @returns A promise that resolves when the shell is ready for commands.
- * @throws If the container shell cannot be started or initialized.
+ * Spawn a one-shot PTY that runs the given bash command and exits.
  */
-export async function openBash(): Promise<void> {
-  if (bash) return
-
-  const { proc, backend } = spawnBash()
-
-  proc.onExit(({ exitCode }) => {
-    console.log(`[bash:${backend}] exited with code ${exitCode}`)
-    if (bash === proc) bash = null
-  })
-
-  bash = proc
-
-  // Liveness check: if bash exits within 500ms the container is probably down.
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, 500)
-    const d = proc.onExit(() => {
-      clearTimeout(timer)
-      d.dispose()
-      const detail = USE_DOCKER_SHELL ? ` — is the '${CONTAINER_NAME}' container running?` : ""
-      reject(new Error(`bash exited immediately${detail}`))
-    })
-  })
-
-  // We CANNOT use sentinel-based detection yet because bash echo is still on:
-  // if sending `echo SENTINEL` bash will echo the line back before running it
-  // so the sentinel appears in the output immediately as a false positive.
-  //
-  // Strategy: disable echo via a PROMPT-BASED signal.
-  //   1. Send `stty -echo` without any unique token on that input line.
-  //   2. Send `export PS1='<token>' PS2=''` and wait for the prompt token.
-  //   3. Now echo is off meaning sentinel detection is safe for all subsequent calls.
-  //   4. Use runRaw to source .bashrc and clear the prompt.
-
-  const initToken = `NIRI_INIT_${randomBytes(4).toString("hex")}_`
-
-  await new Promise<void>((resolve, reject) => {
-    let buf = ""
-    let dataDisposable: { dispose(): void } | null = null
-    const timer = setTimeout(() => {
-      dataDisposable?.dispose()
-      reject(new Error("bash init timed out"))
-    }, 10_000)
-    dataDisposable = proc.onData((chunk: string) => {
-      buf += chunk
-      const clean = cleanOutput(buf)
-      if (clean.includes(initToken)) {
-        clearTimeout(timer)
-        dataDisposable?.dispose()
-        resolve()
-      }
-    })
-    // Keep the token off the stty line. Otherwise the terminal echo can make
-    // readiness detection fire before echo has actually been disabled.
-    proc.write("stty -echo\n")
-    setTimeout(() => {
-      proc.write(`export PS1='${initToken}' PS2=''\n`)
-    }, 25)
-  })
-
-  // Echo is now off. Clear the token prompt, source .bashrc, done.
-  await runRaw("export PS1='' PS2=''")
-  await runRaw("source ~/.bashrc 2>/dev/null || true; export PS1='' PS2=''")
-  console.log(`[bash:${backend}] session ready`)
-}
-
-/**
- * Closes the active PTY shell session if one exists.
- */
-export function closeBash(): void {
-  if (bash) {
-    bash.kill()
-    bash = null
+function spawnOneShot(command: string): pty.IPty {
+  if (USE_DOCKER_SHELL) {
+    return pty.spawn(
+      "docker",
+      ["exec", "-i", "-u", CONTAINER_USER, "-w", ROOT_CWD, CONTAINER_NAME, "bash", "-c", command],
+      ptyOptions(),
+    )
   }
+
+  return pty.spawn("bash", ["-c", command], {
+    ...ptyOptions(),
+    cwd: ROOT_CWD,
+  })
 }
 
-export async function currentWorkingDirectory(timeoutMs?: number): Promise<string> {
-  return (await runRaw("pwd -P", { timeoutMs, redirectStdinToDevNull: true })).trim()
-}
+// ── Public API ────────────────────────────────────────────────────────────────
 
 /**
- * Runs a command in the persistent PTY session and returns cleaned output.
+ * Runs a command in a fresh PTY session and returns cleaned output.
  *
- * This is the low-level primitive used by higher-level container tools.
+ * Each invocation spawns a new `bash -c` PTY — sessions are never reused.
+ * Every command starts from the fixed root directory regardless of any
+ * previous `cd` calls.
  *
  * @param command - Raw shell command to execute.
  * @param options - Timeout and stdin-redirection behavior.
@@ -201,103 +138,47 @@ export async function currentWorkingDirectory(timeoutMs?: number): Promise<strin
  */
 export async function runRaw(command: string, options: RunRawOptions = {}): Promise<string> {
   const timeoutMs = normalizeTimeoutMs(options.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS)
-  // Default: keep stdin attached to the PTY for more natural command behavior.
-  // Higher-level helpers (e.g. runCommand) can opt into /dev/null for commands
-  // that are likely to block waiting for stdin.
   const redirectStdinToDevNull = options.redirectStdinToDevNull ?? false
 
-  // Reconnect lazily if the session was lost.
-  if (!bash) {
-    console.log("[bash] no session — attempting to reconnect...")
-    await openBash()
-  }
-
-  // Capture a stable local reference — the module-level `bash` may be nulled
-  // by the exit handler while we're waiting for output.
-  const session = bash!
-
-  // Two sentinels: start + end. Any PTY output buffered from a previous
-  // command arrives before the start sentinel and is discarded, preventing it
-  // from being prepended to this command's output.
-  const startSentinel = `__NIRI_START_${randomBytes(4).toString("hex")}__`
-  const endSentinel = `__NIRI_DONE_${randomBytes(4).toString("hex")}__`
-  let raw = ""
-  let settled = false
+  // Wrap command in a { } group. When requested, redirect stdin from
+  // /dev/null so accidental interactive reads do not hang forever.
+  // The closing } is on its own line so heredocs inside the command still
+  // get their correct delimiter line.
+  const fullCommand = redirectStdinToDevNull ? `{ ${command}\n} < /dev/null` : `{ ${command}\n}`
 
   return new Promise((resolve, reject) => {
-    const dataDisposable = session.onData((chunk: string) => {
+    let raw = ""
+    let settled = false
+
+    const proc = spawnOneShot(fullCommand)
+
+    proc.onData((chunk: string) => {
       raw += chunk
-      const cleaned = cleanOutput(raw)
-      if (cleaned.includes(startSentinel) && cleaned.includes(endSentinel)) {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        dataDisposable.dispose()
-        const start = cleaned.indexOf(startSentinel) + startSentinel.length
-        const end = cleaned.indexOf(endSentinel)
-        // Drop the single newline that echo adds after the start sentinel,
-        // then trim trailing whitespace from the command output.
-        resolve(removeInternalPtyControlEchoes(cleaned.slice(start, end).replace(/^\n/, "")).trimEnd())
-      }
     })
 
-    // Wrap command in a { } group. When requested, redirect stdin from
-    // /dev/null so accidental interactive reads do not hang forever.
-    // The closing } is on its own line so heredocs inside the command still
-    // get their correct delimiter line.
-    //
-    // Re-assert `stty -echo` before both sentinels. Full-screen tools,
-    // prompts, and some spinners can leave terminal echo enabled; if that
-    // happens, bash echoes the sentinel input lines before executing them and
-    // completion detection fires on our own command text.
-    const groupedCommand = redirectStdinToDevNull ? `{ ${command}\n} < /dev/null` : `{ ${command}\n}`
-
-    session.write(
-      [
-        "stty -echo 2>/dev/null",
-        `echo ${startSentinel}`,
-        groupedCommand,
-        "stty -echo 2>/dev/null",
-        `echo ${endSentinel}`,
-        "",
-      ].join("\n"),
-    )
-
-    let timer = setTimeout(() => {
+    proc.onExit(() => {
       if (settled) return
-      // Phase 1: Interrupt the hanging command with Ctrl+C.
-      // Some CLI tools (e.g. wispctl with TUI spinners) hang after completing
-      // their work — they need a nudge to exit and let bash process the
-      // remaining command group (including the end sentinel echo).
-      session.write("\x03\n")
+      settled = true
+      clearTimeout(timer)
+      resolve(cleanOutput(raw).trimEnd())
+    })
 
-      // Phase 2: Grace period — give bash a moment to process the interrupt
-      // and write the end sentinel. If sentinel appears during this window,
-      // the data listener fires `resolve()` and clears this grace timer
-      // (since it captures the `timer` variable binding, now reassigned).
-      timer = setTimeout(() => {
-        if (settled) return
-        settled = true
-        dataDisposable.dispose()
-        // After a timeout + grace period we no longer know whether bash
-        // consumed Ctrl+C, returned to a prompt, or still has a foreground
-        // process attached. Reuse would interleave the next command with a
-        // potentially poisoned PTY, so force a fresh session next time.
-        session.kill()
-        if (bash === session) bash = null
-        reject(new Error(`Command timed out after ${timeoutMs}ms: ${command}`))
-      }, 3_000)
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      proc.kill()
+      reject(new Error(`Command timed out after ${timeoutMs}ms: ${command}`))
     }, timeoutMs)
   })
 }
 
 /**
- * Runs a command as a one-off child process instead of through the persistent
- * PTY shell. This follows Codex's shell-tool execution model for commands
- * that should not inherit interactive stdin, notably sudo.
+ * Runs a command as a one-off child process instead of through a PTY.
+ * Used for commands that should not inherit interactive stdin, notably sudo.
  */
 export async function runOneOff(command: string, cwd: string, options: RunRawOptions = {}): Promise<string> {
   const timeoutMs = normalizeTimeoutMs(options.timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS)
+
   const args = USE_DOCKER_SHELL
     ? ["exec", "-i", "-u", CONTAINER_USER, "-w", cwd, CONTAINER_NAME, "bash", "-c", command]
     : ["-c", command]

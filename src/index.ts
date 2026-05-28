@@ -1,4 +1,4 @@
-import { openBash, closeBash } from "./container/index"
+
 import { createServer } from "./server"
 import { initDb } from "./db"
 import { initMetricsDb } from "./metrics"
@@ -14,8 +14,6 @@ async function main() {
   await ensureSoulFilePlacement()
   initDb()
   initMetricsDb()
-  await openBash()
-
   let discordGateway: Awaited<ReturnType<typeof startDiscordGateway>> = null
   try {
     discordGateway = await startDiscordGateway()
@@ -43,7 +41,6 @@ async function main() {
 
     if (discordGateway) await discordGateway.stop()
     await server.close()
-    closeBash()
     process.exit(0)
   }
 

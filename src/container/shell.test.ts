@@ -3,12 +3,8 @@ import assert from "node:assert/strict"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
-import { cleanOutput, closeBash } from "./shell"
+import { cleanOutput } from "./shell"
 import { runCommand } from "./tools"
-
-test.afterEach(() => {
-  closeBash()
-})
 
 test("shell disables git pager and terminal prompts", async () => {
   const output = await runCommand(
@@ -20,15 +16,24 @@ test("shell disables git pager and terminal prompts", async () => {
   assert.equal(output, "cat\n0\ncat\nFRX")
 })
 
-test("shell recovers when a command leaves terminal echo enabled", async () => {
+test("shell handles stty echo without corrupting output", async () => {
+  // With one-shot sessions, `stty echo` in one command cannot affect the next.
   assert.equal(await runCommand("stty echo; echo first", 0, 5_000), "first")
-  assert.equal(await runCommand("echo second", 0, 5_000), "second")
 })
 
 test("cleanOutput collapses terminal redraw controls", () => {
   assert.equal(cleanOutput("one\rspinner\rdone\n"), "done\n")
   assert.equal(cleanOutput("abc\b \bd\n"), "abd\n")
   assert.equal(cleanOutput("\x1b[?25lhidden\x1b[?25h\n"), "hidden\n")
+})
+
+test("cd in one command does not affect the next", async () => {
+  const { currentWorkingDirectory } = await import("./shell")
+  const root = (await currentWorkingDirectory()).trim()
+  await runCommand("cd /tmp && pwd", 0, 5_000)
+  // The next command still starts from root.
+  const out = await runCommand("pwd", 0, 5_000)
+  assert.equal(out.trim(), root)
 })
 
 test("sudo commands run as one-off commands with stdin closed", async () => {
