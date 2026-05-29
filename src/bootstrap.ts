@@ -1,7 +1,7 @@
 import fs from "fs/promises"
 import path from "path"
 import type { UserMessage, Message } from "./types"
-import { CONTAINER_USER, HOME_DIR, USE_DOCKER_SHELL } from "./container/config"
+import { CONTAINER_USER, HOME_DIR, SSH_TARGET, USE_DOCKER_SHELL, USE_SSH } from "./container/config"
 import { imageRootForModelInput } from "./container/index"
 
 const SOUL_FILE = path.join(HOME_DIR, "soul.md")
@@ -47,11 +47,17 @@ export async function ensureSoulFilePlacement(): Promise<void> {
 }
 
 function buildEnvironmentSection(): string {
-  const shellHome = USE_DOCKER_SHELL ? `/home/${CONTAINER_USER}` : (process.env.HOME ?? process.cwd())
+  const shellHome = USE_DOCKER_SHELL
+    ? `/home/${CONTAINER_USER}`
+    : USE_SSH
+    ? "~"
+    : (process.env.HOME ?? process.cwd())
   const memoryHome = USE_DOCKER_SHELL ? shellHome : HOME_DIR
   const imageRoot = imageRootForModelInput()
   const shellDescription = USE_DOCKER_SHELL
     ? `You are running inside a Linux system. Your home is ${shellHome}.`
+    : USE_SSH
+    ? `You are connected to ${SSH_TARGET} via SSH. Your remote home is ${shellHome}.`
     : `You are using a local host shell. Your OS home is ${shellHome}; the shell starts in ${process.cwd()}.`
   const sudoDescription = USE_DOCKER_SHELL
     ? "You have full internet access and passwordless sudo."

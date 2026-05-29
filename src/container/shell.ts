@@ -4,7 +4,10 @@ import {
   CONTAINER_NAME,
   CONTAINER_USER,
   DEFAULT_COMMAND_TIMEOUT_MS,
+  SSH_IDENTITY,
+  SSH_TARGET,
   USE_DOCKER_SHELL,
+  USE_SSH,
   normalizeTimeoutMs,
 } from "./config"
 import type { RunRawOptions } from "./types"
@@ -58,7 +61,11 @@ export function cleanOutput(str: string): string {
 /**
  * Every command starts from this directory — no persistence between calls.
  */
-const ROOT_CWD = USE_DOCKER_SHELL ? `/home/${CONTAINER_USER}` : process.cwd()
+const ROOT_CWD = USE_DOCKER_SHELL ? `/home/${CONTAINER_USER}` : USE_SSH ? "~" : process.cwd()
+
+function sshArgs(): string[] {
+  return SSH_IDENTITY ? ["-i", SSH_IDENTITY] : []
+}
 
 /**
  * Opens a shell session.  No-op — every command runs in its own
@@ -114,6 +121,10 @@ function spawnOneShot(command: string): pty.IPty {
       ["exec", "-i", "-u", CONTAINER_USER, "-w", ROOT_CWD, CONTAINER_NAME, "bash", "-c", command],
       ptyOptions(),
     )
+  }
+
+  if (USE_SSH) {
+    return pty.spawn("ssh", [...sshArgs(), SSH_TARGET, "bash", "-c", command], ptyOptions())
   }
 
   return pty.spawn("bash", ["-c", command], {
@@ -181,14 +192,16 @@ export async function runOneOff(command: string, cwd: string, options: RunRawOpt
 
   const args = USE_DOCKER_SHELL
     ? ["exec", "-i", "-u", CONTAINER_USER, "-w", cwd, CONTAINER_NAME, "bash", "-c", command]
+    : USE_SSH
+    ? [...sshArgs(), SSH_TARGET, "bash", "-c", `cd ${JSON.stringify(cwd)} && { ${command}\n}`]
     : ["-c", command]
-  const program = USE_DOCKER_SHELL ? "docker" : "bash"
+  const program = USE_DOCKER_SHELL ? "docker" : USE_SSH ? "ssh" : "bash"
 
   return new Promise((resolve, reject) => {
     let raw = ""
     let settled = false
     const child = spawn(program, args, {
-      cwd: USE_DOCKER_SHELL ? undefined : cwd,
+      cwd: (USE_DOCKER_SHELL || USE_SSH) ? undefined : cwd,
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     })

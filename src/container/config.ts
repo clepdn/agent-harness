@@ -2,6 +2,8 @@ import path from "path"
 
 const configuredContainerName = (process.env.NIRI_CONTAINER ?? "").trim()
 const configuredContainerUser = (process.env.NIRI_USER ?? "").trim()
+const configuredSshTarget = (process.env.SSH_TARGET ?? "").trim()
+const configuredSshIdentity = (process.env.SSH_IDENTITY ?? "").trim()
 
 /** Whether command execution should go through Docker instead of a local shell. */
 export const USE_DOCKER_SHELL = configuredContainerName.length > 0 && configuredContainerUser.length > 0
@@ -9,10 +11,24 @@ export const USE_DOCKER_SHELL = configuredContainerName.length > 0 && configured
 export const CONTAINER_NAME = configuredContainerName || "niri"
 /** Linux user inside the container used for command execution. */
 export const CONTAINER_USER = configuredContainerUser || "niri"
+
+/** Whether command execution should go through SSH instead of a local shell. */
+export const USE_SSH = configuredSshTarget.length > 0
+/** SSH target in user@host form. */
+export const SSH_TARGET = configuredSshTarget
+/** Path to the SSH identity file, or null if not configured. */
+export const SSH_IDENTITY: string | null = configuredSshIdentity || null
+
+if (USE_DOCKER_SHELL && USE_SSH) {
+  throw new Error(
+    "SSH_TARGET and NIRI_CONTAINER/NIRI_USER cannot both be set — choose one execution backend.",
+  )
+}
+
 /** Repository fallback home used when a local OS home is unavailable. */
 export const REPO_HOME_DIR = path.resolve(process.cwd(), "home")
 /** Harness home for soul, memories, and local databases. */
-export const HOME_DIR = USE_DOCKER_SHELL ? REPO_HOME_DIR : path.resolve(process.env.HOME ?? REPO_HOME_DIR)
+export const HOME_DIR = (USE_DOCKER_SHELL || USE_SSH) ? REPO_HOME_DIR : path.resolve(process.env.HOME ?? REPO_HOME_DIR)
 
 /** Absolute image root allowed for `image_tool` operations. */
 export const IMAGE_ROOT = (() => {
