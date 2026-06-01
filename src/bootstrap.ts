@@ -1,6 +1,8 @@
 import fs from "fs/promises"
 import path from "path"
 import type { UserMessage, Message } from "./types"
+
+export type BootstrapResult = { systemPrompt: string; messages: Message[] }
 import { CONTAINER_USER, HOME_DIR, SSH_TARGET, USE_DOCKER_SHELL, USE_SSH } from "./container/config"
 import { imageRootForModelInput } from "./container/index"
 
@@ -202,13 +204,13 @@ There is a soul.example.md in your home directory you can use as a starting poin
 ${buildEnvironmentSection()}`
 }
 
-export async function buildBootstrap(event: UserMessage, priorRest?: PriorRestContext | null): Promise<Message[]> {
+export async function buildBootstrap(event: UserMessage, priorRest?: PriorRestContext | null): Promise<BootstrapResult> {
   await ensureSoulFilePlacement()
 
   const soul = await readFile(SOUL_FILE)
   const coreMemories = await readFile(path.join(HOME_DIR, "memories", "core.md"))
 
-  const system = soul
+  const systemPrompt = soul
     ? `\
 ${soul}
 
@@ -224,10 +226,10 @@ ${buildEnvironmentSection()}`.trim()
 
   const wakeMessage = formatUserMessage(event, priorRest)
 
-  return [
-    { role: "system", content: system },
-    { role: "user", content: wakeMessage },
-  ]
+  return {
+    systemPrompt,
+    messages: [{ role: "user", content: wakeMessage, timestamp: Date.now() }],
+  }
 }
 
 function formatUserMessage(event: UserMessage, priorRest?: PriorRestContext | null): string {

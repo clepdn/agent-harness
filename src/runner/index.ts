@@ -13,6 +13,7 @@ let shutdownResolve: (() => void) | null = null
 const state: RunnerStateInternal = {
   contextSize: 0,
   running: false,
+  systemPrompt: "",
   conversation: [],
   pendingInputs: [],
   tokenCount: 0,
@@ -187,6 +188,7 @@ function injectIncomingEvent(convId: number, event: UserMessage): void {
   state.conversation.push({
     role: "user",
     content: incomingMessage,
+    timestamp: Date.now(),
   })
   logMessage(convId, "user", incomingMessage)
   emitUserEvent(event)
@@ -220,13 +222,17 @@ export async function wake(event: UserMessage): Promise<void> {
 
   const saved = await loadSession()
   if (saved) {
-    state.conversation = saved
+    state.systemPrompt = saved.systemPrompt
+    state.conversation = saved.messages
     state.conversation.push({
       role: "user",
       content: `[harness restarted — ${event.source} @ ${event.triggeredAt}]\n\n${event.content}`,
+      timestamp: Date.now(),
     })
   } else {
-    state.conversation = await buildBootstrap(event, await consumeRestSnapshot())
+    const bootstrap = await buildBootstrap(event, await consumeRestSnapshot())
+    state.systemPrompt = bootstrap.systemPrompt
+    state.conversation = bootstrap.messages
   }
 
   const convId = startConversation(event.source, event.triggeredAt)
@@ -246,7 +252,7 @@ export async function wake(event: UserMessage): Promise<void> {
       injectIncomingEvent,
       flushDeferredEvents,
       clearSession,
-      saveSession: async () => saveSession(state.conversation),
+      saveSession: async () => saveSession(state.systemPrompt, state.conversation),
     })
     if (exit === "rest") setRunnerPresence("resting")
   } catch (err) {
@@ -254,13 +260,14 @@ export async function wake(event: UserMessage): Promise<void> {
     console.error(`[runner] loop aborted: ${message}`)
     if (err instanceof Error && err.stack) console.error(err.stack)
     try {
-      await saveSession(state.conversation)
+      await saveSession(state.systemPrompt, state.conversation)
     } catch (saveErr) {
       console.warn(`[runner] failed to persist session after abort: ${saveErr instanceof Error ? saveErr.message : String(saveErr)}`)
     }
   } finally {
     endConversation(convId, state.tokenCount)
     state.running = false
+    state.systemPrompt = ""
     state.conversation = []
     state.toolInFlight = false
     state.memoryRecallCooldowns = {}

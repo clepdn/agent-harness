@@ -1,7 +1,7 @@
 import fs from "fs/promises"
 import path from "path"
 import { complete } from "@earendil-works/pi-ai"
-import type { Context, Model, TextContent } from "@earendil-works/pi-ai"
+import type { AssistantMessage, Context, Model, TextContent, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai"
 import { HOME_DIR } from "../container/config"
 import type { Message } from "../types"
 import {
@@ -12,7 +12,6 @@ import {
   FALLBACK_N_CTX,
 } from "./config"
 import {
-  asRecord,
   CONTEXT_SUMMARY_HEADER,
   errorSummary,
   estimatePromptTokens,
@@ -45,29 +44,10 @@ function truncateSummaryText(value: string, maxChars: number): string {
 }
 
 function assistantToolCalls(message: Message): { name: string; args: Record<string, unknown> }[] {
-  const record = asRecord(message)
-  const calls = record?.tool_calls
-  if (!Array.isArray(calls)) return []
-
-  const out: { name: string; args: Record<string, unknown> }[] = []
-  for (const call of calls) {
-    const callRecord = asRecord(call)
-    const fn = asRecord(callRecord?.function)
-    const name = typeof fn?.name === "string" ? fn.name.trim() : ""
-    if (!name) continue
-    let args: Record<string, unknown> = {}
-    const rawArgs = fn?.arguments
-    if (typeof rawArgs === "string" && rawArgs.trim()) {
-      try {
-        const parsed = JSON.parse(rawArgs)
-        if (parsed && typeof parsed === "object") args = parsed as Record<string, unknown>
-      } catch { /* ignore malformed arg json */ }
-    } else if (rawArgs && typeof rawArgs === "object") {
-      args = rawArgs as Record<string, unknown>
-    }
-    out.push({ name, args })
-  }
-  return out
+  if (message.role !== "assistant") return []
+  return (message as AssistantMessage).content
+    .filter((p): p is ToolCall => p.type === "toolCall")
+    .map((tc) => ({ name: tc.name, args: tc.arguments as Record<string, unknown> }))
 }
 
 function describeToolCall(call: { name: string; args: Record<string, unknown> }): string | null {
@@ -158,6 +138,12 @@ function summarizeMessageLine(message: Message): string | null {
   const role = messageRole(message)
   const rawContent = messageStringContent(message)
 
+  if (role === "toolResult") {
+    const compact = compactToolResult(rawContent)
+    if (compact === null) return null
+    return `- tool: ${truncateSummaryText(compact, SUMMARY_LINE_MAX_CHARS)}`
+  }
+
   if (role === "assistant") {
     const calls = assistantToolCalls(message)
     const callDescs = calls.map(describeToolCall).filter((d): d is string => d !== null)
@@ -169,12 +155,6 @@ function summarizeMessageLine(message: Message): string | null {
     return `- assistant: ${truncateSummaryText(parts.join(" "), SUMMARY_LINE_MAX_CHARS)}`
   }
 
-  if (role === "tool") {
-    const compact = compactToolResult(rawContent)
-    if (compact === null) return null
-    return `- tool: ${truncateSummaryText(compact, SUMMARY_LINE_MAX_CHARS)}`
-  }
-
   if (role === "user") {
     const stripped = rawContent.startsWith("[incoming — discord]")
       ? compactDiscordBatch(rawContent)
@@ -182,20 +162,12 @@ function summarizeMessageLine(message: Message): string | null {
     return `- user: ${truncateSummaryText(stripped || SUMMARY_LINE_DEFAULT_EMPTY, SUMMARY_LINE_MAX_CHARS)}`
   }
 
-  if (role === "system") {
-    const text = truncateSummaryText(normalizeSummaryText(rawContent), SUMMARY_LINE_MAX_CHARS) || SUMMARY_LINE_DEFAULT_EMPTY
-    return `- system: ${text}`
-  }
-
   const text = truncateSummaryText(normalizeSummaryText(rawContent), SUMMARY_LINE_MAX_CHARS) || SUMMARY_LINE_DEFAULT_EMPTY
   return `- ${role || "message"}: ${text}`
 }
 
-function countLeadingSystemMessages(messages: Message[]): number {
-  let count = 0
-  while (count < messages.length && messageRole(messages[count]!) === "system") count++
-  return count
-}
+// No system messages in pi conversation — all system content is in systemPrompt.
+// The conversation starts directly with user/assistant/toolResult messages.
 
 /**
  * Picks the largest tail of recent messages that fits the given char budget,
@@ -321,19 +293,17 @@ export async function summarizeConversationViaLLM(
   const tailCharBudget = Math.max(8_000, options.tailCharBudget ?? 60_000)
   const maxTranscriptChars = Math.max(2_000, options.maxTranscriptChars ?? 40_000)
 
-  const leadingSystems = countLeadingSystemMessages(messages)
-  const middleStart = leadingSystems
-  const tailStart = chooseTailStart(messages, middleStart, recentMinKeep, recentMaxKeep, tailCharBudget)
-  if (tailStart <= middleStart) return null
+  const tailStart = chooseTailStart(messages, 0, recentMinKeep, recentMaxKeep, tailCharBudget)
+  if (tailStart <= 0) return null
 
   let priorSummaryText: string | null = null
   const priorSummaryIndex = findSummaryMessageIndex(messages)
-  if (priorSummaryIndex >= middleStart && priorSummaryIndex < tailStart) {
+  if (priorSummaryIndex >= 0 && priorSummaryIndex < tailStart) {
     priorSummaryText = messageStringContent(messages[priorSummaryIndex]!)
   }
 
-  const head = messages.slice(0, leadingSystems)
-  const middle = messages.slice(middleStart, tailStart).filter((_, index) => middleStart + index !== priorSummaryIndex)
+  const head: Message[] = []
+  const middle = messages.slice(0, tailStart).filter((_, index) => index !== priorSummaryIndex)
   const tail = messages.slice(tailStart)
 
   const transcriptLines = middle.map((m) => summarizeMessageLine(m)).filter((line): line is string => line !== null)
@@ -384,7 +354,7 @@ export async function summarizeConversationViaLLM(
       `${CONTEXT_SUMMARY_HEADER}\n${CONTEXT_SUMMARY_NOTE}\n${CONTEXT_SUMMARY_SEGMENTS_MARKER}\n` +
       `[llm-summary ${new Date().toISOString()}]\n${summaryText}`
 
-    return [...head, { role: "user", content: summaryContent } as Message, ...tail]
+    return [...head, { role: "user", content: summaryContent, timestamp: Date.now() } as Message, ...tail]
   } catch (err) {
     console.warn(`[context] llm summarization failed: ${errorSummary(err)}`)
     return null

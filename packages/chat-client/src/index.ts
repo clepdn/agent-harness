@@ -5,12 +5,16 @@ export type StreamEvent =
   | { type: "tool"; name: string; args: Record<string, unknown>; result: string }
   | {
       type: "usage"
-      /** Prompt tokens reported by the runner provider. */
+      /** Non-cached input tokens. */
       promptTokens?: number
-      /** Completion tokens reported by the runner provider. */
+      /** Completion tokens. */
       completionTokens?: number
-      /** Total tokens reported by the runner provider. */
+      /** Total tokens. */
       totalTokens?: number
+      /** Tokens read from prompt cache. */
+      cacheReadTokens?: number
+      /** Tokens written to prompt cache. */
+      cacheWriteTokens?: number
       /** Runner-measured stream duration in milliseconds. */
       elapsedMs?: number
       /** Runner-computed completion throughput in tokens per second. */
@@ -48,6 +52,8 @@ type UnknownEvent = {
   promptTokens?: unknown
   completionTokens?: unknown
   totalTokens?: unknown
+  cacheReadTokens?: unknown
+  cacheWriteTokens?: unknown
   elapsedMs?: unknown
   tokensPerSecond?: unknown
 }
@@ -100,6 +106,8 @@ const toEvent = (raw: unknown): StreamEvent | null => {
       promptTokens: typeof event.promptTokens === "number" ? event.promptTokens : undefined,
       completionTokens: typeof event.completionTokens === "number" ? event.completionTokens : undefined,
       totalTokens: typeof event.totalTokens === "number" ? event.totalTokens : undefined,
+      cacheReadTokens: typeof event.cacheReadTokens === "number" ? event.cacheReadTokens : undefined,
+      cacheWriteTokens: typeof event.cacheWriteTokens === "number" ? event.cacheWriteTokens : undefined,
       elapsedMs: typeof event.elapsedMs === "number" ? event.elapsedMs : undefined,
       tokensPerSecond: typeof event.tokensPerSecond === "number" ? event.tokensPerSecond : undefined,
     }

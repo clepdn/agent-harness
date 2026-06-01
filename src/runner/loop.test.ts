@@ -6,6 +6,7 @@ import type { LoopState } from "./types"
 
 function makeState(): LoopState {
   return {
+    systemPrompt: "",
     conversation: [],
     pendingInputs: [],
     tokenCount: 0,
@@ -20,13 +21,16 @@ function makeState(): LoopState {
 test("applyDiscordSendNudge appends a follow-up user nudge for unsent Discord replies", () => {
   const state = makeState()
   const turnMessages: Message[] = [
-    {
-      role: "user",
-      content: "[user/discord] [discord/dm] hey are you there",
-    },
+    { role: "user", content: "[user/discord] [discord/dm] hey are you there", timestamp: Date.now() },
     {
       role: "assistant",
-      content: "yeah, i'm here",
+      content: [{ type: "text", text: "yeah, i'm here" }],
+      api: "openai-completions",
+      provider: "openai",
+      model: "test",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop" as const,
+      timestamp: Date.now(),
     },
   ]
 
@@ -40,13 +44,16 @@ test("applyDiscordSendNudge appends a follow-up user nudge for unsent Discord re
 test("applyDiscordSendNudge fires for [discord batch] envelopes (space, not slash)", () => {
   const state = makeState()
   const turnMessages: Message[] = [
-    {
-      role: "user",
-      content: "[user/discord] [discord batch] 2026-05-01T03:10:50.162Z -> 2026-05-01T03:11:22.198Z\n@meowskullz: hi\n@meowskullz: u there",
-    },
+    { role: "user", content: "[user/discord] [discord batch] 2026-05-01T03:10:50.162Z -> 2026-05-01T03:11:22.198Z\n@meowskullz: hi\n@meowskullz: u there", timestamp: Date.now() },
     {
       role: "assistant",
-      content: "yeah hi",
+      content: [{ type: "text", text: "yeah hi" }],
+      api: "openai-completions",
+      provider: "openai",
+      model: "test",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop" as const,
+      timestamp: Date.now(),
     },
   ]
 
@@ -60,13 +67,16 @@ test("applyDiscordSendNudge fires for [discord batch] envelopes (space, not slas
 test("applyDiscordSendNudge fires after a harness restart when the discord event is pre-turn context", () => {
   const state = makeState()
   state.conversation.push(
-    {
-      role: "user",
-      content: "[harness restarted — discord @ 2026-05-01T04:30:00.000Z]\n\n[discord/dm] hi starfish",
-    },
+    { role: "user", content: "[harness restarted — discord @ 2026-05-01T04:30:00.000Z]\n\n[discord/dm] hi starfish", timestamp: Date.now() },
     {
       role: "assistant",
-      content: "i keep getting bounced by harness restarts sorry ^^ still here though! what's up?",
+      content: [{ type: "text", text: "i keep getting bounced by harness restarts sorry ^^ still here though! what's up?" }],
+      api: "openai-completions",
+      provider: "openai",
+      model: "test",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "stop" as const,
+      timestamp: Date.now(),
     },
   )
 
@@ -82,24 +92,21 @@ test("applyDiscordSendNudge fires after a harness restart when the discord event
 
 test("applyDiscordSendNudge does not fire when discord_send was already called", () => {
   const state = makeState()
+  const t = Date.now()
   const turnMessages: Message[] = [
-    {
-      role: "user",
-      content: "[user/discord] [discord/channel] can you reply",
-    },
+    { role: "user", content: "[user/discord] [discord/channel] can you reply", timestamp: t },
     {
       role: "assistant",
-      content: "sending now",
-      tool_calls: [
-        {
-          id: "call_123",
-          type: "function",
-          function: {
-            name: "discord_send",
-            arguments: "{\"channel_id\":\"1\",\"content\":\"sending now\"}",
-          },
-        },
+      content: [
+        { type: "text", text: "sending now" },
+        { type: "toolCall", id: "call_123", name: "discord_send", arguments: { channel_id: "1", content: "sending now" } },
       ],
+      api: "openai-completions",
+      provider: "openai",
+      model: "test",
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      stopReason: "toolUse" as const,
+      timestamp: t,
     },
   ]
 

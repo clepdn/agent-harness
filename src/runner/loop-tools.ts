@@ -14,7 +14,7 @@ function skipRemainingToolCalls(
   calls.slice(startIndex).forEach((pendingCall) => {
     const skippedContent = `skipped: interrupted by incoming ${source} event.`
     const result = pushToolMessage(convId, state, pendingCall, skippedContent)
-    emit({ type: "tool", name: pendingCall.function.name, args: { _skipped: true }, result })
+    emit({ type: "tool", name: pendingCall.name, args: { _skipped: true }, result })
   })
 }
 
@@ -36,10 +36,6 @@ function maybeInterruptAfterTool(
 /**
  * Processes all function tool calls requested in one assistant turn.
  *
- * @param convId - Active conversation id.
- * @param state - Mutable loop state.
- * @param hooks - Loop hooks for side effects and event flow.
- * @param calls - Function tool calls to execute in order.
  * @returns `true` when a `rest` tool call ended the loop, otherwise `false`.
  */
 export async function processToolCalls(

@@ -1,5 +1,5 @@
 import { stream } from "@earendil-works/pi-ai"
-import type { AssistantMessageEvent, TextContent, ThinkingContent } from "@earendil-works/pi-ai"
+import type { AssistantMessage, AssistantMessageEvent, TextContent, ThinkingContent, Usage } from "@earendil-works/pi-ai"
 import type { OpenAICompletionsOptions } from "@earendil-works/pi-ai/openai-completions"
 import { logMessage } from "../db"
 import { buildCompletionMessages, rememberRecalledMemoryChunks } from "../memory"
@@ -19,7 +19,6 @@ import {
   SUMMARY_API_KEY,
   SUMMARY_MODEL,
   THINKING_EFFORT,
-  TOOLS,
   USE_FALLBACK,
   buildContext,
   errorSummary,
@@ -27,8 +26,6 @@ import {
   fallbackContextWindow,
   fallbackModel,
   findSummaryMessageIndex,
-  fromAssistantMessage,
-  fromUsage,
   isContentFilterError,
   isImageParseError,
   isPromptTooLargeError,
@@ -58,19 +55,22 @@ export function configuredSummaryProvider(): { model: Model<"openai-completions"
 /**
  * Appends an assistant message to state and persists it to conversation logs.
  */
-export function addAssistantMessage(
-  convId: number,
-  state: LoopState,
-  msg: ReturnType<typeof fromAssistantMessage>,
-): void {
+export function addAssistantMessage(convId: number, state: LoopState, msg: AssistantMessage): void {
   state.conversation.push(msg)
-  logMessage(convId, msg.role, msg.content ?? "", msg.tool_calls ?? undefined)
+  const textContent = msg.content
+    .filter((p): p is TextContent => p.type === "text")
+    .map((p) => p.text)
+    .join("")
+  const toolCalls = msg.content
+    .filter((p) => p.type === "toolCall")
+    .map((p) => p)
+  logMessage(convId, msg.role, textContent, toolCalls.length > 0 ? toolCalls : undefined)
 }
 
 function recordPromptResponse(
   model: string,
   toolChoice: string | undefined,
-  messages: readonly unknown[],
+  state: LoopState,
   result: CompletionTurnResult,
   promptMetricId: number | null,
 ): void {
@@ -79,7 +79,7 @@ function recordPromptResponse(
     promptMetricId: promptMetricId ?? undefined,
     model,
     toolChoice,
-    messages: messages as import("../types").Message[],
+    messages: state.conversation as import("../types").Message[],
     response: result.message,
     usage: result.usage,
   })
@@ -90,19 +90,25 @@ function recordPromptResponse(
  */
 export function applyUsage(
   state: LoopState,
-  usage: ReturnType<typeof fromUsage> | undefined,
+  usage: Usage,
   timing: Pick<CompletionTurnResult, "elapsedMs" | "tokensPerSecond"> = {},
 ): void {
-  if (!usage) return
-  state.tokenCount += usage.total_tokens
-  if (usage.prompt_tokens) state.contextSize = usage.prompt_tokens
+  state.tokenCount += usage.totalTokens
+  if (usage.input) state.contextSize = usage.input + usage.cacheRead
   const rate = typeof timing.tokensPerSecond === "number" ? ` ${timing.tokensPerSecond.toFixed(1)} tok/s` : ""
-  console.log(`[tokens] +${usage.total_tokens} total=${state.tokenCount}${rate}`)
+  console.log(
+    `[tokens] +${usage.totalTokens} total=${state.tokenCount}` +
+    (usage.cacheRead ? ` cache_read=${usage.cacheRead}` : "") +
+    (usage.cacheWrite ? ` cache_write=${usage.cacheWrite}` : "") +
+    rate,
+  )
   emit({
     type: "usage",
-    promptTokens: usage.prompt_tokens,
-    completionTokens: usage.completion_tokens,
-    totalTokens: usage.total_tokens,
+    promptTokens: usage.input,
+    completionTokens: usage.output,
+    totalTokens: usage.totalTokens,
+    cacheReadTokens: usage.cacheRead || undefined,
+    cacheWriteTokens: usage.cacheWrite || undefined,
     elapsedMs: timing.elapsedMs,
     tokensPerSecond: timing.tokensPerSecond,
   })
@@ -110,13 +116,15 @@ export function applyUsage(
 }
 
 /**
- * Emits model reasoning text when exposed by the provider (non-streamed path).
+ * Emits model reasoning/thinking when present in the assistant message.
  */
-export function emitThinking(msg: ReturnType<typeof fromAssistantMessage>): void {
-  const reasoning = (msg as { reasoning_content?: string }).reasoning_content
-  if (typeof reasoning === "string" && reasoning.trim()) {
-    emit({ type: "thinking", text: reasoning.trim() })
-  }
+export function emitThinking(msg: AssistantMessage): void {
+  const thinking = msg.content
+    .filter((c): c is ThinkingContent => c.type === "thinking")
+    .map((c) => c.thinking)
+    .join("")
+    .trim()
+  if (thinking) emit({ type: "thinking", text: thinking })
 }
 
 function sleep(ms: number): Promise<void> {
@@ -129,22 +137,17 @@ function formatRetryAt(retryAfterMs: number): string {
 }
 
 /**
- * Streams one completion from a pi-ai model, consuming events and building
- * CompletionTurnResult in the internal OAI-compatible format.
+ * Streams one completion from a pi-ai model.
  */
 async function createStreamedCompletion(
   model: Model<"openai-completions">,
   apiKey: string | undefined,
   toolChoice: "required" | "auto" | "none",
-  messages: LoopState["conversation"],
+  state: LoopState,
 ): Promise<CompletionTurnResult> {
   const startedAt = Date.now()
-  const context = buildContext(messages, TOOLS)
+  const context = buildContext(state)
 
-  // apiKey is an explicit override; if absent pi picks up the standard
-  // provider env var (OPENROUTER_API_KEY, OPENAI_API_KEY, etc.) automatically.
-  // Thinking mode is incompatible with tool_choice: required on some providers
-  // (e.g. DeepSeek), so downgrade to auto when reasoning is on.
   const resolvedToolChoice = ENABLE_THINKING && toolChoice === "required" ? "auto" : toolChoice
   const options: OpenAICompletionsOptions = {
     ...(apiKey ? { apiKey } : {}),
@@ -152,7 +155,7 @@ async function createStreamedCompletion(
     ...(ENABLE_THINKING ? { reasoningEffort: THINKING_EFFORT } : {}),
   }
 
-  const promptMetricId = recordMetric({ type: "prompt", messages: messages as import("../types").Message[] })
+  const promptMetricId = recordMetric({ type: "prompt", messages: state.conversation as import("../types").Message[] })
   const eventStream = stream(model, context, options as unknown as import("@earendil-works/pi-ai").ProviderStreamOptions)
 
   let emittedText = false
@@ -178,29 +181,27 @@ async function createStreamedCompletion(
     }
   }
 
-  const finalMessage = await (eventStream as { result(): Promise<import("@earendil-works/pi-ai").AssistantMessage> }).result()
+  const finalMessage = await (eventStream as { result(): Promise<AssistantMessage> }).result()
 
   if (finalMessage.stopReason === "error" || errorMessage) {
     throw new Error(errorMessage ?? finalMessage.errorMessage ?? "unknown API error")
   }
 
-  const oaiMessage = fromAssistantMessage(finalMessage)
-  const usage = fromUsage(finalMessage.usage)
+  const usage = finalMessage.usage
   const elapsedMs = Math.max(0, Date.now() - startedAt)
-  const tokensPerSecond =
-    usage.completion_tokens && elapsedMs > 0 ? usage.completion_tokens / (elapsedMs / 1000) : undefined
+  const tokensPerSecond = usage.output && elapsedMs > 0 ? usage.output / (elapsedMs / 1000) : undefined
 
-  recordPromptResponse(model.id, toolChoice, messages as unknown[], { message: oaiMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond }, promptMetricId)
+  recordPromptResponse(model.id, toolChoice, state, { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond }, promptMetricId)
 
-  return { message: oaiMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond }
+  return { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond }
 }
 
-async function createFallbackCompletion(messages: LoopState["conversation"]): Promise<CompletionTurnResult> {
-  return createStreamedCompletion(fallbackModel, FALLBACK_API_KEY, FALLBACK_TOOL_CHOICE, messages)
+async function createFallbackCompletion(state: LoopState): Promise<CompletionTurnResult> {
+  return createStreamedCompletion(fallbackModel, FALLBACK_API_KEY, FALLBACK_TOOL_CHOICE, state)
 }
 
-async function createPrimaryCompletion(messages: LoopState["conversation"]): Promise<CompletionTurnResult> {
-  return createStreamedCompletion(primaryModel!, PRIMARY_API_KEY, PRIMARY_TOOL_CHOICE, messages)
+async function createPrimaryCompletion(state: LoopState): Promise<CompletionTurnResult> {
+  return createStreamedCompletion(primaryModel!, PRIMARY_API_KEY, PRIMARY_TOOL_CHOICE, state)
 }
 
 function logPromptSizeDebug(state: LoopState, errMsg: string, label: string): void {
@@ -243,7 +244,11 @@ async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Pro
   state.contextSize = afterEstimate
 
   const summaryIdx = findSummaryMessageIndex(state.conversation)
-  const summary = summaryIdx >= 0 ? (state.conversation[summaryIdx]?.content as string) : undefined
+  const summary = summaryIdx >= 0 ? (state.conversation[summaryIdx]?.role === "user"
+    ? (typeof (state.conversation[summaryIdx] as { content: unknown }).content === "string"
+      ? (state.conversation[summaryIdx] as { content: string }).content
+      : undefined)
+    : undefined) : undefined
 
   console.warn(`[context] recovery: llm-summarized conversation (${beforeEstimate} -> ${afterEstimate} tokens)`)
   recordMetric({ type: "compaction", before: beforeEstimate, after: afterEstimate, method: "force-llm", summary })
@@ -255,7 +260,7 @@ async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Pro
  */
 export async function fetchCompletion(
   state: LoopState,
-  baseConversation: LoopState["conversation"] = state.conversation,
+  baseState: LoopState = state,
 ): Promise<CompletionTurnResult> {
   let promptTooLargeAttempts = 0
   let imagesScrubbed = false
@@ -275,27 +280,26 @@ export async function fetchCompletion(
   }
 
   while (true) {
-    if (baseConversation === state.conversation) {
-      state.conversation = sanitizeMessages(state.conversation)
-      baseConversation = state.conversation
-    } else {
-      baseConversation = sanitizeMessages(baseConversation)
-    }
+    state.conversation = sanitizeMessages(state.conversation)
 
-    const requestContext = state.memoryRecallPending
-      ? await buildCompletionMessages(baseConversation, state.memoryRecallCooldowns, state.memoryRecallTurn)
-      : { messages: baseConversation, recalledChunkIds: [] as number[] }
-    const requestMessages = requestContext.messages
+    const requestState = state.memoryRecallPending
+      ? await (async () => {
+          const ctx = await buildCompletionMessages(state.conversation, state.memoryRecallCooldowns, state.memoryRecallTurn)
+          return { ...state, conversation: ctx.messages, _recalledChunkIds: ctx.recalledChunkIds }
+        })()
+      : { ...state, _recalledChunkIds: [] as number[] }
+
+    const recalledChunkIds = (requestState as typeof requestState & { _recalledChunkIds: number[] })._recalledChunkIds
 
     if (USE_FALLBACK) {
-      const fallbackWindow = fallbackContextWindow(requestMessages)
+      const fallbackWindow = fallbackContextWindow(requestState.conversation)
       if (fallbackWindow.nearLimit) {
         console.warn(`[fallback] prompt estimate ${fallbackWindow.estimate} nearing fallback limit ${fallbackWindow.softLimit} (${FALLBACK_MODEL})`)
       }
 
       try {
-        const completion = await createFallbackCompletion(requestMessages)
-        state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, requestContext.recalledChunkIds, state.memoryRecallTurn)
+        const completion = await createFallbackCompletion(requestState)
+        state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
         state.memoryRecallPending = false
         return completion
       } catch (fallbackErr) {
@@ -318,8 +322,8 @@ export async function fetchCompletion(
     }
 
     try {
-      const completion = await createPrimaryCompletion(requestMessages)
-      state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, requestContext.recalledChunkIds, state.memoryRecallTurn)
+      const completion = await createPrimaryCompletion(requestState)
+      state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
       state.memoryRecallPending = false
       return completion
     } catch (primaryErr) {
@@ -339,7 +343,7 @@ export async function fetchCompletion(
         throw primaryErr
       }
 
-      const fallbackWindow = fallbackContextWindow(requestMessages)
+      const fallbackWindow = fallbackContextWindow(requestState.conversation)
       if (fallbackWindow.skip) {
         console.warn(`[api] primary down (${errMsg}) and fallback context estimate ${fallbackWindow.estimate} exceeds hard limit; retrying primary after backoff`)
         await sleep(retryDelayMs)
@@ -352,8 +356,8 @@ export async function fetchCompletion(
 
       console.warn(`[api] primary down (${errMsg}) - switching to fallback`)
       try {
-        const completion = await createFallbackCompletion(requestMessages)
-        state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, requestContext.recalledChunkIds, state.memoryRecallTurn)
+        const completion = await createFallbackCompletion(requestState)
+        state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
         state.memoryRecallPending = false
         return completion
       } catch (fallbackErr) {

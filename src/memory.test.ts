@@ -4,10 +4,11 @@ import type { Message } from "./types"
 import { __memoryTest } from "./memory/index"
 
 test("latestMemoryRecallQuery falls back past scheduled heartbeat", () => {
+  const t = Date.now()
   const conversation: Message[] = [
-    { role: "user", content: "what did we talk about when lisya was buying monero" },
-    { role: "assistant", content: "..." },
-    { role: "user", content: "Scheduled heartbeat." },
+    { role: "user", content: "what did we talk about when lisya was buying monero", timestamp: t },
+    { role: "assistant", content: [{ type: "text", text: "..." }], api: "openai-completions", provider: "openai", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: t },
+    { role: "user", content: "Scheduled heartbeat.", timestamp: t },
   ]
 
   assert.equal(
@@ -46,10 +47,11 @@ recent messages:
 pending preview:
 - (none)`
 
+  const t = Date.now()
   const conversation: Message[] = [
-    { role: "user", content: "what did we talk about when lisya was buying monero" },
-    { role: "assistant", content: "..." },
-    { role: "user", content: batch },
+    { role: "user", content: "what did we talk about when lisya was buying monero", timestamp: t },
+    { role: "assistant", content: [{ type: "text", text: "..." }], api: "openai-completions", provider: "openai", model: "test", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: t },
+    { role: "user", content: batch, timestamp: t },
   ]
 
   assert.equal(

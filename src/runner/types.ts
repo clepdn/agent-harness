@@ -1,9 +1,10 @@
-import type { Message, RunnerState, UserMessage } from "../types"
+import type { Message, UserMessage, RunnerState } from "../types"
 
 export type ImageDetail = "auto" | "low" | "high"
 
 /** Mutable state consumed by the runner loop on each turn. */
 export interface LoopState {
+  systemPrompt: string
   conversation: Message[]
   pendingInputs: UserMessage[]
   tokenCount: number

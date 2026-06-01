@@ -14,6 +14,7 @@ import {
 } from "./util"
 import { addAssistantMessage, applyUsage, configuredSummaryProvider, emitThinking, fetchCompletion } from "./loop-completion"
 import { assistantContentText, isFunctionToolCall } from "./loop-content"
+import type { AssistantMessage, TextContent, ToolCall } from "@earendil-works/pi-ai"
 import { buildTurnSignature, hasIncomingUserMessage } from "./loop-signatures"
 import { processToolCalls } from "./loop-tools"
 import type { LoopHooks, LoopState } from "./types"
@@ -50,6 +51,7 @@ async function applyLoopGuardNudge(state: LoopState, hooks: LoopHooks, reason: s
   state.conversation.push({
     role: "user",
     content: guardMessage,
+    timestamp: Date.now(),
   })
   emit({ type: "text", text: guardMessage })
   await hooks.saveSession()
@@ -77,11 +79,14 @@ async function processAssistantTurn(convId: number, state: LoopState, hooks: Loo
     }
   }
 
-  const functionCalls = (msg.tool_calls ?? []).filter(isFunctionToolCall)
-  if (!response.emittedText && msg.content) emit({ type: "text", text: msg.content })
-  if (functionCalls.length === 0) return CycleOutcome.NoTools
+  const toolCalls = msg.content.filter(isFunctionToolCall) as ToolCall[]
+  if (!response.emittedText) {
+    const text = msg.content.filter((c): c is TextContent => c.type === "text").map((c) => c.text).join("")
+    if (text) emit({ type: "text", text })
+  }
+  if (toolCalls.length === 0) return CycleOutcome.NoTools
 
-  const shouldRest = await processToolCalls(convId, state, hooks, functionCalls)
+  const shouldRest = await processToolCalls(convId, state, hooks, toolCalls)
   return shouldRest ? CycleOutcome.Rest : CycleOutcome.ToolsDone
 }
 
@@ -129,31 +134,28 @@ function applyDiscordSendNudge(
   const hasDiscordSend = turnMessages.some(
     (m) =>
       m.role === "assistant" &&
-      "tool_calls" in m &&
-      Array.isArray(m.tool_calls) &&
-      m.tool_calls.some((tc) => tc.type === "function" && tc.function.name === "discord_send"),
+      (m as AssistantMessage).content.some((c) => c.type === "toolCall" && (c as ToolCall).name === "discord_send"),
   )
   if (hasDiscordSend) return false
 
-  // Also check if a tool result from discord_send exists (edge case: tool result is separate message)
+  // Also check if a tool result from discord_send exists
   const hasDiscordSendResult = turnMessages.some(
     (m) =>
-      m.role === "tool" &&
-      typeof m.content === "string" &&
-      m.content.includes('"ok":true') &&
-      m.content.includes("discord_send"),
+      m.role === "toolResult" &&
+      m.toolName === "discord_send" &&
+      m.content.some((c) => c.type === "text" && (c as TextContent).text.includes('"ok":true')),
   )
   if (hasDiscordSendResult) return false
 
   // Find the assistant's text content in this turn
-  const assistantText = turnMessages.find((m) => m.role === "assistant" && assistantContentText(m.content).length > 0)
+  const assistantText = turnMessages.find((m) => m.role === "assistant" && assistantContentText((m as AssistantMessage).content).length > 0)
   if (!assistantText) return false
 
   // The assistant wrote something in response to a Discord message but
   // never actually sent it. Nudge.
   const nudge = `[system] you wrote a response to a Discord message but did not call discord_send. your message was not delivered. call discord_send now or explicitly decide not to reply.`
   console.warn("[runner] discord_send nudge: assistant responded to Discord input without calling discord_send")
-  state.conversation.push({ role: "user", content: nudge })
+  state.conversation.push({ role: "user", content: nudge, timestamp: Date.now() })
   return true
 }
 
@@ -165,6 +167,7 @@ function applyContextNudge(state: LoopState): void {
     state.conversation.push({
       role: "user",
       content: `[system] context at ~${Math.round(state.contextSize / 1000)}k tokens (${contextProvider}). Consider wrapping up soon to stay within the context limit.`,
+      timestamp: Date.now(),
     })
   }
 }
@@ -210,7 +213,8 @@ async function applyLLMCompaction(state: LoopState, phase: "pre-turn" | "post-tu
   state.contextSize = afterEstimate
 
   const summaryIdx = findSummaryMessageIndex(state.conversation)
-  const summary = summaryIdx >= 0 ? (state.conversation[summaryIdx]?.content as string) : undefined
+  const summaryMsg = summaryIdx >= 0 ? state.conversation[summaryIdx] : undefined
+  const summary = summaryMsg?.role === "user" && typeof summaryMsg.content === "string" ? summaryMsg.content : undefined
 
   console.log(
     `[context] ${phase}: llm-summarized conversation via ${summaryProvider.model} (${beforeCount} -> ${summarized.length} msgs, ${beforeEstimate} -> ${afterEstimate} tokens)`,

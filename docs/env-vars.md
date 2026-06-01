@@ -1,6 +1,6 @@
 # Environment Variables
 
-All configuration knobs for niri are set via environment variables. This document is the authoritative reference.
+All configuration knobs for niri are set via environment variables. 
 
 ---
 

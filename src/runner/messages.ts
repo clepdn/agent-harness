@@ -1,42 +1,41 @@
-import type OpenAI from "openai"
+import type { AssistantMessage, ImageContent, TextContent, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai"
 import type { Message } from "../types"
-import type { ImageDetail } from "./types"
-import type { ToolArgs } from "./loop-shared"
 import { TOOLS } from "./tools"
 
 // ── Shared constants ──────────────────────────────────────────────────────────
 
 export const CONTEXT_SUMMARY_HEADER = "[context summary v1]"
 
-// ── Low-level message helpers (also used by summarize.ts) ─────────────────────
-
-export function asRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" ? (value as Record<string, unknown>) : null
-}
+// ── Low-level message helpers ─────────────────────────────────────────────────
 
 export function messageRole(message: Message): string {
-  const record = asRecord(message)
-  return typeof record?.role === "string" ? record.role : ""
+  return message.role
 }
 
 export function messageStringContent(message: Message): string {
-  const record = asRecord(message)
-  const content = record?.content
-  if (typeof content === "string") return content
-  if (!Array.isArray(content)) return ""
-
-  const chunks: string[] = []
-  for (const part of content) {
-    const partRecord = asRecord(part)
-    if (!partRecord) continue
-    if (partRecord.type === "text" && typeof partRecord.text === "string") {
-      chunks.push(partRecord.text)
-      continue
-    }
-    if (partRecord.type === "image_url") chunks.push("[image]")
+  if (message.role === "user") {
+    if (typeof message.content === "string") return message.content
+    return message.content
+      .filter((p): p is TextContent => p.type === "text")
+      .map((p) => p.text)
+      .join(" ")
+      .trim()
   }
-
-  return chunks.join(" ")
+  if (message.role === "assistant") {
+    return message.content
+      .filter((p): p is TextContent => p.type === "text")
+      .map((p) => p.text)
+      .join("")
+      .trim()
+  }
+  if (message.role === "toolResult") {
+    return message.content
+      .filter((p): p is TextContent => p.type === "text")
+      .map((p) => p.text)
+      .join(" ")
+      .trim()
+  }
+  return ""
 }
 
 // ── Structural message utilities ──────────────────────────────────────────────
@@ -59,63 +58,65 @@ export function estimatePromptTokens(messages: Message[]): number {
 
 // ── sanitizeMessages ──────────────────────────────────────────────────────────
 
-/** Move mis-ordered tool responses back into place and synthesize missing ones. */
+/** Move mis-ordered tool results back into place and synthesize missing ones. */
 export function sanitizeMessages(msgs: Message[]): Message[] {
   let i = 0
   while (i < msgs.length) {
-    const msg = msgs[i]
-    if (msg.role === "assistant" && Array.isArray((msg as OpenAI.Chat.ChatCompletionMessage).tool_calls)) {
-      const toolCalls = (msg as OpenAI.Chat.ChatCompletionMessage).tool_calls!
-      const expectedIds = toolCalls.map((tc) => tc.id).filter((id): id is string => typeof id === "string" && id.trim().length > 0)
-      const needed = new Set(expectedIds)
-      let j = i + 1
-      while (j < msgs.length && msgs[j].role === "tool" && needed.has((msgs[j] as OpenAI.Chat.ChatCompletionToolMessageParam).tool_call_id)) {
-        needed.delete((msgs[j] as OpenAI.Chat.ChatCompletionToolMessageParam).tool_call_id)
-        j++
-      }
-      if (needed.size > 0) {
-        const toolResponses = new Map<string, Message>()
-        const others: Message[] = []
-        for (let k = j; k < msgs.length; k++) {
-          const m = msgs[k]
-          const id = m.role === "tool" ? (m as OpenAI.Chat.ChatCompletionToolMessageParam).tool_call_id : undefined
-          if (typeof id === "string" && needed.has(id)) {
-            toolResponses.set(id, m)
-            needed.delete(id)
-          } else {
-            others.push(m)
-          }
+    const msg = msgs[i]!
+    if (msg.role === "assistant") {
+      const toolCalls = msg.content.filter((c): c is ToolCall => c.type === "toolCall")
+      if (toolCalls.length > 0) {
+        const expectedIds = toolCalls.map((tc) => tc.id)
+        const needed = new Set(expectedIds)
+        let j = i + 1
+        while (j < msgs.length && msgs[j]!.role === "toolResult" && needed.has((msgs[j] as ToolResultMessage).toolCallId)) {
+          needed.delete((msgs[j] as ToolResultMessage).toolCallId)
+          j++
         }
+        if (needed.size > 0) {
+          const toolResponses = new Map<string, Message>()
+          const others: Message[] = []
+          for (let k = j; k < msgs.length; k++) {
+            const m = msgs[k]!
+            if (m.role === "toolResult" && needed.has(m.toolCallId)) {
+              toolResponses.set(m.toolCallId, m)
+              needed.delete(m.toolCallId)
+            } else {
+              others.push(m)
+            }
+          }
 
-        const inserted: Message[] = []
-        let synthesized = 0
-        for (const id of expectedIds) {
-          if (!toolResponses.has(id)) {
-            if (msgs.slice(i + 1, j).some((m) => m.role === "tool" && (m as OpenAI.Chat.ChatCompletionToolMessageParam).tool_call_id === id)) {
+          const inserted: Message[] = []
+          let synthesized = 0
+          for (const tc of toolCalls) {
+            if (toolResponses.has(tc.id)) {
+              inserted.push(toolResponses.get(tc.id)!)
               continue
             }
-            inserted.push({ role: "tool", tool_call_id: id, content: "error: missing tool response recovered by runner before API request." })
+            // already present in the contiguous block?
+            if (msgs.slice(i + 1, j).some((m) => m.role === "toolResult" && (m as ToolResultMessage).toolCallId === tc.id)) {
+              continue
+            }
+            inserted.push({
+              role: "toolResult",
+              toolCallId: tc.id,
+              toolName: tc.name,
+              content: [{ type: "text", text: "error: missing tool response recovered by runner before API request." }],
+              isError: true,
+              timestamp: Date.now(),
+            })
             synthesized++
-            continue
           }
-          inserted.push(toolResponses.get(id)!)
-        }
 
-        if (inserted.length > 0) {
-          msgs = [...msgs.slice(0, j), ...inserted, ...others]
-          console.log(
-            synthesized > 0
-              ? `[runner] repaired tool_calls at message ${i}; synthesized ${synthesized} missing tool response(s)`
-              : `[runner] repaired orphaned tool_calls at message ${i}`,
-          )
+          if (inserted.length > 0) {
+            msgs = [...msgs.slice(0, j), ...inserted, ...others]
+            console.log(
+              synthesized > 0
+                ? `[runner] repaired tool_calls at message ${i}; synthesized ${synthesized} missing tool response(s)`
+                : `[runner] repaired orphaned tool_calls at message ${i}`,
+            )
+          }
         }
-      }
-    }
-    // Ensure assistant messages always have content or tool_calls (providers reject null+empty)
-    if (msg.role === "assistant") {
-      const aMsg = msg as OpenAI.Chat.ChatCompletionMessage
-      if ((aMsg.content === null || aMsg.content === undefined) && (!aMsg.tool_calls || aMsg.tool_calls.length === 0)) {
-        aMsg.content = ""
       }
     }
     i++
@@ -123,7 +124,7 @@ export function sanitizeMessages(msgs: Message[]): Message[] {
   return msgs
 }
 
-// ── Error detection (string-based — pi surfaces errors as messages) ───────────
+// ── Error detection ───────────────────────────────────────────────────────────
 
 const PROMPT_TOO_LARGE_PHRASES = [
   "prompt exceeds max length", "prompt is too long", "context length", "maximum context",
@@ -144,7 +145,7 @@ const IMAGE_PARSE_PHRASES = [
 export function shouldFallback(errorMessage: string): boolean {
   const statusMatch = errorMessage.match(/\b(\d{3})\b/)
   if (statusMatch) {
-    const status = parseInt(statusMatch[1])
+    const status = parseInt(statusMatch[1]!)
     return !status || status === 429 || status >= 500
   }
   return /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EPIPE|UND_ERR|fetch failed|terminated|socket hang up|other side closed/i.test(errorMessage)
@@ -172,23 +173,36 @@ const SCRUBBED_IMAGE_PLACEHOLDER = "[the system has rejected this :( its not you
 export function scrubImagesFromConversation(msgs: Message[]): number {
   let scrubbed = 0
   for (const msg of msgs) {
-    const record = asRecord(msg)
-    if (!record) continue
-    const content = record.content
-    if (!Array.isArray(content)) continue
-    let changed = false
-    const next: unknown[] = []
-    for (const part of content) {
-      const partRecord = asRecord(part)
-      if (partRecord && partRecord.type === "image_url") {
-        next.push({ type: "text", text: SCRUBBED_IMAGE_PLACEHOLDER })
-        scrubbed++
-        changed = true
-        continue
+    if (msg.role === "user") {
+      if (typeof msg.content === "string") continue
+      const parts = msg.content
+      let changed = false
+      const next: typeof parts = []
+      for (const part of parts) {
+        if (part.type === "image") {
+          next.push({ type: "text", text: SCRUBBED_IMAGE_PLACEHOLDER })
+          scrubbed++
+          changed = true
+        } else {
+          next.push(part)
+        }
       }
-      next.push(part)
+      if (changed) (msg as { content: unknown }).content = next
+    } else if (msg.role === "toolResult") {
+      const parts = msg.content
+      let changed = false
+      const next: (TextContent | ImageContent)[] = []
+      for (const part of parts) {
+        if (part.type === "image") {
+          next.push({ type: "text", text: SCRUBBED_IMAGE_PLACEHOLDER })
+          scrubbed++
+          changed = true
+        } else {
+          next.push(part)
+        }
+      }
+      if (changed) (msg as { content: unknown }).content = next
     }
-    if (changed) record.content = next
   }
   return scrubbed
 }
@@ -200,93 +214,10 @@ export function errorSummary(err: unknown): string {
   return String(err)
 }
 
-/** Default retry backoff — 60 s. Pi surfaces errors as messages so we can't read Retry-After headers. */
+/** Default retry backoff — 60 s. */
 export const retryDelayMs = 60_000
 
-export function parseImageDetail(value: unknown): ImageDetail {
+export function parseImageDetail(value: unknown): "auto" | "low" | "high" {
   if (value === "low" || value === "high" || value === "auto") return value
   return "auto"
-}
-
-// ── parseToolArguments ────────────────────────────────────────────────────────
-
-function extractLeadingJsonObject(raw: string): string | null {
-  const start = raw.indexOf("{")
-  if (start === -1) return null
-  let depth = 0
-  let inString = false
-  let escaped = false
-  for (let i = start; i < raw.length; i++) {
-    const ch = raw[i]
-    if (inString) {
-      if (escaped) { escaped = false }
-      else if (ch === "\\") { escaped = true }
-      else if (ch === '"') { inString = false }
-      continue
-    }
-    if (ch === '"') { inString = true; continue }
-    if (ch === "{") { depth++; continue }
-    if (ch === "}") { depth--; if (depth === 0) return raw.slice(start, i + 1) }
-  }
-  return null
-}
-
-function decodeHtmlEntities(input: string): string {
-  if (!input.includes("&")) return input
-  return input.replace(/&(gt|lt|amp|quot|#39|#x27|#x2f);/gi, (entity, key: string) => {
-    switch (key.toLowerCase()) {
-      case "gt": return ">"
-      case "lt": return "<"
-      case "amp": return "&"
-      case "quot": return '"'
-      case "#39": case "#x27": return "'"
-      case "#x2f": return "/"
-      default: return entity
-    }
-  })
-}
-
-function decodeHtmlEntitiesDeep<T>(value: T): T {
-  if (typeof value === "string") return decodeHtmlEntities(value) as T
-  if (Array.isArray(value)) return value.map((item) => decodeHtmlEntitiesDeep(item)) as T
-  if (!value || typeof value !== "object") return value
-  const entries = Object.entries(value as Record<string, unknown>).map(([key, v]) => [key, decodeHtmlEntitiesDeep(v)])
-  return Object.fromEntries(entries) as T
-}
-
-export function parseToolArguments(rawArgs: unknown): { ok: true; args: ToolArgs } | { ok: false; error: string } {
-  if (typeof rawArgs !== "string") {
-    return { ok: false, error: `arguments must be a JSON string, got ${typeof rawArgs}` }
-  }
-
-  const parseObject = (input: string): ToolArgs | null => {
-    const parsed = JSON.parse(input)
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null
-    return decodeHtmlEntitiesDeep(parsed as ToolArgs)
-  }
-
-  const inputs = [rawArgs]
-  const decodedRawArgs = decodeHtmlEntities(rawArgs)
-  if (decodedRawArgs !== rawArgs) inputs.push(decodedRawArgs)
-
-  let lastError: unknown = null
-  for (const input of inputs) {
-    try {
-      const parsed = parseObject(input)
-      if (parsed) return { ok: true, args: parsed }
-      return { ok: false, error: "arguments must be a JSON object" }
-    } catch (err) {
-      lastError = err
-      const recovered = extractLeadingJsonObject(input)
-      if (!recovered) continue
-      try {
-        const parsed = parseObject(recovered)
-        if (parsed) return { ok: true, args: parsed }
-      } catch { /* fall through */ }
-    }
-  }
-
-  const message = lastError instanceof Error ? lastError.message : String(lastError)
-  const preview = rawArgs.length > 180 ? `${rawArgs.slice(0, 180)}...` : rawArgs
-  return { ok: false, error: `${message}; raw=${JSON.stringify(preview)}` }
 }

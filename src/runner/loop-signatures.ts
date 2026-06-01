@@ -1,7 +1,6 @@
-import OpenAI from "openai"
-import { assistantContentText } from "./loop-content"
-import { parseToolArguments } from "./util"
-import type { FunctionToolCall } from "./loop-shared"
+import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai"
+import type { Message } from "../types"
+import { messageStringContent } from "./messages"
 
 const MAX_TOOL_RESULT_SIGNATURE_CHARS = 600
 
@@ -20,43 +19,29 @@ function truncateForSignature(text: string, maxChars = MAX_TOOL_RESULT_SIGNATURE
   return `${text.slice(0, maxChars)}…`
 }
 
-function parseToolArgumentsForSignature(raw: string): unknown {
-  const parsed = parseToolArguments(raw)
-  if (parsed.ok) return parsed.args
-  return { _parse_error: parsed.error, raw }
-}
-
-function collectToolCallSignature(message: OpenAI.Chat.ChatCompletionMessageParam): string | null {
+function collectToolCallSignature(message: Message): string | null {
   if (message.role !== "assistant") return null
 
-  const maybeCalls = (message as OpenAI.Chat.ChatCompletionAssistantMessageParam).tool_calls
-  if (!Array.isArray(maybeCalls) || maybeCalls.length === 0) {
-    const content = assistantContentText((message as OpenAI.Chat.ChatCompletionAssistantMessageParam).content)
-    return stableSerialize({ no_tools: content || "(empty)" })
+  const toolCalls = message.content.filter((c): c is ToolCall => c.type === "toolCall")
+  if (toolCalls.length === 0) {
+    const text = message.content
+      .filter((c): c is TextContent => c.type === "text")
+      .map((c) => c.text)
+      .join("")
+    return stableSerialize({ no_tools: text || "(empty)" })
   }
 
-  const functionCalls = maybeCalls
-    .filter((call): call is FunctionToolCall => call.type === "function")
-    .map((call) => ({
-      name: call.function.name,
-      args: parseToolArgumentsForSignature(call.function.arguments),
-    }))
-
-  if (functionCalls.length === 0) {
-    const content = assistantContentText((message as OpenAI.Chat.ChatCompletionAssistantMessageParam).content)
-    return stableSerialize({ no_function_tools: content || "(empty)" })
-  }
-
-  return stableSerialize(functionCalls)
+  const calls = toolCalls.map((tc) => ({ name: tc.name, args: tc.arguments }))
+  return stableSerialize(calls)
 }
 
-function collectToolResultSignature(messages: OpenAI.Chat.ChatCompletionMessageParam[]): string[] {
+function collectToolResultSignature(messages: Message[]): string[] {
   return messages
-    .filter((message): message is OpenAI.Chat.ChatCompletionToolMessageParam => message.role === "tool")
-    .map((toolMessage) => {
-      const content = assistantContentText(toolMessage.content)
+    .filter((m): m is ToolResultMessage => m.role === "toolResult")
+    .map((m) => {
+      const content = messageStringContent(m)
       return stableSerialize({
-        tool_call_id: toolMessage.tool_call_id,
+        tool_call_id: m.toolCallId,
         content: truncateForSignature(content),
       })
     })
@@ -64,21 +49,15 @@ function collectToolResultSignature(messages: OpenAI.Chat.ChatCompletionMessageP
 
 /**
  * Checks whether a turn slice contains an injected incoming user event.
- *
- * @param messages - Turn-local conversation messages.
- * @returns `true` when any user-role message is present.
  */
-export function hasIncomingUserMessage(messages: OpenAI.Chat.ChatCompletionMessageParam[]): boolean {
+export function hasIncomingUserMessage(messages: Message[]): boolean {
   return messages.some((message) => message.role === "user")
 }
 
 /**
  * Builds a stable signature for one assistant turn (calls + tool results).
- *
- * @param turnMessages - Messages generated during a single loop turn.
- * @returns Stable signature string, or `null` when no assistant message exists.
  */
-export function buildTurnSignature(turnMessages: OpenAI.Chat.ChatCompletionMessageParam[]): string | null {
+export function buildTurnSignature(turnMessages: Message[]): string | null {
   const assistantMessage = turnMessages.find((message) => message.role === "assistant")
   if (!assistantMessage) return null
 

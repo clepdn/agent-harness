@@ -1,7 +1,7 @@
 import Database from "better-sqlite3"
 import fs from "fs"
 import path from "path"
-import type OpenAI from "openai"
+import type { AssistantMessage, Usage } from "@earendil-works/pi-ai"
 import { HOME_DIR } from "./container/config"
 import { getDb } from "./db"
 import type { Message } from "./types"
@@ -22,8 +22,8 @@ export interface PromptResponseMetric extends BaseMetricEvent {
   model: string
   toolChoice?: string
   messages: Message[]
-  response: OpenAI.Chat.ChatCompletionMessage
-  usage?: OpenAI.Completions.CompletionUsage
+  response: AssistantMessage
+  usage?: Usage
 }
 
 export interface MemoryMetric extends BaseMetricEvent {
@@ -42,7 +42,7 @@ export interface CompactionMetric extends BaseMetricEvent {
 
 export interface UsageMetric extends BaseMetricEvent {
   type: "usage"
-  usage: OpenAI.Completions.CompletionUsage
+  usage: Usage
 }
 
 export type MetricEvent = PromptMetric | PromptResponseMetric | MemoryMetric | CompactionMetric | UsageMetric
@@ -60,7 +60,7 @@ export type MetricListItem =
       lastUserMessage?: string
       responsePreview?: string
       toolCallCount?: number
-      usage?: OpenAI.Completions.CompletionUsage
+      usage?: Usage
     })
   | (BaseMetricListItem & {
       type: "summarization"
@@ -83,7 +83,7 @@ export type MetricListItem =
     })
   | (BaseMetricListItem & {
       type: "usage"
-      usage?: OpenAI.Completions.CompletionUsage
+      usage?: Usage
     })
 
 export interface BaseMetricListItem extends BaseMetricEvent {
@@ -342,7 +342,7 @@ function parseMetricRow(row: MetricRow): MetricListItem | null {
   }
 
   if (row.type === "prompt_response") {
-    const response = payload.response as OpenAI.Chat.ChatCompletionMessage | undefined
+    const response = payload.response as AssistantMessage | undefined
     return {
       ...base,
       type: "response",
@@ -351,9 +351,12 @@ function parseMetricRow(row: MetricRow): MetricListItem | null {
       toolChoice: typeof payload.toolChoice === "string" ? payload.toolChoice : undefined,
       messageCount: Array.isArray(payload.messages) ? payload.messages.length : undefined,
       lastUserMessage: lastUserMessage(payload.messages),
-      responsePreview: preview(messageText(response?.content)),
-      toolCallCount: Array.isArray(response?.tool_calls) ? response.tool_calls.length : undefined,
-      usage: payload.usage as OpenAI.Completions.CompletionUsage | undefined,
+      responsePreview: preview(messageText(response?.content
+        .filter((c) => c.type === "text")
+        .map((c) => (c as import("@earendil-works/pi-ai").TextContent).text)
+        .join(""))),
+      toolCallCount: response?.content.filter((c) => c.type === "toolCall").length,
+      usage: payload.usage as Usage | undefined,
     }
   }
 
@@ -395,7 +398,7 @@ function parseMetricRow(row: MetricRow): MetricListItem | null {
     return {
       ...base,
       type: "usage",
-      usage: payload.usage as OpenAI.Completions.CompletionUsage | undefined,
+      usage: payload.usage as Usage | undefined,
     }
   }
 

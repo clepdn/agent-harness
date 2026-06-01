@@ -10,21 +10,29 @@ const REST_SNAPSHOT_FILE = path.join(PROJECT_ROOT, "rest-snapshot.json")
 
 // ── Session persistence ───────────────────────────────────────────────────────
 
-export async function saveSession(messages: Message[]): Promise<void> {
-  await fs.writeFile(SESSION_FILE, JSON.stringify(messages), { encoding: "utf-8", mode: 0o666 })
+type SessionData = { systemPrompt: string; messages: Message[] }
+
+export async function saveSession(systemPrompt: string, messages: Message[]): Promise<void> {
+  const data: SessionData = { systemPrompt, messages }
+  await fs.writeFile(SESSION_FILE, JSON.stringify(data), { encoding: "utf-8", mode: 0o666 })
 }
 
 export async function clearSession(): Promise<void> {
   await fs.unlink(SESSION_FILE).catch(() => {})
 }
 
-export async function loadSession(): Promise<Message[] | null> {
+export async function loadSession(): Promise<SessionData | null> {
   try {
     const raw = await fs.readFile(SESSION_FILE, "utf-8")
-    let msgs = JSON.parse(raw) as Message[]
-    msgs = sanitizeMessages(msgs)
-    console.log(`[runner] found saved session (${msgs.length} messages)`)
-    return msgs
+    const parsed = JSON.parse(raw) as unknown
+    // Validate shape — reject old OAI-format sessions (plain arrays)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null
+    const data = parsed as Record<string, unknown>
+    if (!Array.isArray(data.messages)) return null
+    const messages = sanitizeMessages(data.messages as Message[])
+    const systemPrompt = typeof data.systemPrompt === "string" ? data.systemPrompt : ""
+    console.log(`[runner] found saved session (${messages.length} messages)`)
+    return { systemPrompt, messages }
   } catch {
     return null
   }

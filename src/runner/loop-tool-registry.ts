@@ -1,4 +1,4 @@
-import OpenAI from "openai"
+import type { UserMessage as PiUserMessage } from "@earendil-works/pi-ai"
 import { normalizeTimeoutMs } from "../container/config"
 import { editFile, readFile, readImageForModel, runCommand } from "../container/index"
 import { logMessage } from "../db"
@@ -15,14 +15,12 @@ import { listAliases, removeAlias, searchMemories, setAlias } from "../memory"
 import { emit } from "../stream"
 import type { ToolHandler } from "./loop-shared"
 import { pushToolMessage, recordToolResult, runStandardTool, toolError } from "./loop-tool-runtime"
-import { parseImageDetail, saveRestSnapshot } from "./util"
+import { saveRestSnapshot } from "./util"
 
 const DEFAULT_WAIT_THEN_CONTINUE_MS = 10_000
 
 /**
  * Builds the function-tool handler table for the runner loop.
- *
- * @returns Tool-name keyed async handler map.
  */
 export function buildToolHandlers(): Record<string, ToolHandler> {
   return {
@@ -149,7 +147,6 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       let result: string
 
       try {
-        const detail = parseImageDetail(args.detail)
         const image = await readImageForModel(args.path as string, args.timeout_ms as number | undefined)
         const note =
           typeof args.note === "string" && args.note.trim()
@@ -158,21 +155,28 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
 
         result = pushToolMessage(convId, state, call, `attached ${image.path} (${image.mime}, ${image.bytes} bytes)`)
 
-        const imageMessage: OpenAI.Chat.ChatCompletionUserMessageParam = {
+        // Extract base64 data and MIME type from data URL
+        const commaIdx = image.dataUrl.indexOf(",")
+        const mimeMatch = image.dataUrl.match(/data:([^;]+)/)
+        const mimeType = mimeMatch?.[1] ?? image.mime
+        const data = commaIdx >= 0 ? image.dataUrl.slice(commaIdx + 1) : image.dataUrl
+
+        const imageMessage: PiUserMessage = {
           role: "user",
           content: [
             { type: "text", text: note },
-            { type: "image_url", image_url: { url: image.dataUrl, detail } },
+            { type: "image", data, mimeType },
           ],
+          timestamp: Date.now(),
         }
         state.conversation.push(imageMessage)
-        logMessage(convId, "user", `[image_tool] ${note}\npath=${image.path}\ndetail=${detail}`)
+        logMessage(convId, "user", `[image_tool] ${note}\npath=${image.path}`)
       } catch (err) {
-        result = recordToolResult(convId, state, call, "image_tool", { path: args.path, detail: args.detail }, toolError(err))
+        result = recordToolResult(convId, state, call, "image_tool", { path: args.path }, toolError(err))
         return {}
       }
 
-      emit({ type: "tool", name: "image_tool", args: { path: args.path, detail: args.detail }, result })
+      emit({ type: "tool", name: "image_tool", args: { path: args.path }, result })
       return {}
     },
 
