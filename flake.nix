@@ -3,51 +3,72 @@
 
     inputs = {
 	nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
-	flake-utils.url = "github:numtile/flake-utils";
+	flake-utils.url = "github:numtide/flake-utils";
+	pi = {
+	    url = "git+https://codeberg.org/cowie/tau";
+	    flake = false;
+	};
     };
 
-    outputs = { self, nixpkgs, flake-utils }:
-    flake-utils.lib.eachDefaultSystem (system: 
-	let pkgs = nixpkgs.legacyPackages.${system};
-	    lib = nixpkgs.lib;
+    outputs = { self, nixpkgs, flake-utils, pi }:
+    let
+	systemOutputs = flake-utils.lib.eachDefaultSystem (system:
+	    let pkgs = nixpkgs.legacyPackages.${system};
+	    in {
+		packages.coral = pkgs.buildNpmPackage {
+		    pname   = "coral";
+		    version = "1.0.0";
+		    src     = self;
 
-	    coral = pkgs.buildNpmPackage {
-		pname   = "coral";
-		version = "1.0.0";
-		src     = ./.;
+		    npmDepsHash = "sha256-5v0gD10GzYYlv9vvjNw2nKDS432rLaB40YfRkqdU3KQ=";
 
-		# Run `nix build` once; the error will give you the correct hash.
-		npmDepsHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+		    postPatch = ''
+			rm -rf pi
+			cp -r ${pi} pi
+			chmod -R u+w pi
 
-		nativeBuildInputs = with pkgs; [
-		    python3      # node-gyp (better-sqlite3, node-pty)
-		    pkg-config
-		    makeWrapper
-		];
+			# Patch pi-ai to use src instead of dist (tsx handles TS)
+			substituteInPlace pi/packages/ai/package.json \
+			    --replace-fail './dist/index.js' './src/index.ts' \
+			    --replace-fail './dist/index.d.ts' './src/index.ts' \
+			    --replace-fail './dist/' './src/'
+		    '';
 
-		# Don't run a npm build script — there isn't one; we ship src + tsx.
-		dontNpmBuild = true;
+		    nativeBuildInputs = with pkgs; [
+			python3      # node-gyp (better-sqlite3, node-pty)
+			pkg-config
+			makeWrapper
+		    ];
 
-		installPhase = ''
-		    runHook preInstall
+		    buildInputs = with pkgs; [
+			cairo
+			pango
+			libjpeg
+			giflib
+			librsvg
+			pixman
+		    ];
 
-		    mkdir -p $out/lib/coral
-		    cp -r src packages pi node_modules package.json tsconfig.json \
-			$out/lib/coral/
+		    # No build script — ship src and run via tsx.
+		    dontNpmBuild = true;
 
-		    # Wrapper: node <tsx-bin> <entrypoint>
-		    makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/coral \
-			--add-flags "$out/lib/coral/node_modules/.bin/tsx" \
-			--add-flags "$out/lib/coral/src/index.ts"
+		    installPhase = ''
+			runHook preInstall
 
-		    runHook postInstall
-		'';
-	    };
+			mkdir -p $out/lib/coral
+			cp -r src packages pi apps node_modules package.json tsconfig.json \
+			    $out/lib/coral/
 
-	in {
-	packages.coral = coral;
+			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/coral \
+			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
+			    --add-flags "$out/lib/coral/src/index.ts"
 
-	nixosModules.default = { config, pkgs, lib }:
+			runHook postInstall
+		    '';
+		};
+	    });
+
+	nixosModules.default = { config, pkgs, lib, ... }:
 	    let cfg = config.services.coral;
 	    in {
 		options.services.coral = {
@@ -55,8 +76,8 @@
 
 		    package = lib.mkOption {
 			type        = lib.types.package;
-			default     = coral;
-			description = "The coral package to run.";
+			default     = self.packages.${pkgs.system}.coral;
+			defaultText = lib.literalExpression "self.packages.\${pkgs.system}.coral";
 		    };
 
 		    user = lib.mkOption {
@@ -72,11 +93,7 @@
 			default = "/home/coral";
 		    };
 
-		    envFile = lib.mkOption {
-			type        = lib.types.str;
-			description = "Path to the environment file that holds secrets (e.g. /run/secrets/coral.env).";
-			example     = "/run/secrets/coral.env";
-		    };
+		    envFile = lib.mkOption { type = lib.types.str; };
 		};
 
 		config = lib.mkIf cfg.enable {
@@ -106,5 +123,6 @@
 		    };
 		};
 	    };
-    });
+
+    in systemOutputs // { inherit nixosModules; };
 }
