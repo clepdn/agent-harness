@@ -20,6 +20,7 @@
 		    version = "1.0.0";
 		    src     = self;
 
+		    nodejs = pkgs.nodejs_22;
 		    npmDepsHash = "sha256-5v0gD10GzYYlv9vvjNw2nKDS432rLaB40YfRkqdU3KQ=";
 
 		    postPatch = ''
