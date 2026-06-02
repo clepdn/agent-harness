@@ -99,7 +99,7 @@
 		config = lib.mkIf cfg.enable {
 		    users = {
 			users.${cfg.user} = {
-			    isSystemUser = false;
+			    isNormalUser = true;
 			    group        = cfg.group;
 			};
 			groups.${cfg.group} = {};
