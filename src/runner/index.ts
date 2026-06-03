@@ -1,11 +1,24 @@
 import { buildBootstrap } from "../bootstrap"
 import { endConversation, logMessage, startConversation } from "../db"
+import { recordMetric } from "../metrics"
 import { emit } from "../stream"
+import type { UserMessage } from "../types"
+import { configuredSummaryProvider } from "./loop-completion"
 import { runLoop } from "./loop"
 import { setRunnerPresence } from "./presence"
 import type { RunnerStateInternal } from "./types"
-import { clearSession, consumeRestSnapshot, loadSession, saveSession } from "./util"
-import type { UserMessage } from "../types"
+import {
+  clearSession,
+  consumeRestSnapshot,
+  CONTEXT_COMPACT_TRIGGER_TOKENS,
+  estimatePromptTokens,
+  findSummaryMessageIndex,
+  IDLE_COMPACTION_TIMEOUT_MS,
+  loadAgentSummaryContext,
+  loadSession,
+  saveSession,
+  summarizeConversationViaLLM,
+} from "./util"
 
 let eventResolvers: Array<(event: UserMessage) => void> = []
 let shutdownResolve: (() => void) | null = null
@@ -169,6 +182,109 @@ function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null>
   })
 }
 
+// ── Idle compaction ───────────────────────────────────────────────────────────
+
+const LLM_RECENT_MIN_KEEP = 6
+const LLM_RECENT_MAX_KEEP = 40
+const LLM_TAIL_CHAR_BUDGET = 60_000
+
+/**
+ * Attempts to compact the conversation via LLM summarization while idle.
+ * Returns true if compaction occurred and session was saved.
+ */
+async function applyIdleCompaction(): Promise<boolean> {
+  // Only compact if we're above the token threshold
+  if (state.contextSize < CONTEXT_COMPACT_TRIGGER_TOKENS) return false
+
+  const summaryProvider = configuredSummaryProvider()
+  if (!summaryProvider.model) {
+    console.warn("[context] idle: no summary model available; skipping idle compaction")
+    return false
+  }
+
+  const beforeEstimate = estimatePromptTokens(state.conversation)
+  const beforeCount = state.conversation.length
+  const agentContext = await loadAgentSummaryContext()
+
+  console.log(`[context] idle: starting compaction (${beforeCount} msgs, ~${beforeEstimate} tokens)`)
+
+  const summarized = await summarizeConversationViaLLM(
+    state.conversation,
+    summaryProvider.model,
+    summaryProvider.apiKey,
+    {
+      recentMinKeep: LLM_RECENT_MIN_KEEP,
+      recentMaxKeep: LLM_RECENT_MAX_KEEP,
+      tailCharBudget: LLM_TAIL_CHAR_BUDGET,
+      agentContext,
+    },
+  )
+
+  if (!summarized) {
+    console.warn("[context] idle: llm summary unavailable; keeping raw conversation")
+    return false
+  }
+
+  const afterEstimate = estimatePromptTokens(summarized)
+  if (afterEstimate >= beforeEstimate) {
+    console.warn(`[context] idle: llm summary not smaller (${beforeEstimate} -> ${afterEstimate}); keeping raw conversation`)
+    return false
+  }
+
+  state.conversation = summarized
+  state.contextSize = afterEstimate
+
+  const summaryIdx = findSummaryMessageIndex(state.conversation)
+  const summaryMsg = summaryIdx >= 0 ? state.conversation[summaryIdx] : undefined
+  const summary = summaryMsg?.role === "user" && typeof summaryMsg.content === "string" ? summaryMsg.content : undefined
+
+  console.log(
+    `[context] idle: llm-summarized conversation via ${summaryProvider.model} (${beforeCount} -> ${summarized.length} msgs, ${beforeEstimate} -> ${afterEstimate} tokens)`,
+  )
+
+  recordMetric({
+    type: "compaction",
+    before: beforeEstimate,
+    after: afterEstimate,
+    method: "idle-llm",
+    summary,
+  })
+
+  // Persist the compacted session
+  await saveSession(state.systemPrompt, state.conversation)
+  return true
+}
+
+/**
+ * Waits for an event, periodically running idle compaction if IDLE_COMPACTION_TIMEOUT_MS is set.
+ * Returns immediately if an event is already pending.
+ */
+async function waitForEventWithIdleCompaction(): Promise<UserMessage> {
+  // Fast path: event already pending
+  if (state.pendingInputs.length > 0) {
+    return state.pendingInputs.shift()!
+  }
+
+  // If idle compaction is disabled, fall back to simple wait
+  if (IDLE_COMPACTION_TIMEOUT_MS <= 0) {
+    return waitForEvent()
+  }
+
+  // Loop: wait with timeout, run compaction if timeout fires, repeat
+  while (true) {
+    const event = await waitForEventWithTimeout(IDLE_COMPACTION_TIMEOUT_MS)
+    if (event) return event
+
+    // Timeout fired — try idle compaction
+    try {
+      await applyIdleCompaction()
+    } catch (err) {
+      console.warn(`[context] idle compaction failed: ${err instanceof Error ? err.message : String(err)}`)
+    }
+    // Continue waiting for the next event or timeout
+  }
+}
+
 function formatIncomingEvent(event: UserMessage): string {
   return `[incoming — ${event.source}]\n\n${event.content}`
 }
@@ -247,7 +363,7 @@ export async function wake(event: UserMessage): Promise<void> {
 
   try {
     const exit = await runLoop(convId, state, {
-      waitForEvent,
+      waitForEvent: waitForEventWithIdleCompaction,
       waitForEventWithTimeout,
       injectIncomingEvent,
       flushDeferredEvents,

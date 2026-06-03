@@ -88,6 +88,7 @@ An optional, separate model used for conversation compaction / summarization. Fa
 | `TOKEN_NUDGE_THRESHOLD` | `120000` | Token count in the primary conversation at which the runner hints to the model to start wrapping up the current task before compaction. |
 | `FALLBACK_TOKEN_NUDGE_THRESHOLD` | `50000` | Same nudge threshold, but for the fallback model's (smaller) context window. |
 | `CONTEXT_COMPACT_TRIGGER_TOKENS` | `90000` | Token count that triggers automatic conversation compaction (summarization + history trim). |
+| `IDLE_COMPACTION_MINUTES` | `45` | Minutes of idle time (while waiting for events) before triggering background compaction. When the agent calls `wait` and no event arrives within this timeout, the runner checks if context exceeds `CONTEXT_COMPACT_TRIGGER_TOKENS` and runs LLM summarization if needed. Supports decimals (e.g. `2.5` for 2m30s). Set to `0` or leave unset to disable. Alias: `IDLE_TIMEOUT`. |
 
 ---
 

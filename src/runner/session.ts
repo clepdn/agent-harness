@@ -1,12 +1,12 @@
 import fs from "fs/promises"
 import path from "path"
-import { fileURLToPath } from "url"
 import type { Message } from "../types"
 import { findSummaryMessageIndex, messageStringContent, sanitizeMessages } from "./messages"
 
-const PROJECT_ROOT = path.resolve(fileURLToPath(import.meta.url), "../../..")
-const SESSION_FILE = path.join(PROJECT_ROOT, "session.json")
-const REST_SNAPSHOT_FILE = path.join(PROJECT_ROOT, "rest-snapshot.json")
+// Store session data in working directory, not install location (Nix store is read-only)
+const DATA_DIR = process.cwd()
+const SESSION_FILE = path.join(DATA_DIR, ".coral-session.json")
+const REST_SNAPSHOT_FILE = path.join(DATA_DIR, ".coral-rest-snapshot.json")
 
 // ── Session persistence ───────────────────────────────────────────────────────
 
@@ -14,7 +14,7 @@ type SessionData = { systemPrompt: string; messages: Message[] }
 
 export async function saveSession(systemPrompt: string, messages: Message[]): Promise<void> {
   const data: SessionData = { systemPrompt, messages }
-  await fs.writeFile(SESSION_FILE, JSON.stringify(data), { encoding: "utf-8", mode: 0o666 })
+  await fs.writeFile(SESSION_FILE, JSON.stringify(data, null, 2), { encoding: "utf-8", mode: 0o666 })
 }
 
 export async function clearSession(): Promise<void> {

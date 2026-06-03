@@ -11,8 +11,6 @@ import { HOME_DIR } from "../container/config"
 import { getDb, isVecAvailable, MEMORY_EMBEDDING_DIMENSIONS } from "../db"
 import { EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, embeddingsConfigured, embedTexts } from "../embeddings"
 import {
-  basenameWithoutExt,
-  chunkLargeSection,
   CORE_FILE,
   detectMemoryKind,
   JOURNAL_DIR,
@@ -20,9 +18,9 @@ import {
   MEMORY_EMBEDDING_BATCH_SIZE,
   MEMORY_EMBEDDING_PROTOTYPES,
   normalizeHandle,
+  parseMarkdownDocument,
   pathExists,
   PEOPLE_DIR,
-  titleFromPath,
   type MemoryChunkInput,
   type MemoryDocumentRow,
   type MemoryKind,
@@ -87,82 +85,8 @@ async function listMemoryFiles(): Promise<string[]> {
   return files
 }
 
-// ── markdown parsing / chunking ────────────────────────────────────────
-
-/**
- * Splits a markdown document into titled sections and chunks large paragraphs.
- *
- * @param filePath - Absolute file path (used for title extraction).
- * @param content - Raw markdown content.
- * @returns Document title and array of chunk inputs.
- */
-export function parseMarkdownDocument(filePath: string, content: string): { title: string; chunks: MemoryChunkInput[] } {
-  const lines = content.replace(/\r\n/g, "\n").split("\n")
-  const h1 = lines.find((line) => /^#\s+/.test(line))
-  const title = h1 ? h1.replace(/^#\s+/, "").trim() : titleFromPath(filePath, "Memory")
-  const headingStack: string[] = []
-  let sectionLines: string[] = []
-  let sectionTitle = title
-  const chunks: MemoryChunkInput[] = []
-
-  const flushSection = () => {
-    const body = sectionLines.join("\n").trim()
-    if (!body) {
-      sectionLines = []
-      return
-    }
-
-    const headingPath = headingStack.length > 0 ? headingStack.join(" > ") : null
-    const tags = [basenameWithoutExt(filePath), ...headingStack].join(" ").trim()
-    for (const part of chunkLargeSection(body)) {
-      chunks.push({
-        title: sectionTitle || title,
-        headingPath,
-        text: part,
-        tags,
-      })
-    }
-    sectionLines = []
-  }
-
-  for (const line of lines) {
-    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/)
-    if (!headingMatch) {
-      sectionLines.push(line)
-      continue
-    }
-
-    flushSection()
-
-    const level = headingMatch[1]!.length
-    const heading = headingMatch[2]!.trim()
-    if (level === 1) {
-      sectionTitle = heading || title
-      headingStack.length = 0
-      continue
-    }
-
-    while (headingStack.length >= level - 1) headingStack.pop()
-    headingStack.push(heading)
-    sectionTitle = heading || title
-  }
-
-  flushSection()
-
-  if (chunks.length === 0) {
-    const body = content.trim()
-    if (body) {
-      chunks.push({
-        title,
-        headingPath: null,
-        text: body,
-        tags: basenameWithoutExt(filePath),
-      })
-    }
-  }
-
-  return { title, chunks }
-}
+// Re-export for backwards compatibility
+export { parseMarkdownDocument } from "./shared"
 
 /**
  * Builds the embedding input text for a memory chunk.

@@ -6,6 +6,13 @@ import type { KnownProvider, Model } from "@earendil-works/pi-ai"
 export const TOKEN_NUDGE_THRESHOLD = parseInt(process.env.TOKEN_NUDGE_THRESHOLD ?? "120000")
 export const FALLBACK_TOKEN_NUDGE_THRESHOLD = parseInt(process.env.FALLBACK_TOKEN_NUDGE_THRESHOLD ?? "50000")
 export const CONTEXT_COMPACT_TRIGGER_TOKENS = parseInt(process.env.CONTEXT_COMPACT_TRIGGER_TOKENS ?? "90000")
+export const IDLE_COMPACTION_TIMEOUT_MS = (() => {
+  const raw = process.env.IDLE_COMPACTION_MINUTES ?? process.env.IDLE_TIMEOUT ?? "45"
+  const parsed = parseFloat(raw)
+  // 0 or invalid disables idle compaction
+  if (!Number.isFinite(parsed) || parsed <= 0) return 0
+  return Math.round(parsed * 60_000)
+})()
 
 const NIRI_ENV = (process.env.NIRI_ENV ?? "default").trim().toLowerCase()
 export const USE_FALLBACK = NIRI_ENV === "local"
@@ -187,3 +194,4 @@ console.log(`[config] fallback=${FALLBACK_MODEL} provider=${fallbackModel.provid
 if (summaryModel) console.log(`[config] summary=${SUMMARY_MODEL} provider=${summaryModel.provider} @ ${summaryModel.baseUrl}`)
 console.log(`[config] env=${NIRI_ENV} use_fallback=${USE_FALLBACK}`)
 console.log(`[config] thinking=${ENABLE_THINKING}`)
+if (IDLE_COMPACTION_TIMEOUT_MS > 0) console.log(`[config] idle_compaction=${IDLE_COMPACTION_TIMEOUT_MS / 60_000}min`)
