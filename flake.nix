@@ -112,6 +112,16 @@
 			wants    = [ "multi-user.target" ];
 			wantedBy = [ "multi-user.target" ];
 
+			environment.PATH = lib.concatStringsSep ":" [
+			    "/run/wrappers/bin"
+			    "/home/${cfg.user}/.nix-profile/bin"
+			    "/nix/profile/bin"
+			    "/home/${cfg.user}/.local/state/nix/profile/bin"
+			    "/etc/profiles/per-user/${cfg.user}/bin"
+			    "/nix/var/nix/profiles/default/bin"
+			    "/run/current-system/sw/bin"
+			];
+
 			serviceConfig = {
 			    User             = cfg.user;
 			    Group            = cfg.group;
