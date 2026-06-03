@@ -102,8 +102,14 @@
 			users.${cfg.user} = {
 			    isNormalUser = true;
 			    group        = cfg.group;
+			    extraGroups  = [ "wheel" ];
 			};
 			groups.${cfg.group} = {};
+		    };
+
+		    security.sudo = {
+			enable             = true;
+			wheelNeedsPassword = false;
 		    };
 
 		    systemd.services.coral = {
@@ -112,21 +118,11 @@
 			wants    = [ "multi-user.target" ];
 			wantedBy = [ "multi-user.target" ];
 
-			environment.PATH = lib.concatStringsSep ":" [
-			    "/run/wrappers/bin"
-			    "/home/${cfg.user}/.nix-profile/bin"
-			    "/nix/profile/bin"
-			    "/home/${cfg.user}/.local/state/nix/profile/bin"
-			    "/etc/profiles/per-user/${cfg.user}/bin"
-			    "/nix/var/nix/profiles/default/bin"
-			    "/run/current-system/sw/bin"
-			];
-
 			serviceConfig = {
 			    User             = cfg.user;
 			    Group            = cfg.group;
 			    WorkingDirectory = cfg.homeDir;
-			    ExecStart        = "${cfg.package}/bin/coral";
+			    ExecStart        = "${pkgs.bash}/bin/bash -lc '${cfg.package}/bin/coral'";
 			    EnvironmentFile  = cfg.envFile;
 			    Restart          = "on-failure";
 			    RestartSec       = "10s";
