@@ -1,52 +1,21 @@
 import fs from "fs/promises"
 import path from "path"
 import type { Message } from "../types"
-import { findSummaryMessageIndex, messageStringContent, sanitizeMessages } from "./messages"
+import { findSummaryMessageIndex, messageStringContent } from "./messages"
 
 // Store session data in working directory, not install location (Nix store is read-only)
 const DATA_DIR = process.cwd()
-const SESSION_FILE = path.join(DATA_DIR, ".coral-session.json")
 const REST_SNAPSHOT_FILE = path.join(DATA_DIR, ".coral-rest-snapshot.json")
-
-// ── Session persistence ───────────────────────────────────────────────────────
-
-type SessionData = { systemPrompt: string; messages: Message[] }
-
-export async function saveSession(systemPrompt: string, messages: Message[]): Promise<void> {
-  const data: SessionData = { systemPrompt, messages }
-  await fs.writeFile(SESSION_FILE, JSON.stringify(data, null, 2), { encoding: "utf-8", mode: 0o666 })
-}
-
-export async function clearSession(): Promise<void> {
-  await fs.unlink(SESSION_FILE).catch(() => {})
-}
-
-export async function loadSession(): Promise<SessionData | null> {
-  try {
-    const raw = await fs.readFile(SESSION_FILE, "utf-8")
-    const parsed = JSON.parse(raw) as unknown
-    // Validate shape — reject old OAI-format sessions (plain arrays)
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null
-    const data = parsed as Record<string, unknown>
-    if (!Array.isArray(data.messages)) return null
-    const messages = sanitizeMessages(data.messages as Message[])
-    const systemPrompt = typeof data.systemPrompt === "string" ? data.systemPrompt : ""
-    console.log(`[runner] found saved session (${messages.length} messages)`)
-    return { systemPrompt, messages }
-  } catch {
-    return null
-  }
-}
 
 // ── Rest snapshot ─────────────────────────────────────────────────────────────
 
 type RestSnapshot = {
   restedAt: string
   note?: string
-  forest: string
+  summary: string
 }
 
-export function restForestFromMessages(messages: Message[]): string {
+export function restSummaryFromMessages(messages: Message[]): string {
   const summaryIndex = findSummaryMessageIndex(messages)
   return summaryIndex >= 0 ? messageStringContent(messages[summaryIndex]!) : "(no llm context summary yet)"
 }
@@ -56,7 +25,7 @@ export async function saveRestSnapshot(messages: Message[], note?: string): Prom
   const snapshot: RestSnapshot = {
     restedAt: new Date().toISOString(),
     ...(trimmedNote ? { note: trimmedNote } : {}),
-    forest: restForestFromMessages(messages),
+    summary: restSummaryFromMessages(messages),
   }
   await fs.writeFile(REST_SNAPSHOT_FILE, JSON.stringify(snapshot, null, 2), { encoding: "utf-8", mode: 0o666 })
 }
@@ -66,7 +35,7 @@ export async function consumeRestSnapshot(): Promise<RestSnapshot | null> {
     const raw = await fs.readFile(REST_SNAPSHOT_FILE, "utf-8")
     const parsed = JSON.parse(raw) as RestSnapshot
     await fs.unlink(REST_SNAPSHOT_FILE).catch(() => {})
-    if (!parsed || typeof parsed.restedAt !== "string" || typeof parsed.forest !== "string") return null
+    if (!parsed || typeof parsed.restedAt !== "string" || typeof parsed.summary !== "string") return null
     return parsed
   } catch {
     return null

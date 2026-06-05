@@ -116,9 +116,8 @@ test("applyDiscordSendNudge does not fire when discord_send was already called",
   assert.equal(state.conversation.length, 0)
 })
 
-test("applyLoopGuardNudge appends an in-band user nudge and saves", async () => {
+test("applyLoopGuardNudge appends an in-band user nudge", async () => {
   const state = makeState()
-  let saved = false
 
   await __loopTest.applyLoopGuardNudge(
     state,
@@ -129,15 +128,10 @@ test("applyLoopGuardNudge appends an in-band user nudge and saves", async () => 
       waitForEventWithTimeout: async () => null,
       injectIncomingEvent: () => {},
       flushDeferredEvents: () => {},
-      clearSession: async () => {},
-      saveSession: async () => {
-        saved = true
-      },
     },
     "loop guard tripped after 120 turns",
   )
 
-  assert.equal(saved, true)
   assert.equal(state.conversation.length, 1)
   assert.equal(state.conversation[0]?.role, "user")
   assert.match(String(state.conversation[0]?.content), /loop guard tripped after 120 turns/i)
@@ -164,8 +158,6 @@ test("waitForNextEvent waits for and injects the next external event", async () 
       assert.equal(incoming, event)
     },
     flushDeferredEvents: () => {},
-    clearSession: async () => {},
-    saveSession: async () => {},
   })
 
   assert.deepEqual(calls, ["wait", "inject:still here"])

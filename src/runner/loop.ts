@@ -54,7 +54,6 @@ async function applyLoopGuardNudge(state: LoopState, hooks: LoopHooks, reason: s
     timestamp: Date.now(),
   })
   emit({ type: "text", text: guardMessage })
-  await hooks.saveSession()
 }
 
 async function processAssistantTurn(convId: number, state: LoopState, hooks: LoopHooks): Promise<CycleOutcome> {
@@ -236,8 +235,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
   let consecutiveIdenticalToolTurns = 0
 
   while (true) {
-    const preCompacted = await applyLLMCompaction(state, "pre-turn")
-    if (preCompacted) await hooks.saveSession()
+    await applyLLMCompaction(state, "pre-turn")
 
     const turnStart = state.conversation.length
     const outcome = await processAssistantTurn(convId, state, hooks)
@@ -269,7 +267,6 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     if (outcome === CycleOutcome.Rest) return "rest"
     if (outcome === CycleOutcome.NoTools) {
       if (discordSendNudged) continue
-      await hooks.saveSession()
       await waitForNextEvent(convId, hooks)
       continue
     }
@@ -295,7 +292,6 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
 
     await applyLLMCompaction(state, "post-turn")
     applyContextNudge(state)
-    await hooks.saveSession()
   }
 }
 

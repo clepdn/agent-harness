@@ -8,15 +8,12 @@ import { runLoop } from "./loop"
 import { setRunnerPresence } from "./presence"
 import type { RunnerStateInternal } from "./types"
 import {
-  clearSession,
   consumeRestSnapshot,
   CONTEXT_COMPACT_TRIGGER_TOKENS,
   estimatePromptTokens,
   findSummaryMessageIndex,
   IDLE_COMPACTION_TIMEOUT_MS,
   loadAgentSummaryContext,
-  loadSession,
-  saveSession,
   summarizeConversationViaLLM,
 } from "./util"
 
@@ -250,8 +247,6 @@ async function applyIdleCompaction(): Promise<boolean> {
     summary,
   })
 
-  // Persist the compacted session
-  await saveSession(state.systemPrompt, state.conversation)
   return true
 }
 
@@ -336,20 +331,11 @@ export async function wake(event: UserMessage): Promise<void> {
   // The wake event is the first turn — recall once for it.
   state.memoryRecallPending = true
 
-  const saved = await loadSession()
-  if (saved) {
-    state.systemPrompt = saved.systemPrompt
-    state.conversation = saved.messages
-    state.conversation.push({
-      role: "user",
-      content: `[harness restarted — ${event.source} @ ${event.triggeredAt}]\n\n${event.content}`,
-      timestamp: Date.now(),
-    })
-  } else {
-    const bootstrap = await buildBootstrap(event, await consumeRestSnapshot())
-    state.systemPrompt = bootstrap.systemPrompt
-    state.conversation = bootstrap.messages
-  }
+  // Always start a fresh context on wake. The rest snapshot carries forward
+  // any summarized continuity between sessions; conversation resume is gone.
+  const bootstrap = await buildBootstrap(event, await consumeRestSnapshot())
+  state.systemPrompt = bootstrap.systemPrompt
+  state.conversation = bootstrap.messages
 
   const convId = startConversation(event.source, event.triggeredAt)
 
@@ -367,19 +353,12 @@ export async function wake(event: UserMessage): Promise<void> {
       waitForEventWithTimeout,
       injectIncomingEvent,
       flushDeferredEvents,
-      clearSession,
-      saveSession: async () => saveSession(state.systemPrompt, state.conversation),
     })
     if (exit === "rest") setRunnerPresence("resting")
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`[runner] loop aborted: ${message}`)
     if (err instanceof Error && err.stack) console.error(err.stack)
-    try {
-      await saveSession(state.systemPrompt, state.conversation)
-    } catch (saveErr) {
-      console.warn(`[runner] failed to persist session after abort: ${saveErr instanceof Error ? saveErr.message : String(saveErr)}`)
-    }
   } finally {
     endConversation(convId, state.tokenCount)
     state.running = false

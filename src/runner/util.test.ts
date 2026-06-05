@@ -7,7 +7,7 @@ import {
   isImageParseError,
   shouldFallback,
   isPromptTooLargeError,
-  restForestFromMessages,
+  restSummaryFromMessages,
   sanitizeMessages,
   scrubImagesFromConversation,
 } from "./util"
@@ -125,9 +125,9 @@ test("scrubImagesFromConversation replaces image parts with placeholder text", (
   assert.ok(msg.content[1]!.text?.includes("rejected"))
 })
 
-// ── restForestFromMessages ────────────────────────────────────────────────────
+// ── restSummaryFromMessages ────────────────────────────────────────────────────
 
-test("restForestFromMessages returns the llm context summary", () => {
+test("restSummaryFromMessages returns the llm context summary", () => {
   const messages: Message[] = [
     { role: "user", content: "[wake]\n\nhello", timestamp: Date.now() },
     { role: "user", content: "[context summary v1]\n[llm-summary now]\nThread: project\n- carried forward", timestamp: Date.now() },
@@ -143,9 +143,9 @@ test("restForestFromMessages returns the llm context summary", () => {
     },
   ]
 
-  const forest = restForestFromMessages(messages)
-  assert.match(forest, /^\[context summary v1\]/)
-  assert.match(forest, /Thread: project/)
+  const summary = restSummaryFromMessages(messages)
+  assert.match(summary, /^\[context summary v1\]/)
+  assert.match(summary, /Thread: project/)
 })
 
 // ── AGENT_NAME ────────────────────────────────────────────────────────────────

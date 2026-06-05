@@ -12,7 +12,7 @@ const MISPLACED_SOUL_FILE = path.join(HOME_DIR, "memories", "soul.md")
 type PriorRestContext = {
   restedAt: string
   note?: string
-  forest: string
+  summary: string
 }
 
 async function readFile(filePath: string): Promise<string | null> {
@@ -235,7 +235,7 @@ ${buildEnvironmentSection()}`.trim()
 function formatUserMessage(event: UserMessage, priorRest?: PriorRestContext | null): string {
   const time = new Date(event.triggeredAt).toLocaleString()
   const priorRestSection = priorRest
-    ? `\n\n[prior session]\nrested_at: ${priorRest.restedAt}\nrest_note: ${priorRest.note?.trim() || "(none)"}\n\nforest:\n${priorRest.forest}`
+    ? `\n\n[prior session]\nrested_at: ${priorRest.restedAt}\nrest_note: ${priorRest.note?.trim() || "(none)"}\n\nsummary:\n${priorRest.summary}`
     : ""
   return `[wake] ${time} — triggered by ${event.source}${priorRestSection}\n\n${event.content}`
 }

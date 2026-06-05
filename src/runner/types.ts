@@ -30,10 +30,6 @@ export interface LoopHooks {
   injectIncomingEvent: (convId: number, event: UserMessage) => void
   /** Flushes events deferred while a tool call was in flight. */
   flushDeferredEvents: () => void
-  /** Clears persisted session state when ending a run. */
-  clearSession: () => Promise<void>
-  /** Persists the current in-memory session state. */
-  saveSession: () => Promise<void>
 }
 
 /** Internal runtime state for the runner service. */
