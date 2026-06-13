@@ -5,16 +5,17 @@
  */
 
 import { REST, Routes } from "discord.js"
+import { config } from "../config"
 
 /**
  * Returns the configured Discord bot token.
  *
  * @returns Bot token string.
- * @throws When `DISCORD_BOT_TOKEN` is not set.
+ * @throws When `[discord].bot_token` is not set in the secrets TOML.
  */
 export function getBotToken(): string {
-  const token = process.env.DISCORD_BOT_TOKEN?.trim()
-  if (!token) throw new Error("DISCORD_BOT_TOKEN is required")
+  const token = config.discord.bot_token
+  if (!token) throw new Error("[discord].bot_token is required (set it in the secrets TOML)")
   return token
 }
 
@@ -87,14 +88,8 @@ export function isRetryableDiscordRestError(err: unknown): boolean {
   return status === 429 || status === 502 || status === 503 || status === 504
 }
 
-const DISCORD_REST_MAX_ATTEMPTS = Math.max(
-  1,
-  Math.min(10, Number.parseInt(process.env.DISCORD_REST_MAX_ATTEMPTS ?? "3", 10) || 3),
-)
-const DISCORD_REST_RETRY_BASE_MS = Math.max(
-  100,
-  Math.min(30_000, Number.parseInt(process.env.DISCORD_REST_RETRY_BASE_MS ?? "1000", 10) || 1000),
-)
+const DISCORD_REST_MAX_ATTEMPTS = Math.max(1, Math.min(10, config.discord.rest_max_attempts))
+const DISCORD_REST_RETRY_BASE_MS = Math.max(100, Math.min(30_000, config.discord.rest_retry_base_ms))
 
 /**
  * Computes exponential backoff delay for a retry attempt.

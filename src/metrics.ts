@@ -2,6 +2,7 @@ import Database from "better-sqlite3"
 import fs from "fs"
 import path from "path"
 import type { AssistantMessage, Usage } from "@earendil-works/pi-ai"
+import { config } from "./config"
 import { HOME_DIR } from "./container/config"
 import { getDb } from "./db"
 import type { Message } from "./types"
@@ -163,7 +164,7 @@ const METRICS_PRUNE_INTERVAL_MS = 60 * 60_000
 let pruneTimer: ReturnType<typeof setInterval> | null = null
 
 function metricsRetentionDays(): number {
-  const parsed = Number(process.env.METRICS_RETENTION_DAYS ?? DEFAULT_METRICS_RETENTION_DAYS)
+  const parsed = config.metrics.retention_days
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_METRICS_RETENTION_DAYS
   return parsed
 }

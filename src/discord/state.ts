@@ -8,6 +8,7 @@
  */
 
 import { Routes } from "discord.js"
+import { config } from "../config"
 import {
   asNumber,
   asString,
@@ -313,18 +314,12 @@ export function buildDiscordBatchDigest(params?: {
 }): DiscordBatchDigest | null {
   const now = new Date()
   const nowIso = now.toISOString()
-  const defaultIntervalMs = Math.max(
-    1_000,
-    Number.parseInt(process.env.DISCORD_BATCH_INTERVAL_MS ?? "60000", 10) || 60_000,
-  )
+  const defaultIntervalMs = Math.max(1_000, config.discord.batch_interval_ms)
   const intervalMs = Math.max(1_000, Math.trunc(params?.intervalMs ?? defaultIntervalMs))
   const maxMessages = Math.max(1, Math.min(200, Math.trunc(params?.maxMessages ?? 40) || 40))
   const previewLimit = Math.max(1, Math.min(50, Math.trunc(params?.pendingPreviewLimit ?? 6) || 6))
-  const batchOnlyConfigured = (process.env.DISCORD_BATCH_ONLY_CONFIGURED ?? "true").trim().toLowerCase() !== "false"
-  const autoSeenMinutes = Math.max(
-    0,
-    Number.parseInt(process.env.DISCORD_PENDING_AUTO_SEEN_MINUTES ?? "10", 10) || 10,
-  )
+  const batchOnlyConfigured = config.discord.batch_only_configured
+  const autoSeenMinutes = Math.max(0, config.discord.pending_auto_seen_minutes)
   const configuredIds = parseChannelIds()
   const configuredPlaceholders = configuredIds.map(() => "?").join(", ")
   const channelScopeClause = batchOnlyConfigured
@@ -332,7 +327,7 @@ export function buildDiscordBatchDigest(params?: {
       ? `and (m.is_dm = 1 or m.channel_id in (${configuredPlaceholders}))`
       : "and m.is_dm = 1"
     : ""
-  const botUserId = process.env.DISCORD_BOT_USER_ID?.trim() ?? ""
+  const botUserId = config.discord.bot_user_id
 
   const autoDemotedCount = autoDemoteStalePendingItems(autoSeenMinutes)
   const repairedMessageCount = repairDiscordMessageChannelFlags()

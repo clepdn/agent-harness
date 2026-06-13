@@ -4,6 +4,8 @@
  * @module discord/parse
  */
 
+import { config } from "../config"
+
 export type DiscordObject = Record<string, unknown>
 
 export type DiscordMessageRecord = {
@@ -115,7 +117,8 @@ export function parseChannelIds(input?: string[] | string | null): string[] {
     return input.map((x) => String(x).trim()).filter(Boolean)
   }
 
-  const text = typeof input === "string" ? input : process.env.DISCORD_SCAN_CHANNEL_IDS ?? ""
+  if (input == null) return [...config.discord.scan_channel_ids]
+  const text = typeof input === "string" ? input : ""
   return text
     .split(",")
     .map((x) => x.trim())
@@ -209,7 +212,7 @@ export function extractImageAttachmentsFromRawJson(rawJson: string): DiscordImag
 export function parseMessageRecord(payload: unknown, botUserId?: string): DiscordMessageRecord | null {
   const root = asObject(payload)
   if (!root) return null
-  const botId = botUserId ?? process.env.DISCORD_BOT_USER_ID?.trim()
+  const botId = botUserId ?? (config.discord.bot_user_id || undefined)
 
   const message = asObject(root.message) ?? root
   const channel = asObject(root.channel)

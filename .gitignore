@@ -6,6 +6,8 @@ apps/*/dist/
 
 # environment
 .env
+secrets.toml.env
+config.toml
 
 # runtime state
 session.json

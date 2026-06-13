@@ -1,9 +1,10 @@
 import path from "path"
+import { config } from "../config"
 
-const configuredContainerName = (process.env.NIRI_CONTAINER ?? "").trim()
-const configuredContainerUser = (process.env.NIRI_USER ?? "").trim()
-const configuredSshTarget = (process.env.SSH_TARGET ?? "").trim()
-const configuredSshIdentity = (process.env.SSH_IDENTITY ?? "").trim()
+const configuredContainerName = config.container.name
+const configuredContainerUser = config.container.user
+const configuredSshTarget = config.ssh.target
+const configuredSshIdentity = config.ssh.identity
 
 /** Whether command execution should go through Docker instead of a local shell. */
 export const USE_DOCKER_SHELL = configuredContainerName.length > 0 && configuredContainerUser.length > 0
@@ -32,10 +33,10 @@ export const HOME_DIR = (USE_DOCKER_SHELL || USE_SSH) ? REPO_HOME_DIR : path.res
 
 /** Absolute image root allowed for `image_tool` operations. */
 export const IMAGE_ROOT = (() => {
-  const configured = (process.env.IMAGE_ROOT ?? "").trim()
+  const configured = config.image_tool.root
   const root = configured || (USE_DOCKER_SHELL ? `/home/${CONTAINER_USER}/images` : path.resolve(process.cwd(), "home", "images"))
   if (!root.startsWith("/")) {
-    throw new Error(`IMAGE_ROOT must be an absolute path, got: ${root}`)
+    throw new Error(`[image_tool].root must be an absolute path, got: ${root}`)
   }
   return path.posix.normalize(root)
 })()
@@ -43,7 +44,7 @@ export const IMAGE_ROOT = (() => {
 const DEFAULT_IMAGE_MAX_BYTES = 150_000
 /** Maximum image size (bytes) accepted by `image_tool`. */
 export const IMAGE_MAX_BYTES = (() => {
-  const parsed = parseInt(process.env.IMAGE_TOOL_MAX_BYTES ?? `${DEFAULT_IMAGE_MAX_BYTES}`, 10)
+  const parsed = config.image_tool.max_bytes
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_IMAGE_MAX_BYTES
   return parsed
 })()

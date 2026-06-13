@@ -1,8 +1,9 @@
+import { config } from "../config"
 import { enqueueEvent, isRunning, wake } from "../runner/index"
 import { fromDiscord } from "../triggers/discord"
 import { ingestDiscordEvent } from "./state"
 
-const DISCORD_WAKE_ON_EVENT = (process.env.DISCORD_WAKE_ON_EVENT ?? "false").trim().toLowerCase() === "true"
+const DISCORD_WAKE_ON_EVENT = config.discord.wake_on_event
 
 export type DiscordIngressOutcome = {
   ingested: boolean

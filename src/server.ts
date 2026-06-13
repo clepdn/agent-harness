@@ -3,6 +3,7 @@ import fastifyStatic from "@fastify/static"
 import { existsSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
+import { config } from "./config"
 import { wake, isRunning, isWaitingForEvent, enqueueEvent } from "./runner/index"
 import { buildDiscordBatchDigest, scanDiscordChannels } from "./discord/state"
 import { handleDiscordIngress } from "./discord/pipeline"
@@ -17,15 +18,9 @@ import type { UserMessage } from "./types"
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url))
 const WEB_DIST_DIR = join(SRC_DIR, "..", "apps", "web", "dist")
-const DISCORD_BATCH_INTERVAL_MS = Math.max(
-  1_000,
-  parseInt(process.env.DISCORD_BATCH_INTERVAL_MS ?? "60000", 10) || 60_000,
-)
-const DISCORD_BATCH_MAX_MESSAGES = Math.max(
-  5,
-  Math.min(200, parseInt(process.env.DISCORD_BATCH_MAX_MESSAGES ?? "40", 10) || 40),
-)
-const DISCORD_BATCH_SCAN = (process.env.DISCORD_BATCH_SCAN ?? "true").trim().toLowerCase() !== "false"
+const DISCORD_BATCH_INTERVAL_MS = config.discord.batch_interval_ms
+const DISCORD_BATCH_MAX_MESSAGES = Math.max(5, Math.min(200, config.discord.batch_max_messages))
+const DISCORD_BATCH_SCAN = config.discord.batch_scan
 const METRIC_LIST_TYPES = new Set<MetricListType>(["response", "summarization", "memory", "prompt", "usage", "discord"])
 const METRIC_TYPE_ALIASES: Record<string, MetricListType> = {
   compaction: "summarization",
@@ -94,7 +89,7 @@ export function createServer() {
     }
   }
 
-  const hasDiscordToken = Boolean(process.env.DISCORD_BOT_TOKEN?.trim())
+  const hasDiscordToken = Boolean(config.discord.bot_token)
   if (hasDiscordToken) {
     discordBatchTimer = setInterval(() => {
       void runDiscordBatch()

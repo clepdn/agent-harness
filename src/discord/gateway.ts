@@ -7,17 +7,9 @@ import {
   Partials,
   type Message,
 } from "discord.js"
+import { config, setDiscordBotUserId } from "../config"
 import { handleDiscordIngress } from "./pipeline"
 import { subscribeRunnerPresence, type RunnerPresence } from "../runner/presence"
-
-function asEnabled(value: string | undefined, fallback: boolean): boolean {
-  if (typeof value !== "string") return fallback
-  const normalized = value.trim().toLowerCase()
-  if (!normalized) return fallback
-  if (normalized === "false" || normalized === "0" || normalized === "no") return false
-  if (normalized === "true" || normalized === "1" || normalized === "yes") return true
-  return fallback
-}
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value.trim() : ""
@@ -121,18 +113,18 @@ async function setDiscordPresence(client: Client, presence: RunnerPresence): Pro
 }
 
 export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null> {
-  const enabled = asEnabled(process.env.DISCORD_GATEWAY_ENABLED, true)
-  const trace = asEnabled(process.env.DISCORD_GATEWAY_TRACE, false)
-  const rawFallback = asEnabled(process.env.DISCORD_GATEWAY_RAW_FALLBACK, true)
-  const rawFallbackAll = asEnabled(process.env.DISCORD_GATEWAY_RAW_FALLBACK_ALL, false)
+  const enabled = config.discord.gateway_enabled
+  const trace = config.discord.gateway_trace
+  const rawFallback = config.discord.gateway_raw_fallback
+  const rawFallbackAll = config.discord.gateway_raw_fallback_all
   if (!enabled) {
-    console.log("[discord gateway] disabled via DISCORD_GATEWAY_ENABLED=false")
+    console.log("[discord gateway] disabled via [discord].gateway_enabled = false")
     return null
   }
 
-  const token = process.env.DISCORD_BOT_TOKEN?.trim()
+  const token = config.discord.bot_token
   if (!token) {
-    console.log("[discord gateway] DISCORD_BOT_TOKEN not set; gateway listener disabled")
+    console.log("[discord gateway] [discord].bot_token not set; gateway listener disabled")
     return null
   }
 
@@ -154,8 +146,8 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
   let unsubscribePresence: (() => void) | null = null
 
   client.once(Events.ClientReady, (ready) => {
-    if (!process.env.DISCORD_BOT_USER_ID && ready.user?.id) {
-      process.env.DISCORD_BOT_USER_ID = ready.user.id
+    if (!config.discord.bot_user_id && ready.user?.id) {
+      setDiscordBotUserId(ready.user.id)
     }
     console.log(
       `[discord gateway] connected as ${ready.user?.tag ?? ready.user?.id ?? "unknown"} (id=${ready.user?.id ?? "unknown"})`,

@@ -94,7 +94,16 @@
 			default = "/home/coral";
 		    };
 
-		    envFile = lib.mkOption { type = lib.types.str; };
+		    configFile = lib.mkOption {
+			type    = lib.types.nullOr lib.types.str;
+			default = null;
+			description = "Path to a TOML config file passed via --config.";
+		    };
+		    secretsFile = lib.mkOption {
+			type    = lib.types.nullOr lib.types.str;
+			default = null;
+			description = "Path to a TOML secrets file passed via --secrets.";
+		    };
 		};
 
 		config = lib.mkIf cfg.enable {
@@ -112,22 +121,25 @@
 			wheelNeedsPassword = false;
 		    };
 
-		    systemd.services.coral = {
-			description = "Coral harness runner";
-			after    = [ "multi-user.target" ];
-			wants    = [ "multi-user.target" ];
-			wantedBy = [ "multi-user.target" ];
+		    systemd.services.coral =
+			let
+			    configFlag  = lib.optionalString (cfg.configFile  != null) " --config ${lib.escapeShellArg cfg.configFile}";
+			    secretsFlag = lib.optionalString (cfg.secretsFile != null) " --secrets ${lib.escapeShellArg cfg.secretsFile}";
+			in {
+			    description = "Coral harness runner";
+			    after    = [ "multi-user.target" ];
+			    wants    = [ "multi-user.target" ];
+			    wantedBy = [ "multi-user.target" ];
 
-			serviceConfig = {
-			    User             = cfg.user;
-			    Group            = cfg.group;
-			    WorkingDirectory = cfg.homeDir;
-			    ExecStart        = "${pkgs.bash}/bin/bash -lc '${cfg.package}/bin/coral'";
-			    EnvironmentFile  = cfg.envFile;
-			    Restart          = "on-failure";
-			    RestartSec       = "10s";
+			    serviceConfig = {
+				User             = cfg.user;
+				Group            = cfg.group;
+				WorkingDirectory = cfg.homeDir;
+				ExecStart        = "${pkgs.bash}/bin/bash -lc '${cfg.package}/bin/coral${configFlag}${secretsFlag}'";
+				Restart          = "on-failure";
+				RestartSec       = "10s";
+			    };
 			};
-		    };
 		};
 	    };
 

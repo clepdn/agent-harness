@@ -9,13 +9,10 @@
     "apps/*"
   ],
   "scripts": {
-    "start": "dotenv -o -- tsx src/index.ts",
-    "start:local": "NIRI_ENV=local dotenv -o -- tsx src/index.ts",
-    "dev": "dotenv -o -- tsx watch src/index.ts",
-    "dev:local": "NIRI_ENV=local dotenv -o -- tsx watch src/index.ts",
+    "start": "tsx src/index.ts --config config.toml --secrets secrets.toml.env",
+    "dev": "tsx watch src/index.ts --config config.toml --secrets secrets.toml.env",
     "test": "node --import tsx --test src/**/*.test.ts",
-    "chat": "dotenv -o -- tsx scripts/chat.ts",
-    "chat:local": "NIRI_ENV=local dotenv -o -- tsx scripts/chat.ts",
+    "chat": "tsx scripts/chat.ts",
     "dev:web": "npm run dev --workspace @niri/web",
     "build:web": "npm run build --workspace @niri/web",
     "preview:web": "npm run preview --workspace @niri/web"
@@ -37,7 +34,6 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.5.0",
-    "dotenv-cli": "^11.0.0",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }

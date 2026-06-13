@@ -1,0 +1,112 @@
+# Example coral config. Copy to config.toml and tweak.
+# Secrets belong in secrets.toml.env, not here.
+#
+# Launch with:
+#   coral --config /path/to/config.toml --secrets /path/to/secrets.toml.env
+
+[server]
+port = 3000
+
+[agent]
+# Display name used in summarizer prompt and grounding context.
+name = "niri"
+# Set to "local" to skip the primary model and route everything through the fallback.
+env = "default"
+
+# Optional: route shell tools through a Docker container instead of the local shell.
+# Set both to enable. Mutually exclusive with [ssh].
+[container]
+name = ""
+user = ""
+
+# Optional: route shell tools through SSH instead. Mutually exclusive with [container].
+[ssh]
+target = ""
+identity = ""
+
+[model]
+# Preferred: provider + name lets pi resolve base URL and reasoning flags.
+# Escape hatch for unlisted endpoints: set base_url.
+provider = ""
+name = ""
+base_url = ""
+tool_choice = "required"     # required | auto | none
+enable_thinking = true
+thinking_effort = "low"       # minimal | low | medium | high | xhigh
+
+[fallback]
+# Used when the primary endpoint is unreachable or rate-limited (429/5xx).
+provider = ""
+model = "zai-org/glm-4.7-flash"
+base_url = "http://localhost:1234/v1"
+tool_choice = "required"
+referer = ""
+title = ""
+# Defaults to true for localhost, false otherwise. Set explicitly to override.
+# enforce_context_limit = false
+n_ctx = 4096
+context_margin = 256
+hard_overflow_tokens = 1024
+
+[summary]
+# Optional dedicated summarizer model. Leave empty to reuse primary/fallback.
+provider = ""
+model = ""
+base_url = ""
+referer = ""
+title = ""
+
+[embeddings]
+# Used for semantic memory reranking and low-information chatter suppression.
+# The sqlite-vec table is fixed at 3072 dimensions; changing dimensions requires
+# rebuilding memory_chunk_vec, memory_prototype_vec, and embedding meta.
+model = "google/gemini-embedding-2-preview"
+dimensions = 3072
+base_url = "https://openrouter.ai/api/v1"
+referer = ""
+title = ""
+
+[context]
+token_nudge_threshold = 120000
+fallback_token_nudge_threshold = 50000
+compact_target_tokens = 65000
+compact_trigger_tokens = 90000
+compact_recent_messages = 80
+compact_chunk_messages = 32
+compact_summary_max_chars = 16000
+# 0 disables idle compaction.
+idle_compaction_minutes = 45
+
+[runner]
+# Hard cap on assistant turns in a single wake cycle.
+max_turns = 120
+# Stop if the same assistant tool call + result pattern repeats.
+max_identical_tool_turns = 6
+
+[image_tool]
+# Max bytes accepted before rejecting an image attachment.
+max_bytes = 150000
+# Absolute image root exposed to the agent. Defaults based on container/ssh mode.
+root = ""
+
+[discord]
+gateway_enabled = true
+gateway_trace = false
+gateway_raw_fallback = true
+gateway_raw_fallback_all = false
+# Channel ids scanned by discord_scan when no channel_ids arg is passed.
+scan_channel_ids = []
+wake_on_event = false
+wake_on_dm = true
+batch_interval_ms = 60000
+batch_only_configured = true
+pending_auto_seen_minutes = 10
+batch_scan = true
+batch_max_messages = 40
+rest_max_attempts = 3
+rest_retry_base_ms = 1000
+# Auto-detected from the gateway READY payload if left blank.
+bot_user_id = ""
+
+[metrics]
+retention_days = 3

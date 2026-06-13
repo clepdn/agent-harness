@@ -1,3 +1,4 @@
+import { config } from "../config"
 import { recordMetric } from "../metrics"
 import { emit } from "../stream"
 import type { Message } from "../types"
@@ -22,14 +23,8 @@ import type { LoopHooks, LoopState } from "./types"
 const LLM_RECENT_MIN_KEEP = 6
 const LLM_RECENT_MAX_KEEP = 40
 const LLM_TAIL_CHAR_BUDGET = 60_000
-const RUNNER_MAX_TURNS = parsePositiveIntEnv(process.env.RUNNER_MAX_TURNS, 120)
-const RUNNER_MAX_IDENTICAL_TOOL_TURNS = parsePositiveIntEnv(process.env.RUNNER_MAX_IDENTICAL_TOOL_TURNS, 10)
-
-function parsePositiveIntEnv(value: string | undefined, fallback: number): number {
-  const parsed = Number.parseInt(value ?? "", 10)
-  if (!Number.isFinite(parsed) || parsed < 1) return fallback
-  return parsed
-}
+const RUNNER_MAX_TURNS = Math.max(1, config.runner.max_turns)
+const RUNNER_MAX_IDENTICAL_TOOL_TURNS = Math.max(1, config.runner.max_identical_tool_turns)
 
 enum CycleOutcome {
   NoTools = "no_tools",

@@ -1,4 +1,5 @@
 import type { ToolResultMessage } from "@earendil-works/pi-ai"
+import { redactSecrets } from "../config"
 import { logMessage } from "../db"
 import { emit } from "../stream"
 import { latestAssistantContent } from "./loop-content"
@@ -30,19 +31,23 @@ type StandardToolSpec<
 
 /**
  * Appends a tool-role message to conversation state and persistence logs.
+ * Tool output is filtered through `redactSecrets` first so credentials that
+ * leak via command output (curl -v, env, sloppy logging) never reach the
+ * model, the db, or stream subscribers.
  */
 export function pushToolMessage(convId: number, state: LoopState, call: FunctionToolCall, content: string): string {
+  const safe = redactSecrets(content)
   const toolMsg: ToolResultMessage = {
     role: "toolResult",
     toolCallId: call.id,
     toolName: call.name,
-    content: [{ type: "text", text: content }],
-    isError: content.startsWith("error:"),
+    content: [{ type: "text", text: safe }],
+    isError: safe.startsWith("error:"),
     timestamp: Date.now(),
   }
   state.conversation.push(toolMsg)
-  logMessage(convId, "toolResult", content, undefined, call.id)
-  return content
+  logMessage(convId, "toolResult", safe, undefined, call.id)
+  return safe
 }
 
 function hasToolResponse(state: LoopState, call: FunctionToolCall): boolean {

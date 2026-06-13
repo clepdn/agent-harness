@@ -1,4 +1,5 @@
 
+import { config } from "./config"
 import { createServer } from "./server"
 import { initDb } from "./db"
 import { initMetricsDb } from "./metrics"
@@ -6,7 +7,7 @@ import { shutdown } from "./runner/index"
 import { startDiscordGateway } from "./discord/gateway"
 import { ensureSoulFilePlacement } from "./bootstrap"
 
-const PORT = parseInt(process.env.PORT ?? "3000")
+const PORT = config.server.port
 
 async function main() {
   console.log("[niri] starting up...")
