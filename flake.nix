@@ -70,7 +70,9 @@
 	    });
 
 	nixosModules.default = { config, pkgs, lib, ... }:
-	    let cfg = config.services.coral;
+	    let
+		cfg            = config.services.coral;
+		settingsFormat = pkgs.formats.toml {};
 	    in {
 		options.services.coral = {
 		    enable = lib.mkEnableOption "coral";
@@ -94,10 +96,46 @@
 			default = "/home/coral";
 		    };
 
+		    settings = lib.mkOption {
+			type    = settingsFormat.type;
+			default = {};
+			example = lib.literalExpression ''
+			    {
+				server.port = 3000;
+				agent = {
+				    name = "niri";
+				    env  = "default";
+				};
+				discord = {
+				    gateway_enabled = true;
+				    wake_on_dm      = true;
+				    scan_channel_ids = [ "123" "456" ];
+				};
+			    }
+			'';
+			description = ''
+			    Freeform TOML settings serialized to config.toml and passed via --config.
+			    Keys map directly to TOML — use snake_case throughout (e.g. `discord.gateway_enabled`).
+			    See config.example.toml in the coral repo for the full schema.
+
+			    Ignored if `configFile` is set explicitly.
+			'';
+		    };
+
 		    configFile = lib.mkOption {
-			type    = lib.types.nullOr lib.types.str;
-			default = null;
-			description = "Path to a TOML config file passed via --config.";
+			type    = lib.types.nullOr lib.types.path;
+			default =
+			    if cfg.settings == {}
+			    then null
+			    else settingsFormat.generate "coral-config.toml" cfg.settings;
+			defaultText = lib.literalExpression ''
+			    if settings == {} then null
+			    else (pkgs.formats.toml {}).generate "coral-config.toml" settings
+			'';
+			description = ''
+			    Path to a TOML config file passed via --config.
+			    Defaults to a file generated from `settings`; set explicitly to bypass `settings`.
+			'';
 		    };
 		    secretsFile = lib.mkOption {
 			type    = lib.types.nullOr lib.types.str;
