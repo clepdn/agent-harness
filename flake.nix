@@ -21,7 +21,7 @@
 		    src     = self;
 
 		    nodejs = pkgs.nodejs_22;
-		    npmDepsHash = "sha256-5v0gD10GzYYlv9vvjNw2nKDS432rLaB40YfRkqdU3KQ=";
+		    npmDepsHash = "sha256-V6h7nU6mcSDkW3DbsOeiL/P0/9e36pLpux8c6kbXJNQ=";
 
 		    postPatch = ''
 			rm -rf pi
