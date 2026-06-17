@@ -10,6 +10,7 @@ import {
   scanDiscordChannels,
   sendDiscordMessage,
   setDiscordChannelNote,
+  uploadDiscordFile,
 } from "../discord/state"
 import { listAliases, removeAlias, searchMemories, setAlias } from "../memory"
 import { emit } from "../stream"
@@ -262,6 +263,26 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
             await sendDiscordMessage({
               channelId: channel_id as string,
               content: content as string,
+              sourceItemId: source_item_id as string | undefined,
+              replyMode: reply_mode as string | undefined,
+              referenceMessage: reference_message as string | undefined,
+            }),
+            null,
+            2,
+          ),
+      }),
+
+    discord_upload: (ctx) =>
+      runStandardTool(ctx, {
+        name: "discord_upload",
+        logArgKeys: ["channel_id", "file_path", "source_item_id", "reply_mode"] as const,
+        runArgKeys: ["channel_id", "file_path", "content", "source_item_id", "reply_mode", "reference_message"] as const,
+        run: async (channel_id, file_path, content, source_item_id, reply_mode, reference_message) =>
+          JSON.stringify(
+            await uploadDiscordFile({
+              channelId: channel_id as string,
+              filePath: file_path as string,
+              content: content as string | undefined,
               sourceItemId: source_item_id as string | undefined,
               replyMode: reply_mode as string | undefined,
               referenceMessage: reference_message as string | undefined,

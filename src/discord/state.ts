@@ -7,6 +7,7 @@
  * @module discord/state
  */
 
+import path from "path"
 import { Routes } from "discord.js"
 import { config } from "../config"
 import {
@@ -560,6 +561,140 @@ export async function sendDiscordMessage(params: {
     used_reference_message_id: referenceMessageId,
     resolved_source_item_id: resolvedSourceItemId,
     inferred_source_item_id: inferredSourceItemId,
+    stored: ingest.stored,
+  }
+}
+
+// ── file upload ────────────────────────────────────────────────────────
+
+const DISCORD_MAX_FILE_BYTES = 25 * 1024 * 1024 // 25 MB
+
+/**
+ * Uploads a file to a Discord channel, optionally with a text caption.
+ *
+ * @param params - Upload parameters.
+ * @returns Upload result with message id and attachment info.
+ */
+export async function uploadDiscordFile(params: {
+  channelId?: string
+  filePath: string
+  content?: string
+  sourceItemId?: string
+  replyMode?: string
+  referenceMessage?: string
+}): Promise<Record<string, unknown>> {
+  let channelId = String(params.channelId ?? "").trim()
+  if (!channelId && params.sourceItemId?.trim()) {
+    channelId = getItemChannelId(params.sourceItemId.trim()) ?? ""
+  }
+  if (!channelId) throw new Error("channel_id is required (or provide source_item_id that maps to one)")
+
+  const filePath = String(params.filePath ?? "").trim()
+  if (!filePath) throw new Error("file_path is required")
+
+  // Resolve and validate before reading
+  const { stat, readFile } = await import("fs/promises")
+
+  const resolved = path.resolve(filePath)
+  let fileBuf: Buffer
+  let fileName: string
+  let fileSize: number
+
+  try {
+    const st = await stat(resolved)
+    if (!st.isFile()) throw new Error(`not a regular file: ${resolved}`)
+    fileSize = st.size
+    if (fileSize > DISCORD_MAX_FILE_BYTES) {
+      throw new Error(`file too large: ${fileSize} bytes (max ${DISCORD_MAX_FILE_BYTES})`)
+    }
+    fileName = path.basename(resolved)
+    fileBuf = await readFile(resolved)
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith("file too large")) throw err
+    if (err instanceof Error && err.message.startsWith("not a regular file")) throw err
+    const msg = err instanceof Error ? err.message : String(err)
+    throw new Error(`cannot read upload file: ${msg}`)
+  }
+
+  const content = String(params.content ?? "").trim()
+  const replyMode = normalizeReplyMode(params.replyMode)
+  const explicitSourceItemId = params.sourceItemId?.trim() ? params.sourceItemId.trim() : null
+  const inferredSourceItemId = explicitSourceItemId ? null : inferPendingDmItemId(channelId)
+  const resolvedSourceItemId = explicitSourceItemId ?? inferredSourceItemId
+  const referenceMessageId = await chooseMessageReference({
+    channelId,
+    replyMode,
+    sourceItemId: resolvedSourceItemId ?? undefined,
+    referenceMessage: params.referenceMessage,
+  })
+
+  const rest = makeRestClient()
+  const botUserId = await getBotUserId(rest)
+
+  const body: Record<string, unknown> = {}
+  if (content) body.content = content
+  if (referenceMessageId) {
+    body.message_reference = {
+      message_id: referenceMessageId,
+      channel_id: channelId,
+      fail_if_not_exists: false,
+    }
+    body.allowed_mentions = { replied_user: false }
+  }
+
+  const message = (await withDiscordRestRetry(`upload file ${channelId}`, () =>
+    rest.post(Routes.channelMessages(channelId), {
+      body,
+      files: [{ name: fileName, data: fileBuf }],
+    }),
+  )) as DiscordObject
+
+  const ingest = ingestDiscordEvent(
+    {
+      message,
+      channel: {
+        id: channelId,
+        type: message.guild_id == null ? 1 : null,
+        guild_id: message.guild_id,
+      },
+      is_dm: message.guild_id == null,
+      author_is_bot: true,
+    },
+    { botUserId },
+  )
+
+  // Extract attachment URLs from the returned message object
+  const attachments: unknown[] = Array.isArray((message as Record<string, unknown>).attachments)
+    ? ((message as Record<string, unknown>).attachments as unknown[])
+    : []
+  const attachmentUrls = attachments
+    .map((a) => {
+      const obj = a as Record<string, unknown> | undefined
+      return typeof obj?.url === "string" ? obj.url : null
+    })
+    .filter(Boolean)
+
+  if (resolvedSourceItemId) {
+    const wasInferred = !explicitSourceItemId
+    markDiscordItem(
+      resolvedSourceItemId,
+      "acted",
+      `uploaded file${wasInferred ? ", inferred_dm_item" : ""}`,
+      referenceMessageId ? "replied" : "messaged",
+    )
+  }
+
+  return {
+    ok: true,
+    sent_message_id: asString(message.id),
+    channel_id: channelId,
+    file_name: fileName,
+    file_size: fileSize,
+    content,
+    attachment_urls: attachmentUrls,
+    reply_mode: replyMode,
+    used_reference_message_id: referenceMessageId,
+    resolved_source_item_id: resolvedSourceItemId,
     stored: ingest.stored,
   }
 }

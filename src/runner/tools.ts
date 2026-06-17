@@ -172,6 +172,23 @@ export const TOOLS: Tool[] = [
     }),
   },
   {
+    name: "discord_upload",
+    description:
+      "Upload a file to a Discord channel, optionally with a text caption. Reads the file from your local filesystem. Max 25 MB.",
+    parameters: s({
+      type: "object",
+      properties: {
+        channel_id: { type: "string", description: "Target channel id." },
+        file_path: { type: "string", description: "Absolute or relative path to the file on your filesystem." },
+        content: { type: "string", description: "Optional text caption to send with the file." },
+        source_item_id: { type: "string", description: "Optional inbox item id to mark as acted after sending." },
+        reference_message: { type: "string", description: "Optional specific message to treat as reply target." },
+        reply_mode: { type: "string", enum: ["auto", "plain", "explicit"], description: "Reply behavior policy (default auto)." },
+      },
+      required: ["file_path"],
+    }),
+  },
+  {
     name: "discord_channels",
     description: "List configured Discord channels and DM channels with stored interactions, including id-to-name mapping, guild context, and optional channel notes.",
     parameters: s({ type: "object", properties: {} }),

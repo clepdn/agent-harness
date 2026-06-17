@@ -60,6 +60,12 @@ function describeToolCall(call: { name: string; args: Record<string, unknown> })
     if (!content) return `discord_send -> ${channelTag}`
     return `discord_send -> ${channelTag}: ${normalizeSummaryText(content)}`
   }
+  if (name === "discord_upload") {
+    const filePath = typeof args.file_path === "string" ? args.file_path : "?"
+    const channelId = typeof args.channel_id === "string" ? args.channel_id : ""
+    const channelTag = channelId ? `ch/${channelId.slice(-6)}` : "ch?"
+    return `discord_upload ${filePath} -> ${channelTag}`
+  }
   if (name === "discord_mark") {
     const itemId = typeof args.item_id === "string" ? args.item_id : ""
     const action = typeof args.action === "string" ? args.action : ""
