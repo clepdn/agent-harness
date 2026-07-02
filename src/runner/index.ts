@@ -357,8 +357,11 @@ export async function wake(event: UserMessage): Promise<void> {
     if (exit === "rest") setRunnerPresence("resting")
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    console.error(`[runner] loop aborted: ${message}`)
+    console.error(`[runner] fatal loop error: ${message}`)
     if (err instanceof Error && err.stack) console.error(err.stack)
+    // Let it crash — systemd will restart the process with a clean state.
+    // Trying to continue after an unexpected error risks zombie state.
+    process.exit(1)
   } finally {
     endConversation(convId, state.tokenCount)
     state.running = false
