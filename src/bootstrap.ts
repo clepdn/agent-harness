@@ -210,8 +210,14 @@ export async function buildBootstrap(event: UserMessage, priorRest?: PriorRestCo
   const soul = await readFile(SOUL_FILE)
   const coreMemories = await readFile(path.join(HOME_DIR, "memories", "core.md"))
 
+  const safeModeNotice = process.env.CORAL_SHIM_FAILED
+    ? "## Safe Mode\n\nThe shim failed and you have been started up in safe mode without the shim. " +
+      "Your local harness changes are not active. Investigate the issue and restart when ready.\n\n---\n\n"
+    : ""
+
   const systemPrompt = soul
     ? `\
+${safeModeNotice}\
 ${soul}
 
 ---

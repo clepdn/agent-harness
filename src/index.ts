@@ -1,4 +1,5 @@
 
+import { tryShim, SHIM_FAILED_ENV } from "./shim"
 import { config } from "./config"
 import { createServer } from "./server"
 import { initDb } from "./db"
@@ -10,6 +11,16 @@ import { ensureSoulFilePlacement } from "./bootstrap"
 const PORT = config.server.port
 
 async function main() {
+  // Check for shim mode before anything else.
+  // If the shim is active, this blocks until the child exits.
+  // On clean exit (0) the process terminates here.
+  // On failure we fall through to normal startup in safe mode.
+  await tryShim()
+
+  if (process.env[SHIM_FAILED_ENV]) {
+    console.warn("[niri] started in safe mode — shim child failed, running from nix store")
+  }
+
   console.log("[niri] starting up...")
 
   await ensureSoulFilePlacement()
