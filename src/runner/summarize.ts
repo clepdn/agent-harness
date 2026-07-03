@@ -367,6 +367,106 @@ export async function summarizeConversationViaLLM(
   }
 }
 
+// ── Proactive per-message compaction ──────────────────────────────────────────
+
+const COMPACTED_MARKER = "[compacted]"
+
+/**
+ * Summarizes a single tool result message using the compaction model.
+ * Returns the summary text, or null if summarization failed or wasn't worthwhile.
+ */
+async function summarizeToolResult(
+  content: string,
+  toolName: string,
+  model: Model<"openai-completions">,
+  apiKey: string | undefined,
+): Promise<string | null> {
+  const systemPrompt =
+    `You are summarizing the output of a "${toolName}" tool call from an agent's conversation. ` +
+    "Preserve ALL key facts, file paths, URLs, identifiers, error messages, important data, and structural information. " +
+    "Be concise but complete — the summary must be usable as a reference by the agent who originally called the tool. " +
+    "Do not add commentary. Output only the summary."
+
+  const ctx: Context = {
+    systemPrompt,
+    messages: [{ role: "user", content, timestamp: Date.now() }],
+  }
+
+  try {
+    const opts = apiKey ? { apiKey } : {}
+    const resp = await complete(model, ctx, opts as unknown as import("@earendil-works/pi-ai").ProviderStreamOptions)
+    const summaryText = resp.content
+      .filter((p): p is TextContent => p.type === "text")
+      .map((p) => p.text)
+      .join("")
+      .trim()
+    if (!summaryText || summaryText.length < 20) return null
+    // Reject if the summary isn't meaningfully smaller than the original
+    if (summaryText.length >= content.length * 0.9) return null
+    return summaryText
+  } catch (err) {
+    console.warn(`[context] proactive compaction failed for ${toolName}: ${errorSummary(err)}`)
+    return null
+  }
+}
+
+/**
+ * Walks the conversation and proactively summarizes tool result messages that
+ * are old enough (≥ turnAge assistant messages after them) and large enough
+ * (≥ minChars). Returns the updated messages and a count of compacted items.
+ *
+ * Only runs when respect_cache is false — when respect_cache is true, the
+ * conversation is left untouched to preserve prompt cache.
+ */
+export async function proactiveCompaction(
+  messages: Message[],
+  model: Model<"openai-completions">,
+  apiKey: string | undefined,
+  turnAge: number,
+  minChars: number,
+): Promise<{ messages: Message[]; compacted: number }> {
+  // Collect assistant message indices for turn counting
+  const assistantIndices: number[] = []
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i]!.role === "assistant") assistantIndices.push(i)
+  }
+
+  // Quick helper: count assistant messages after position i
+  function assistantsAfter(i: number): number {
+    return assistantIndices.filter((idx) => idx > i).length
+  }
+
+  let compacted = 0
+  const result = [...messages]
+
+  for (let i = 0; i < result.length; i++) {
+    const msg = result[i]!
+    if (msg.role !== "toolResult") continue
+
+    // Skip if not old enough
+    if (assistantsAfter(i) < turnAge) continue
+
+    const content = messageStringContent(msg)
+
+    // Skip if already compacted
+    if (content.startsWith(COMPACTED_MARKER)) continue
+
+    // Skip if not large enough
+    if (content.length < minChars) continue
+
+    const summary = await summarizeToolResult(content, msg.toolName || "unknown", model, apiKey)
+    if (!summary) continue
+
+    result[i] = {
+      ...msg,
+      content: [{ type: "text" as const, text: `${COMPACTED_MARKER} ${summary}` }],
+    }
+    compacted++
+  }
+
+  return { messages: result, compacted }
+}
+
 // ── Fallback context window ───────────────────────────────────────────────────
 
 export function fallbackContextWindow(messages: Message[]): {

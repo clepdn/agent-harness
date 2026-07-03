@@ -7,6 +7,9 @@ import { config } from "../config"
 export const TOKEN_NUDGE_THRESHOLD = config.context.token_nudge_threshold
 export const FALLBACK_TOKEN_NUDGE_THRESHOLD = config.context.fallback_token_nudge_threshold
 export const CONTEXT_COMPACT_TRIGGER_TOKENS = config.context.compact_trigger_tokens
+export const RESPECT_CACHE = config.context.respect_cache
+export const COMPACTION_TURN_AGE = Math.max(1, config.context.compaction_turn_age)
+export const COMPACTION_MIN_CHARS = Math.max(100, config.context.compaction_min_chars)
 export const IDLE_COMPACTION_TIMEOUT_MS = (() => {
   const minutes = config.context.idle_compaction_minutes
   if (!Number.isFinite(minutes) || minutes <= 0) return 0
@@ -170,3 +173,4 @@ if (summaryModel) console.log(`[config] summary=${SUMMARY_MODEL} provider=${summ
 console.log(`[config] env=${config.agent.env} use_fallback=${USE_FALLBACK}`)
 console.log(`[config] thinking=${ENABLE_THINKING}`)
 if (IDLE_COMPACTION_TIMEOUT_MS > 0) console.log(`[config] idle_compaction=${IDLE_COMPACTION_TIMEOUT_MS / 60_000}min`)
+console.log(`[config] respect_cache=${RESPECT_CACHE} compaction_turn_age=${COMPACTION_TURN_AGE} compaction_min_chars=${COMPACTION_MIN_CHARS}`)

@@ -8,12 +8,16 @@ import { runLoop } from "./loop"
 import { setRunnerPresence } from "./presence"
 import type { RunnerStateInternal } from "./types"
 import {
+  COMPACTION_MIN_CHARS,
+  COMPACTION_TURN_AGE,
   consumeRestSnapshot,
   CONTEXT_COMPACT_TRIGGER_TOKENS,
   estimatePromptTokens,
   findSummaryMessageIndex,
   IDLE_COMPACTION_TIMEOUT_MS,
   loadAgentSummaryContext,
+  proactiveCompaction,
+  RESPECT_CACHE,
   summarizeConversationViaLLM,
 } from "./util"
 
@@ -186,6 +190,45 @@ const LLM_RECENT_MAX_KEEP = 40
 const LLM_TAIL_CHAR_BUDGET = 60_000
 
 /**
+ * Attempts to proactively compact old large tool results while idle.
+ * Only runs when respect_cache is false.
+ */
+async function applyIdleProactiveCompaction(): Promise<boolean> {
+  if (RESPECT_CACHE) return false
+
+  const provider = configuredSummaryProvider()
+  if (!provider.model) return false
+
+  const { messages, compacted } = await proactiveCompaction(
+    state.conversation,
+    provider.model,
+    provider.apiKey,
+    COMPACTION_TURN_AGE,
+    COMPACTION_MIN_CHARS,
+  )
+
+  if (compacted === 0) return false
+
+  const beforeEstimate = state.contextSize
+  state.conversation = messages
+  state.contextSize = estimatePromptTokens(state.conversation)
+
+  console.log(
+    `[context] idle proactive: compacted ${compacted} tool result(s) (${beforeEstimate} -> ${state.contextSize} tokens)`,
+  )
+
+  recordMetric({
+    type: "compaction",
+    before: beforeEstimate,
+    after: state.contextSize,
+    method: "idle-proactive",
+    summary: undefined,
+  })
+
+  return true
+}
+
+/**
  * Attempts to compact the conversation via LLM summarization while idle.
  * Returns true if compaction occurred and session was saved.
  */
@@ -270,8 +313,9 @@ async function waitForEventWithIdleCompaction(): Promise<UserMessage> {
     const event = await waitForEventWithTimeout(IDLE_COMPACTION_TIMEOUT_MS)
     if (event) return event
 
-    // Timeout fired — try idle compaction
+    // Timeout fired — try proactive compaction first, then full idle compaction
     try {
+      await applyIdleProactiveCompaction()
       await applyIdleCompaction()
     } catch (err) {
       console.warn(`[context] idle compaction failed: ${err instanceof Error ? err.message : String(err)}`)

@@ -16,6 +16,7 @@ import {
   MODEL,
   PRIMARY_API_KEY,
   PRIMARY_TOOL_CHOICE,
+  RESPECT_CACHE,
   SUMMARY_API_KEY,
   SUMMARY_MODEL,
   THINKING_EFFORT,
@@ -43,8 +44,10 @@ import type { Model } from "@earendil-works/pi-ai"
 
 /**
  * Resolves the configured summary model pair.
+ * When respect_cache is true, returns null — no summaries are produced.
  */
 export function configuredSummaryProvider(): { model: Model<"openai-completions"> | null; apiKey: string | undefined } {
+  if (RESPECT_CACHE) return { model: null, apiKey: undefined }
   if (summaryModel && SUMMARY_MODEL) return { model: summaryModel, apiKey: SUMMARY_API_KEY }
   return {
     model: USE_FALLBACK ? fallbackModel : primaryModel,

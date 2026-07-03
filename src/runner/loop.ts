@@ -3,14 +3,18 @@ import { recordMetric } from "../metrics"
 import { emit } from "../stream"
 import type { Message } from "../types"
 import {
+  COMPACTION_MIN_CHARS,
+  COMPACTION_TURN_AGE,
   CONTEXT_COMPACT_TRIGGER_TOKENS,
   ENABLE_THINKING,
   FALLBACK_TOKEN_NUDGE_THRESHOLD,
+  RESPECT_CACHE,
   TOKEN_NUDGE_THRESHOLD,
   USE_FALLBACK,
   estimatePromptTokens,
   findSummaryMessageIndex,
   loadAgentSummaryContext,
+  proactiveCompaction,
   summarizeConversationViaLLM,
 } from "./util"
 import { addAssistantMessage, applyUsage, configuredSummaryProvider, emitThinking, fetchCompletion } from "./loop-completion"
@@ -166,6 +170,46 @@ function applyContextNudge(state: LoopState): void {
   }
 }
 
+/**
+ * Proactively summarizes old, large tool results using the compaction model.
+ * Only runs when respect_cache is false. Targets tool results that are
+ * ≥ compaction_turn_age turns old and ≥ compaction_min_chars in size.
+ */
+async function applyProactiveCompaction(state: LoopState): Promise<boolean> {
+  if (RESPECT_CACHE) return false
+
+  const provider = configuredSummaryProvider()
+  if (!provider.model) return false
+
+  const { messages, compacted } = await proactiveCompaction(
+    state.conversation,
+    provider.model,
+    provider.apiKey,
+    COMPACTION_TURN_AGE,
+    COMPACTION_MIN_CHARS,
+  )
+
+  if (compacted === 0) return false
+
+  const beforeEstimate = state.contextSize
+  state.conversation = messages
+  state.contextSize = estimatePromptTokens(state.conversation)
+
+  console.log(
+    `[context] proactive: compacted ${compacted} tool result(s) (${beforeEstimate} -> ${state.contextSize} tokens)`,
+  )
+
+  recordMetric({
+    type: "compaction",
+    before: beforeEstimate,
+    after: state.contextSize,
+    method: "proactive",
+    summary: undefined,
+  })
+
+  return true
+}
+
 async function applyLLMCompaction(state: LoopState, phase: "pre-turn" | "post-turn"): Promise<boolean> {
   // Gate strictly on the model-reported prompt_tokens (state.contextSize).
   // The char-based estimatePromptTokens inflates the tools schema ~3×, which
@@ -230,6 +274,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
   let consecutiveIdenticalToolTurns = 0
 
   while (true) {
+    await applyProactiveCompaction(state)
     await applyLLMCompaction(state, "pre-turn")
 
     const turnStart = state.conversation.length

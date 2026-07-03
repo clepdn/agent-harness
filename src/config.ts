@@ -348,6 +348,9 @@ export const config = {
     compact_chunk_messages: int(contextT.compact_chunk_messages, 32),
     compact_summary_max_chars: int(contextT.compact_summary_max_chars, 16000),
     idle_compaction_minutes: num(contextT.idle_compaction_minutes, 45),
+    respect_cache: bool(contextT.respect_cache, true),
+    compaction_turn_age: int(contextT.compaction_turn_age, 5),
+    compaction_min_chars: int(contextT.compaction_min_chars, 2000),
   },
   runner: {
     max_turns: int(runnerT.max_turns, 120),

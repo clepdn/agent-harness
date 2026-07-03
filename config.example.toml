@@ -76,6 +76,17 @@ compact_chunk_messages = 32
 compact_summary_max_chars = 16000
 # 0 disables idle compaction.
 idle_compaction_minutes = 45
+# When true, no summaries are produced — the conversation stays raw to
+# preserve prompt cache. When false, old large tool results are proactively
+# summarized using the [summary] model (or primary model if no [summary] is set).
+respect_cache = true
+# Minimum number of turns (assistant messages) that must pass after a tool
+# result before it's eligible for proactive compaction. Only applies when
+# respect_cache = false.
+compaction_turn_age = 5
+# Minimum character length for a tool result to be considered "large" enough
+# to summarize. Only applies when respect_cache = false.
+compaction_min_chars = 2000
 
 [runner]
 # Hard cap on assistant turns in a single wake cycle.
