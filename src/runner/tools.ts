@@ -235,12 +235,13 @@ export const TOOLS: Tool[] = [
   {
     name: "subagent",
     description:
-      "Spawn a named subagent to handle a task. Subagents run with their own conversation state, system prompt, and tool set (configured in TOML). They cannot wait for events or interact with Discord directly. Returns the subagent's final text output.",
+      "Spawn a named subagent to handle a task. Subagents run with their own conversation state, system prompt, and tool set (configured in TOML). They cannot wait for events or interact with Discord directly. By default runs as a background job — you'll be woken and notified when it completes. Set blocking=true to wait for the result inline (returns the subagent's final text output directly).",
     parameters: s({
       type: "object",
       properties: {
         name: { type: "string", description: "Name of the configured subagent to spawn." },
         task: { type: "string", description: "The task description to give the subagent." },
+        blocking: { type: "boolean", description: "If true, block and wait for the subagent to finish (returns result directly). If false (default), spawn as a background job and get notified on completion." },
       },
       required: ["name", "task"],
     }),

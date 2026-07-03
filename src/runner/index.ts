@@ -1,5 +1,6 @@
 import { buildBootstrap } from "../bootstrap"
 import { endConversation, logMessage, startConversation } from "../db"
+import { initJobManager } from "./jobs"
 import { recordMetric } from "../metrics"
 import { emit } from "../stream"
 import type { UserMessage } from "../types"
@@ -120,6 +121,16 @@ export function enqueueEvent(event: UserMessage, options: EnqueueOptions = {}): 
   }
   return true
 }
+
+// Wire the job manager to deliver results through the event loop.
+// If the runner is active, enqueue the event. If not, wake directly.
+initJobManager((event) => {
+  if (state.running) {
+    enqueueEvent(event)
+  } else {
+    void wake(event)
+  }
+})
 
 /**
  * Requests graceful shutdown by injecting a final chat event and waiting for rest.

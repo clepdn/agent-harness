@@ -6,7 +6,7 @@ import type { Message as PiMessage } from "@earendil-works/pi-ai"
  */
 export type Message = PiMessage
 
-export type TriggerSource = "discord" | "bsky" | "webhook" | "cron" | "chat"
+export type TriggerSource = "discord" | "bsky" | "webhook" | "cron" | "chat" | "job"
 
 /**
  * Trigger event from an external source (Discord, cron, etc.).

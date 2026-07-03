@@ -18,6 +18,7 @@ import { emit } from "../stream"
 import type { ToolHandler } from "./loop-shared"
 import { pushToolMessage, recordToolResult, runStandardTool, toolError } from "./loop-tool-runtime"
 import { findSubagent, runSubagent } from "./subagent"
+import { startJob } from "./jobs"
 import { saveRestSnapshot } from "./util"
 
 const DEFAULT_WAIT_THEN_CONTINUE_MS = 10_000
@@ -314,6 +315,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
     subagent: async ({ convId, state, call, args }) => {
       const name = String(args.name ?? "").trim()
       const task = String(args.task ?? "").trim()
+      const blocking = Boolean(args.blocking ?? false)
 
       if (!name) {
         recordToolResult(convId, state, call, "subagent", { name, task }, "error: subagent requires a name")
@@ -331,12 +333,22 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         return {}
       }
 
-      console.log(`[subagent] main agent spawning "${name}" with task: ${task.slice(0, 200)}`)
-      try {
-        const result = await runSubagent(convId, subagentConfig, task)
-        recordToolResult(convId, state, call, "subagent", { name, task: task.slice(0, 500) }, result)
-      } catch (err) {
-        recordToolResult(convId, state, call, "subagent", { name, task: task.slice(0, 500) }, toolError(err))
+      if (blocking) {
+        console.log(`[subagent] main agent spawning "${name}" (blocking) with task: ${task.slice(0, 200)}`)
+        try {
+          const result = await runSubagent(convId, subagentConfig, task)
+          recordToolResult(convId, state, call, "subagent", { name, task: task.slice(0, 500), blocking: true }, result)
+        } catch (err) {
+          recordToolResult(convId, state, call, "subagent", { name, task: task.slice(0, 500), blocking: true }, toolError(err))
+        }
+      } else {
+        const jobId = startJob(`subagent:${name}`, () => runSubagent(convId, subagentConfig, task))
+        console.log(`[subagent] main agent spawned "${name}" as job ${jobId} with task: ${task.slice(0, 200)}`)
+        recordToolResult(
+          convId, state, call, "subagent",
+          { name, task: task.slice(0, 500), blocking: false },
+          `subagent "${name}" started as background job (${jobId}). you will be woken and notified when it completes.`,
+        )
       }
       return {}
     },
