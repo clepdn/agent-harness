@@ -1,6 +1,6 @@
 import type { AssistantMessage, ImageContent, TextContent, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai"
 import type { Message } from "../types"
-import { TOOLS } from "./tools"
+import { TOOLS, isToolEnabled } from "./tools"
 
 // ── Shared constants ──────────────────────────────────────────────────────────
 
@@ -52,7 +52,7 @@ export function findSummaryMessageIndex(messages: Message[]): number {
  * Includes both messages and tool schema to mirror the actual completion payload.
  */
 export function estimatePromptTokens(messages: Message[]): number {
-  const jsonChars = JSON.stringify({ messages, tools: TOOLS }).length
+  const jsonChars = JSON.stringify({ messages, tools: TOOLS.filter((t) => isToolEnabled(t.name)) }).length
   return Math.ceil(jsonChars / 4)
 }
 

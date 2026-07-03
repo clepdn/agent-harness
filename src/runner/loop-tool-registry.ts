@@ -1,4 +1,5 @@
 import type { UserMessage as PiUserMessage } from "@earendil-works/pi-ai"
+import { config } from "../config"
 import { normalizeTimeoutMs } from "../container/config"
 import { editFile, readFile, readImageForModel, runCommand } from "../container/index"
 import { logMessage } from "../db"
@@ -16,6 +17,7 @@ import { listAliases, removeAlias, searchMemories, setAlias } from "../memory"
 import { emit } from "../stream"
 import type { ToolHandler } from "./loop-shared"
 import { pushToolMessage, recordToolResult, runStandardTool, toolError } from "./loop-tool-runtime"
+import { findSubagent, runSubagent } from "./subagent"
 import { saveRestSnapshot } from "./util"
 
 const DEFAULT_WAIT_THEN_CONTINUE_MS = 10_000
@@ -308,5 +310,35 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         run: async (channel_id, note) =>
           JSON.stringify(setDiscordChannelNote(channel_id as string, (note as string | undefined) ?? ""), null, 2),
       }),
+
+    subagent: async ({ convId, state, call, args }) => {
+      const name = String(args.name ?? "").trim()
+      const task = String(args.task ?? "").trim()
+
+      if (!name) {
+        recordToolResult(convId, state, call, "subagent", { name, task }, "error: subagent requires a name")
+        return {}
+      }
+      if (!task) {
+        recordToolResult(convId, state, call, "subagent", { name, task }, "error: subagent requires a task")
+        return {}
+      }
+
+      const subagentConfig = findSubagent(name)
+      if (!subagentConfig) {
+        const available = config.subagents.map((sa) => sa.name).join(", ") || "(none configured)"
+        recordToolResult(convId, state, call, "subagent", { name, task }, `error: no subagent named "${name}". available: ${available}`)
+        return {}
+      }
+
+      console.log(`[subagent] main agent spawning "${name}" with task: ${task.slice(0, 200)}`)
+      try {
+        const result = await runSubagent(convId, subagentConfig, task)
+        recordToolResult(convId, state, call, "subagent", { name, task: task.slice(0, 500) }, result)
+      } catch (err) {
+        recordToolResult(convId, state, call, "subagent", { name, task: task.slice(0, 500) }, toolError(err))
+      }
+      return {}
+    },
   }
 }

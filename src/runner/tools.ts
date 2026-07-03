@@ -1,4 +1,5 @@
 import type { Context, Tool, TSchema } from "@earendil-works/pi-ai"
+import { config } from "../config"
 import { imageRootForModelInput } from "../container/index"
 import type { LoopState } from "./types"
 
@@ -231,7 +232,60 @@ export const TOOLS: Tool[] = [
       },
     }),
   },
+  {
+    name: "subagent",
+    description:
+      "Spawn a named subagent to handle a task. Subagents run with their own conversation state, system prompt, and tool set (configured in TOML). They cannot wait for events or interact with Discord directly. Returns the subagent's final text output.",
+    parameters: s({
+      type: "object",
+      properties: {
+        name: { type: "string", description: "Name of the configured subagent to spawn." },
+        task: { type: "string", description: "The task description to give the subagent." },
+      },
+      required: ["name", "task"],
+    }),
+  },
 ]
+
+// ── Tool filtering ────────────────────────────────────────────────────────────
+
+/** All tool names in declaration order. */
+export const ALL_TOOL_NAMES = TOOLS.map((t) => t.name)
+
+/**
+ * Returns true if a tool is enabled for the main agent based on [tools] config.
+ * - If enabled_tools is empty, all tools are enabled.
+ * - blacklisted_tools always removes a tool regardless.
+ */
+export function isToolEnabled(name: string): boolean {
+  const { enabled_tools, blacklisted_tools } = config.tools
+  const enabled = enabled_tools.length === 0 || enabled_tools.includes(name)
+  return enabled && !blacklisted_tools.includes(name)
+}
+
+/** Filtered tool list for the main agent (after [tools] config). */
+const ACTIVE_TOOLS = TOOLS.filter((t) => isToolEnabled(t.name))
+
+/**
+ * Returns true if a tool is available to a subagent.
+ * Auto-blacklists event-loop tools (wait, rest, wait_then_continue, subagent).
+ */
+const SUBAGENT_AUTO_BLACKLIST = new Set(["wait", "rest", "wait_then_continue", "subagent"])
+
+export function isToolEnabledForSubagent(
+  name: string,
+  enabledTools: string[],
+  blacklistedTools: string[],
+): boolean {
+  if (SUBAGENT_AUTO_BLACKLIST.has(name)) return false
+  const enabled = enabledTools.length === 0 || enabledTools.includes(name)
+  return enabled && !blacklistedTools.includes(name)
+}
+
+/** Filtered tool list for a subagent. */
+export function getSubagentTools(enabledTools: string[], blacklistedTools: string[]): Tool[] {
+  return TOOLS.filter((t) => isToolEnabledForSubagent(t.name, enabledTools, blacklistedTools))
+}
 
 // ── Context builder ──────────────────────────────────────────────────────────
 
@@ -243,6 +297,6 @@ export function buildContext(state: Pick<LoopState, "systemPrompt" | "conversati
   return {
     systemPrompt: state.systemPrompt || undefined,
     messages: state.conversation,
-    tools: TOOLS,
+    tools: ACTIVE_TOOLS,
   }
 }

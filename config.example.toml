@@ -110,3 +110,36 @@ bot_user_id = ""
 
 [metrics]
 retention_days = 3
+
+# ── Tool filtering (main agent) ───────────────────────────────────────────────
+# Control which tools the main agent can use.
+# - enabled_tools: if empty (default), ALL tools are enabled.
+#   If non-empty, only the listed tools are available.
+# - blacklisted_tools: always removed from the available set, regardless of
+#   enabled_tools.
+#
+# [tools]
+# enabled_tools = ["shell", "read_file", "memory_search"]
+# blacklisted_tools = ["rest"]
+
+# ── Subagents ─────────────────────────────────────────────────────────────────
+# Define named subagents the main agent can spawn via the `subagent` tool.
+# Each [[subagents]] entry creates a new subagent with its own system prompt,
+# tool set, and turn limit. Subagents run a simplified loop — no event waiting,
+# no compaction, no Discord access, no nesting.
+#
+# [[subagents]]
+# name = "researcher"
+# model = ""                    # blank = inherit main agent's model
+# system_prompt = "You are a research assistant. Be thorough and cite sources."
+# enabled_tools = ["shell", "read_file", "memory_search"]   # blank = all (minus auto-blacklisted)
+# blacklisted_tools = ["edit_file"]                            # additional exclusions
+# max_turns = 30
+#
+# [[subagents]]
+# name = "writer"
+# model = ""
+# system_prompt = "You are a technical writer. Produce clean, concise prose."
+# enabled_tools = []
+# blacklisted_tools = []
+# max_turns = 20

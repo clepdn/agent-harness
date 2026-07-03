@@ -35,7 +35,7 @@ export const isLikelyLocalBase = (baseUrl: string): boolean => {
 // Escape hatch for unlisted/custom endpoints: set [model].base_url.
 export const MODEL_PROVIDER = config.model.provider
 export const MODEL = config.model.name
-const MODEL_BASE_URL = config.model.base_url
+export const MODEL_BASE_URL = config.model.base_url
 
 // ── Fallback model ────────────────────────────────────────────────────────────
 export const FALLBACK_PROVIDER = config.fallback.provider
@@ -80,7 +80,7 @@ function providerBaseUrl(provider: string): string | undefined {
   return models[0]?.baseUrl
 }
 
-function buildModel(
+export function buildModel(
   provider: string,
   modelId: string,
   baseUrlOverride?: string,
@@ -111,6 +111,7 @@ function buildModel(
   }
 }
 
+// Backwards-compat exports for code that references these directly
 // Backwards-compat exports for code that references these directly
 export const API_BASE = MODEL_BASE_URL || providerBaseUrl(MODEL_PROVIDER) || "(unknown)"
 export const FALLBACK_BASE = FALLBACK_BASE_URL

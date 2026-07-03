@@ -29,6 +29,49 @@ function parseToml(text: string): TomlTable {
     const line = stripComment(raw).trim()
     if (!line) continue
 
+    // Array-of-tables header: [[key]] or [[a.b]]
+    // Each occurrence creates a fresh table and appends it to an array.
+    if (line.startsWith("[[") && line.endsWith("]]")) {
+      const path = line.slice(2, -2).trim()
+      if (!path) throw new Error("empty array-of-tables header")
+      cursor = root
+      const segments = path.split(".")
+      for (let i = 0; i < segments.length; i++) {
+        const key = segments[i]!.trim()
+        const isLast = i === segments.length - 1
+        const existing = cursor[key]
+        if (isLast) {
+          // Create or append to the array of tables
+          if (existing === undefined) {
+            cursor[key] = []
+          } else if (!Array.isArray(existing)) {
+            throw new Error(`table path "${path}" overlaps a non-array value at "${key}"`)
+          }
+          const arr = cursor[key] as TomlValue[]
+          const fresh: TomlTable = {}
+          arr.push(fresh)
+          cursor = fresh
+        } else {
+          // Navigate through intermediate keys
+          if (existing === undefined) {
+            const fresh: TomlTable = {}
+            cursor[key] = fresh
+            cursor = fresh
+          } else if (isTable(existing)) {
+            cursor = existing
+          } else if (Array.isArray(existing)) {
+            // Use the last element of an existing array-of-tables
+            const last = existing[existing.length - 1]
+            if (!isTable(last)) throw new Error(`cannot navigate into non-table array element at "${key}"`)
+            cursor = last
+          } else {
+            throw new Error(`table path "${path}" overlaps a non-table value at "${key}"`)
+          }
+        }
+      }
+      continue
+    }
+
     if (line.startsWith("[") && line.endsWith("]")) {
       const path = line.slice(1, -1).trim()
       if (!path) throw new Error("empty table header")
@@ -204,6 +247,34 @@ const runnerT = table(merged.runner)
 const imageToolT = table(merged.image_tool)
 const discordT = table(merged.discord)
 const metricsT = table(merged.metrics)
+const toolsT = table(merged.tools)
+
+// ── Subagent configs (array of tables) ────────────────────────────────────────
+
+export interface SubagentConfig {
+  name: string
+  model: string
+  system_prompt: string
+  enabled_tools: string[]
+  blacklisted_tools: string[]
+  max_turns: number
+}
+
+const subagentConfigs: SubagentConfig[] = (() => {
+  const raw = merged.subagents
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((entry): entry is TomlTable => isTable(entry))
+    .map((entry) => ({
+      name: str(entry.name, "").trim(),
+      model: str(entry.model, "").trim(),
+      system_prompt: str(entry.system_prompt, ""),
+      enabled_tools: strArray(entry.enabled_tools),
+      blacklisted_tools: strArray(entry.blacklisted_tools),
+      max_turns: int(entry.max_turns, 30),
+    }))
+    .filter((sa) => sa.name.length > 0)
+})()
 
 const toolChoices = ["required", "auto", "none"] as const
 const thinkingEfforts = ["minimal", "low", "medium", "high", "xhigh"] as const
@@ -307,6 +378,11 @@ export const config = {
   metrics: {
     retention_days: num(metricsT.retention_days, 3),
   },
+  tools: {
+    enabled_tools: strArray(toolsT.enabled_tools),
+    blacklisted_tools: strArray(toolsT.blacklisted_tools),
+  },
+  subagents: subagentConfigs,
 }
 
 /**
