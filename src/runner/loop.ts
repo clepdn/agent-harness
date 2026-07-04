@@ -7,10 +7,7 @@ import {
   COMPACTION_TURN_AGE,
   CONTEXT_COMPACT_TRIGGER_TOKENS,
   ENABLE_THINKING,
-  FALLBACK_TOKEN_NUDGE_THRESHOLD,
   RESPECT_CACHE,
-  TOKEN_NUDGE_THRESHOLD,
-  USE_FALLBACK,
   estimatePromptTokens,
   findSummaryMessageIndex,
   loadAgentSummaryContext,
@@ -156,20 +153,6 @@ function applyDiscordSendNudge(
   state.conversation.push({ role: "user", content: nudge, timestamp: Date.now() })
   return true
 }
-
-function applyContextNudge(state: LoopState): void {
-  const tokenNudgeThreshold = USE_FALLBACK ? FALLBACK_TOKEN_NUDGE_THRESHOLD : TOKEN_NUDGE_THRESHOLD
-  const contextProvider = USE_FALLBACK ? "fallback" : "primary"
-
-  if (state.contextSize >= tokenNudgeThreshold) {
-    state.conversation.push({
-      role: "user",
-      content: `[system] context at ~${Math.round(state.contextSize / 1000)}k tokens (${contextProvider}). Consider wrapping up soon to stay within the context limit.`,
-      timestamp: Date.now(),
-    })
-  }
-}
-
 /**
  * Proactively summarizes old, large tool results using the compaction model.
  * Only runs when respect_cache is false. Targets tool results that are
@@ -331,7 +314,6 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     }
 
     await applyLLMCompaction(state, "post-turn")
-    applyContextNudge(state)
   }
 }
 
