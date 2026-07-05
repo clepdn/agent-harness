@@ -148,7 +148,7 @@ export function shouldFallback(errorMessage: string): boolean {
     const status = parseInt(statusMatch[1]!)
     return !status || status === 429 || status >= 500
   }
-  return /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EPIPE|UND_ERR|fetch failed|terminated|socket hang up|other side closed/i.test(errorMessage)
+  return /ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ECONNRESET|EPIPE|UND_ERR|fetch failed|terminated|socket hang up|other side closed|timed out/i.test(errorMessage)
 }
 
 export function isPromptTooLargeError(errorMessage: string): boolean {

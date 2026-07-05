@@ -32,6 +32,11 @@ test("shouldFallback returns true for transport error keywords", () => {
   assert.equal(shouldFallback("some unrelated error"), false)
 })
 
+test("shouldFallback returns true for request timeout", () => {
+  assert.equal(shouldFallback("Request timed out."), true)
+  assert.equal(shouldFallback("request timed out"), true)
+})
+
 test("isPromptTooLargeError detects context length phrases", () => {
   assert.equal(isPromptTooLargeError("context length exceeded"), true)
   assert.equal(isPromptTooLargeError("too many tokens in input"), true)
