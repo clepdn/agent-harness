@@ -29,15 +29,15 @@ export const isLikelyLocalBase = (baseUrl: string): boolean => {
 }
 
 // ── Primary model ─────────────────────────────────────────────────────────────
-// Preferred: model.provider + model.name (uses pi's registry for base URL,
+// Preferred: model.provider + model.model (uses pi's registry for base URL,
 // compat, and reasoning flags — unambiguous across providers).
 //
-//   [model] provider = "openrouter"  name = "deepseek/deepseek-r1"
-//   [model] provider = "openai"      name = "gpt-4o"
+//   [model] provider = "openrouter"  model = "deepseek/deepseek-r1"
+//   [model] provider = "openai"      model = "gpt-4o"
 //
 // Escape hatch for unlisted/custom endpoints: set [model].base_url.
 export const MODEL_PROVIDER = config.model.provider
-export const MODEL = config.model.name
+export const MODEL = config.model.model
 export const MODEL_BASE_URL = config.model.base_url
 
 // ── Fallback model ────────────────────────────────────────────────────────────
@@ -122,7 +122,7 @@ export const SUMMARY_BASE = SUMMARY_BASE_URL
 
 // ── Startup validation ────────────────────────────────────────────────────────
 if (!USE_FALLBACK && !MODEL) {
-  throw new Error("[model].name is required unless the fallback is forced ([agent].env = \"local\").")
+  throw new Error("[model].model is required unless the fallback is forced ([agent].env = \"local\").")
 }
 if (!USE_FALLBACK && !MODEL_PROVIDER && !MODEL_BASE_URL) {
   throw new Error("[model].provider or [model].base_url is required. Example: [model] provider = \"openrouter\"")

@@ -4,6 +4,42 @@
 # Launch with:
 #   coral --config /path/to/config.toml --secrets /path/to/secrets.toml.env
 
+# ── Model presets ────────────────────────────────────────────────────────────
+# Define named model configurations once, then reference them from [model],
+# [fallback], [summary], and [embeddings] via `preset = "name"`.
+# Secrets (api_key) are deep-merged from the secrets file into the same
+# [models.<name>] table, so they don't need to be repeated here.
+
+[models.umans]
+provider = "openai"
+model = "umans-glm-5.2"
+base_url = "https://api.code.umans.ai/v1"
+tool_choice = "required"
+enable_thinking = true
+thinking_effort = "low"
+token_nudge_threshold = 120000
+
+[models.glm_openrouter]
+provider = "openrouter"
+model = "zai-org/glm-4.7-flash"
+base_url = ""
+tool_choice = "required"
+referer = ""
+title = ""
+n_ctx = 4096
+context_margin = 256
+hard_overflow_tokens = 1024
+# enforce_context_limit = false
+token_nudge_threshold = 50000
+
+[models.gemini_embedding]
+provider = "openai"
+model = "google/gemini-embedding-2-preview"
+base_url = "https://openrouter.ai/api/v1"
+dimensions = 3072
+referer = ""
+title = ""
+
 [server]
 port = 3000
 
@@ -25,50 +61,26 @@ target = ""
 identity = ""
 
 [model]
-# Preferred: provider + name lets pi resolve base URL and reasoning flags.
-# Escape hatch for unlisted endpoints: set base_url.
-provider = ""
-name = ""
-base_url = ""
-tool_choice = "required"     # required | auto | none
-enable_thinking = true
-thinking_effort = "low"       # minimal | low | medium | high | xhigh
+# Reference a preset defined under [models.<name>], or set fields directly.
+preset = "umans"
+# Any field here overrides the preset.
 
 [fallback]
 # Used when the primary endpoint is unreachable or rate-limited (429/5xx).
-provider = ""
-model = "zai-org/glm-4.7-flash"
-base_url = "http://localhost:1234/v1"
-tool_choice = "required"
-referer = ""
-title = ""
-# Defaults to true for localhost, false otherwise. Set explicitly to override.
-# enforce_context_limit = false
-n_ctx = 4096
-context_margin = 256
-hard_overflow_tokens = 1024
+preset = "glm_openrouter"
 
 [summary]
 # Optional dedicated summarizer model. Leave empty to reuse primary/fallback.
-provider = ""
-model = ""
-base_url = ""
-referer = ""
-title = ""
+preset = "glm_openrouter"
 
 [embeddings]
-# Used for semantic memory reranking and low-information chatter suppression.
-# The sqlite-vec table is fixed at 3072 dimensions; changing dimensions requires
-# rebuilding memory_chunk_vec, memory_prototype_vec, and embedding meta.
-model = "google/gemini-embedding-2-preview"
-dimensions = 3072
-base_url = "https://openrouter.ai/api/v1"
-referer = ""
-title = ""
+# Reference a preset, or set fields directly.
+preset = "gemini_embedding"
 
 [context]
-token_nudge_threshold = 120000
-fallback_token_nudge_threshold = 50000
+# token_nudge_threshold and fallback_token_nudge_threshold are now read from
+# the model presets ([models.<name>].token_nudge_threshold). They can still be
+# set here as a fallback if the preset doesn't define them.
 compact_target_tokens = 65000
 compact_trigger_tokens = 90000
 compact_recent_messages = 80

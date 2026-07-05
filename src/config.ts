@@ -204,6 +204,25 @@ const baseTable = configPath ? loadFile(configPath) : {}
 const secretsTable = secretsPath ? loadFile(secretsPath) : {}
 const merged = deepMerge(baseTable, secretsTable)
 
+// ── Model preset resolution ───────────────────────────────────────────────────
+// Sections ([model], [fallback], [summary], [embeddings]) can reference a named
+// preset defined under [models.<name>]. The preset provides defaults; the
+// section's own fields override. Resolution happens after the config+secrets
+// deep merge, so api_keys from the secrets file merge into presets naturally.
+
+function resolvePreset(section: TomlValue | undefined, presets: TomlTable): TomlTable {
+  const t = table(section)
+  const presetName = t.preset
+  if (typeof presetName !== "string" || !presetName.trim()) return t
+  const preset = presets[presetName.trim()]
+  if (!isTable(preset)) {
+    throw new Error(`model preset "${presetName}" not found in [models]`)
+  }
+  const resolved = deepMerge(preset, t)
+  delete resolved.preset
+  return resolved
+}
+
 // ── Typed accessors ───────────────────────────────────────────────────────────
 
 function table(value: TomlValue | undefined): TomlTable {
@@ -238,10 +257,11 @@ const serverT = table(merged.server)
 const agentT = table(merged.agent)
 const containerT = table(merged.container)
 const sshT = table(merged.ssh)
-const modelT = table(merged.model)
-const fallbackT = table(merged.fallback)
-const summaryT = table(merged.summary)
-const embeddingsT = table(merged.embeddings)
+const modelsT = table(merged.models)
+const modelT = resolvePreset(merged.model, modelsT)
+const fallbackT = resolvePreset(merged.fallback, modelsT)
+const summaryT = resolvePreset(merged.summary, modelsT)
+const embeddingsT = resolvePreset(merged.embeddings, modelsT)
 const contextT = table(merged.context)
 const runnerT = table(merged.runner)
 const imageToolT = table(merged.image_tool)
@@ -300,7 +320,7 @@ export const config = {
   },
   model: {
     provider: str(modelT.provider, "").trim(),
-    name: str(modelT.name, "").trim(),
+    model: str(modelT.model, "").trim(),
     base_url: str(modelT.base_url, "").trim(),
     api_key: str(modelT.api_key, "").trim(),
     tool_choice: pickEnum(modelT.tool_choice, toolChoices, "required"),
@@ -340,8 +360,8 @@ export const config = {
     title: str(embeddingsT.title, "").trim(),
   },
   context: {
-    token_nudge_threshold: int(contextT.token_nudge_threshold, 120000),
-    fallback_token_nudge_threshold: int(contextT.fallback_token_nudge_threshold, 50000),
+    token_nudge_threshold: int(modelT.token_nudge_threshold ?? contextT.token_nudge_threshold, 120000),
+    fallback_token_nudge_threshold: int(fallbackT.token_nudge_threshold ?? contextT.fallback_token_nudge_threshold, 50000),
     compact_target_tokens: int(contextT.compact_target_tokens, 65000),
     compact_trigger_tokens: int(contextT.compact_trigger_tokens, 90000),
     compact_recent_messages: int(contextT.compact_recent_messages, 80),
