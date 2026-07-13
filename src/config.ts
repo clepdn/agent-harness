@@ -360,8 +360,6 @@ export const config = {
     title: str(embeddingsT.title, "").trim(),
   },
   context: {
-    token_nudge_threshold: int(modelT.token_nudge_threshold ?? contextT.token_nudge_threshold, 120000),
-    fallback_token_nudge_threshold: int(fallbackT.token_nudge_threshold ?? contextT.fallback_token_nudge_threshold, 50000),
     compact_target_tokens: int(contextT.compact_target_tokens, 65000),
     compact_trigger_tokens: int(contextT.compact_trigger_tokens, 90000),
     compact_recent_messages: int(contextT.compact_recent_messages, 80),

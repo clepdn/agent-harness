@@ -17,7 +17,6 @@ base_url = "https://api.code.umans.ai/v1"
 tool_choice = "required"
 enable_thinking = true
 thinking_effort = "low"
-token_nudge_threshold = 120000
 
 [models.glm_openrouter]
 provider = "openrouter"
@@ -30,7 +29,6 @@ n_ctx = 4096
 context_margin = 256
 hard_overflow_tokens = 1024
 # enforce_context_limit = false
-token_nudge_threshold = 50000
 
 [models.gemini_embedding]
 provider = "openai"
@@ -78,9 +76,6 @@ preset = "glm_openrouter"
 preset = "gemini_embedding"
 
 [context]
-# token_nudge_threshold and fallback_token_nudge_threshold are now read from
-# the model presets ([models.<name>].token_nudge_threshold). They can still be
-# set here as a fallback if the preset doesn't define them.
 compact_target_tokens = 65000
 compact_trigger_tokens = 90000
 compact_recent_messages = 80

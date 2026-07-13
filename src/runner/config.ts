@@ -4,8 +4,6 @@ import { config } from "../config"
 
 // ── Misc thresholds ───────────────────────────────────────────────────────────
 
-export const TOKEN_NUDGE_THRESHOLD = config.context.token_nudge_threshold
-export const FALLBACK_TOKEN_NUDGE_THRESHOLD = config.context.fallback_token_nudge_threshold
 export const CONTEXT_COMPACT_TRIGGER_TOKENS = config.context.compact_trigger_tokens
 export const RESPECT_CACHE = config.context.respect_cache
 export const COMPACTION_TURN_AGE = Math.max(1, config.context.compaction_turn_age)
