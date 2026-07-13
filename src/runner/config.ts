@@ -26,6 +26,9 @@ export const BOREDOM_WAKE_MS = (() => {
   return Math.round(minutes * 60_000)
 })()
 
+/** When true, checks git upstream on every file read/write and nags if changed. */
+export const GIT_UPSTREAM_NAG = config.agent.git_upstream_nag
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 export const isLikelyLocalBase = (baseUrl: string): boolean => {

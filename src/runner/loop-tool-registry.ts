@@ -16,6 +16,8 @@ import {
 import { listAliases, removeAlias, searchMemories, setAlias } from "../memory"
 import { emit } from "../stream"
 import type { ToolHandler } from "./loop-shared"
+import { checkGitUpstream } from "./git-upstream-check"
+import { GIT_UPSTREAM_NAG } from "./config"
 import { pushToolMessage, recordToolResult, runStandardTool, toolError } from "./loop-tool-runtime"
 import { findSubagent, runSubagent } from "./subagent"
 import { startJob } from "./jobs"
@@ -74,18 +76,23 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         emptyFallback: "(no output)",
       }),
 
-    read_file: (ctx) =>
-      runStandardTool(ctx, {
+    read_file: async (ctx) => {
+      const result = await runStandardTool(ctx, {
         name: "read_file",
         logArgKeys: ["path", "start_line", "end_line", "timeout_ms"] as const,
         runArgKeys: ["path", "start_line", "end_line", "timeout_ms"] as const,
         run: (path, start_line, end_line, timeout_ms) =>
           readFile(path as string, start_line as number | undefined, end_line as number | undefined, timeout_ms as number | undefined),
         emptyFallback: "(empty file)",
-      }),
+      })
+      if (GIT_UPSTREAM_NAG) {
+        checkGitUpstream(ctx.args.path as string, ctx.convId, ctx.state)
+      }
+      return result
+    },
 
-    edit_file: (ctx) =>
-      runStandardTool(ctx, {
+    edit_file: async (ctx) => {
+      const result = await runStandardTool(ctx, {
         name: "edit_file",
         logArgKeys: ["path", "timeout_ms"] as const,
         runArgKeys: ["path", "old_text", "new_text", "timeout_ms"] as const,
@@ -100,7 +107,12 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         },
         emitArgKeys: ["path"] as const,
         previewChars: 0,
-      }),
+      })
+      if (GIT_UPSTREAM_NAG) {
+        checkGitUpstream(ctx.args.path as string, ctx.convId, ctx.state)
+      }
+      return result
+    },
 
     memory_search: (ctx) =>
       runStandardTool(ctx, {
