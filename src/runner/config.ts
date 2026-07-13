@@ -19,6 +19,13 @@ export const USE_FALLBACK = config.agent.env === "local"
 /** Display name for the agent, used in the summarizer prompt and grounding. */
 export const AGENT_NAME = config.agent.name
 
+/** Boredom wake: if > 0, wake the agent after this many minutes of inactivity. */
+export const BOREDOM_WAKE_MS = (() => {
+  const minutes = config.agent.boredom_wake_min
+  if (!Number.isFinite(minutes) || minutes <= 0) return 0
+  return Math.round(minutes * 60_000)
+})()
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 export const isLikelyLocalBase = (baseUrl: string): boolean => {

@@ -9,6 +9,7 @@ import { runLoop } from "./loop"
 import { setRunnerPresence } from "./presence"
 import type { RunnerStateInternal } from "./types"
 import {
+  BOREDOM_WAKE_MS,
   COMPACTION_MIN_CHARS,
   COMPACTION_TURN_AGE,
   consumeRestSnapshot,
@@ -51,6 +52,37 @@ export function isRunning(): boolean {
 /** Returns whether the runner is currently blocked in wait or wait_then_continue. */
 export function isWaitingForEvent(): boolean {
   return eventResolvers.length > 0
+}
+
+// ── Boredom wake timer ────────────────────────────────────────────────────────
+// When BOREDOM_WAKE_MS > 0, starts a timer after each session ends. If no
+// external event arrives within the window, fires a synthetic wake so the
+// agent gets a turn to be present. Any real wake cancels the pending timer.
+
+let boredomTimer: ReturnType<typeof setTimeout> | null = null
+
+function cancelBoredomTimer(): void {
+  if (boredomTimer) {
+    clearTimeout(boredomTimer)
+    boredomTimer = null
+  }
+}
+
+function startBoredomTimer(): void {
+  if (BOREDOM_WAKE_MS <= 0) return
+  cancelBoredomTimer()
+  boredomTimer = setTimeout(() => {
+    boredomTimer = null
+    if (state.running) return
+    if (state.pendingInputs.length > 0) return
+    console.log("[runner] boredom timer fired — waking agent")
+    void wake({
+      source: "boredom",
+      triggeredAt: new Date().toISOString(),
+      content: "[boredom] no events for a while. check your inbox, feeds, or anything pending. if there's truly nothing to do, rest.",
+      raw: null,
+    })
+  }, BOREDOM_WAKE_MS)
 }
 
 type EnqueueOptions = {
@@ -372,6 +404,8 @@ function injectIncomingEvent(convId: number, event: UserMessage): void {
  * @returns A promise that resolves once this wake cycle fully completes.
  */
 export async function wake(event: UserMessage): Promise<void> {
+  cancelBoredomTimer()
+
   if (state.running) {
     enqueueEvent(event)
     return
@@ -438,6 +472,8 @@ export async function wake(event: UserMessage): Promise<void> {
       const next = state.pendingInputs.shift()!
       console.log("[runner] pending event queued, waking again")
       await wake(next)
+    } else {
+      startBoredomTimer()
     }
   }
 }

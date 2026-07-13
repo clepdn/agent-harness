@@ -46,6 +46,9 @@ port = 3000
 name = "niri"
 # Set to "local" to skip the primary model and route everything through the fallback.
 env = "default"
+# Boredom wake: if > 0, wake the agent after this many minutes of inactivity.
+# Any real wake (DM, heartbeat, etc.) resets the timer. 0 disables.
+# boredom_wake_min = 0
 
 # Optional: route shell tools through a Docker container instead of the local shell.
 # Set both to enable. Mutually exclusive with [ssh].

@@ -309,6 +309,7 @@ export const config = {
   agent: {
     name: str(agentT.name, "").trim() || "niri",
     env: str(agentT.env, "default").trim().toLowerCase(),
+    boredom_wake_min: num(agentT.boredom_wake_min, 0),
   },
   container: {
     name: str(containerT.name, "").trim(),
