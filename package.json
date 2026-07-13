@@ -11,7 +11,7 @@
   "scripts": {
     "start": "tsx src/index.ts --config config.toml --secrets secrets.toml.env",
     "dev": "tsx watch src/index.ts --config config.toml --secrets secrets.toml.env",
-    "test": "node --import tsx --test src/**/*.test.ts",
+    "test": "CORAL_CONFIG=test-config.toml node --import tsx --test src/**/*.test.ts",
     "chat": "tsx scripts/chat.ts",
     "dev:web": "npm run dev --workspace @niri/web",
     "build:web": "npm run build --workspace @niri/web",

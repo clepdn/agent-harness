@@ -200,8 +200,13 @@ function deepMerge(base: TomlTable, overlay: TomlTable): TomlTable {
 }
 
 const { configPath, secretsPath } = parseFlags(process.argv.slice(2))
-const baseTable = configPath ? loadFile(configPath) : {}
-const secretsTable = secretsPath ? loadFile(secretsPath) : {}
+
+// Allow config path via env var (used by test runner where CLI flags conflict with node)
+const resolvedConfigPath = configPath ?? process.env.CORAL_CONFIG
+const resolvedSecretsPath = secretsPath ?? process.env.CORAL_SECRETS
+
+const baseTable = resolvedConfigPath ? loadFile(resolvedConfigPath) : {}
+const secretsTable = resolvedSecretsPath ? loadFile(resolvedSecretsPath) : {}
 const merged = deepMerge(baseTable, secretsTable)
 
 // ── Model preset resolution ───────────────────────────────────────────────────
@@ -310,6 +315,7 @@ export const config = {
     name: str(agentT.name, "").trim() || "niri",
     env: str(agentT.env, "default").trim().toLowerCase(),
     boredom_wake_min: num(agentT.boredom_wake_min, 0),
+    git_upstream_nag: bool(agentT.git_upstream_nag, false),
   },
   container: {
     name: str(containerT.name, "").trim(),

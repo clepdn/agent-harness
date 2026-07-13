@@ -49,6 +49,9 @@ env = "default"
 # Boredom wake: if > 0, wake the agent after this many minutes of inactivity.
 # Any real wake (DM, heartbeat, etc.) resets the timer. 0 disables.
 # boredom_wake_min = 0
+# Git upstream check: when true, runs `git fetch` on every file read/write
+# and nags the agent if the remote has changed. Throttled to 10 min per repo.
+# git_upstream_nag = false
 
 # Optional: route shell tools through a Docker container instead of the local shell.
 # Set both to enable. Mutually exclusive with [ssh].
