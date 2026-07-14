@@ -4,5 +4,5 @@
     "types": ["node"]
   },
   "include": ["scripts", "packages/*/src", "apps/client/src", "apps/server/src"],
-  "exclude": ["home", "node_modules"]
+  "exclude": ["home", "node_modules", "pi", "dist"]
 }

@@ -10,7 +10,7 @@ import { createNiriToolCatalog } from "./tool-catalog"
 import { archiveContextMessages } from "./context-store"
 import type { RunnerStateInternal } from "./types"
 import { clearSession, loadRestSnapshot, loadSession, saveRestSnapshot, saveSession } from "./util"
-import type { UserMessage } from "../types"
+import type { UserMessage, Message } from "../types"
 
 let eventResolvers: Array<(event: UserMessage | null) => void> = []
 let shutdownResolvers: Array<() => void> = []
@@ -28,6 +28,7 @@ function currentToolCatalog() {
 const state: RunnerStateInternal = {
   contextSize: 0,
   running: false,
+  systemPrompt: "",
   conversation: [],
   pendingInputs: [],
   tokenCount: 0,
@@ -259,7 +260,8 @@ function injectIncomingEvent(convId: number, event: UserMessage): void {
   state.conversation.push({
     role: "user",
     content: incomingMessage,
-  })
+    timestamp: Date.now(),
+  } as Message)
   logMessage(convId, "user", incomingMessage)
   emitUserEvent(event)
   // A new incoming event starts a new turn — recall once for it.
@@ -297,10 +299,13 @@ export async function wake(event: UserMessage): Promise<void> {
     state.conversation.push({
       role: "user",
       content: `[harness restarted — ${event.source} @ ${event.triggeredAt}]\n\n${event.content}`,
-    })
+      timestamp: Date.now(),
+    } as Message)
   } else {
     autoSeeDiscordEvent(event)
-    state.conversation = await buildBootstrap(event, await loadRestSnapshot(), {
+    const restSnapshot = await loadRestSnapshot()
+    const priorRest = restSnapshot ? { restedAt: restSnapshot.restedAt, note: restSnapshot.note, forest: restSnapshot.summary } : null
+    state.conversation = await buildBootstrap(event, priorRest, {
       clientCapabilities: clientTools.getCapabilities(),
       workspace: clientTools.getWorkspace(),
       discord: areDiscordToolsAvailable(),

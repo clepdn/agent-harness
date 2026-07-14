@@ -218,9 +218,9 @@ ${buildEnvironmentSection(options)}`.trim()
     : []
 
   return [
-    { role: "system", content: system },
-    ...priorSummary,
-    { role: "user", content: wakeMessage },
+    { role: "user", content: system, timestamp: Date.now() } as Message,
+    ...priorSummary.map(m => ({ ...m, timestamp: Date.now() }) as Message),
+    { role: "user", content: wakeMessage, timestamp: Date.now() } as Message,
   ]
 }
 

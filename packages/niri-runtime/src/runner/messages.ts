@@ -1,4 +1,4 @@
-import type { AssistantMessage, ImageContent, TextContent, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai"
+import type { ImageContent, TextContent, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai"
 import type { Message } from "../types"
 import { TOOLS, isToolEnabled } from "./tools"
 

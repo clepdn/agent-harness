@@ -164,7 +164,7 @@ export function recordRestContextSnapshot(messages: Message[], note?: string): {
   const summaryIndex = messages.findIndex((message) => messageText(message).startsWith(CONTEXT_SUMMARY_HEADER))
   const priorSummaryContent = summaryIndex >= 0 ? messageText(messages[summaryIndex]!) : null
   const compactedMessages = messages
-    .filter((message) => message.role !== "system" && !messageText(message).startsWith(CONTEXT_SUMMARY_HEADER))
+    .filter((message) => true && !messageText(message).startsWith(CONTEXT_SUMMARY_HEADER))
   const trimmedNote = note?.trim()
   const summaryText = priorSummaryContent
     ?? [

@@ -54,7 +54,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
     wait: async ({ convId, state, hooks, call, args }) => {
       recordToolResult(convId, state, call, "wait", args, "Waiting for next event.")
       console.log("[runner] niri is waiting for next event...")
-      const incoming = await hooks.waitForEvent()
+      const incoming = await hooks.waitForEvent(); if (!incoming) return {}
       hooks.injectIncomingEvent(convId, incoming)
       return { isWait: true }
     },

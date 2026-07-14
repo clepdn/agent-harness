@@ -1,7 +1,7 @@
 import fs from "fs/promises"
 import path from "path"
 import { complete } from "@earendil-works/pi-ai"
-import type { AssistantMessage, Context, Model, TextContent, ToolCall, ToolResultMessage } from "@earendil-works/pi-ai"
+import type { AssistantMessage, Context, Model, TextContent, ToolCall } from "@earendil-works/pi-ai"
 import { HOME_DIR } from "../container/config"
 import type { Message } from "../types"
 import {

@@ -289,7 +289,7 @@ function clampLimit(limit: number | undefined): number {
   return Math.max(1, Math.min(MAX_METRIC_LIMIT, Math.floor(limit)))
 }
 
-function normalizeListTypes(type: MetricListType[] | undefined, includeRaw: boolean): MetricListType[] {
+function normalizeListTypes(type: MetricListType[] | undefined, _includeRaw: boolean = false): MetricListType[] {
   const allowed = new Set<MetricListType>(DEFAULT_LIST_TYPES)
   if (!type || type.length === 0) return [...DEFAULT_LIST_TYPES]
 

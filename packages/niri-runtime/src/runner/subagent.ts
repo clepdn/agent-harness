@@ -29,6 +29,11 @@ const SUBAGENT_HOOKS: LoopHooks = {
   },
   injectIncomingEvent: () => {},
   flushDeferredEvents: () => {},
+  clearSession: async () => {},
+  saveSession: async () => {},
+  saveShutdownSnapshot: async () => {},
+  shouldShutdown: () => false,
+  resolveShutdown: () => {},
 }
 
 /** Resolve the model for a subagent, falling back to the primary/fallback. */
@@ -94,6 +99,8 @@ export async function runSubagent(
     memoryRecallCooldowns: {},
     memoryRecallTurn: 0,
     memoryRecallPending: false,
+    shutdownRequested: false,
+    turnInFlight: false,
   }
 
   const allHandlers = buildToolHandlers()

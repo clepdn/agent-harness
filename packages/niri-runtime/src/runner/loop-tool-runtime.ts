@@ -13,7 +13,6 @@ import type {
   ToolHandler,
 } from "./loop-shared"
 import type { LoopHooks, LoopState } from "./types"
-import { errorSummary } from "./messages"
 
 type StandardToolSpec<
   RunKeys extends readonly ToolArgKey[],

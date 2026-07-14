@@ -37,10 +37,11 @@ export type RunLoopExit = "rest"
 
 async function waitForNextEvent(convId: number, hooks: LoopHooks): Promise<void> {
   const incoming = await hooks.waitForEvent()
+  if (!incoming) { throw new Error("waitForEvent returned null") }
   hooks.injectIncomingEvent(convId, incoming)
 }
 
-async function applyLoopGuardNudge(state: LoopState, hooks: LoopHooks, reason: string): Promise<void> {
+async function applyLoopGuardNudge(state: LoopState, _hooks: LoopHooks, reason: string): Promise<void> {
   const guardMessage =
     `[system] hey, you've been going for a while (${reason}). this is just a heads-up in case you're stuck and need help — most likely you're fine and don't need to do anything different, especially if you're actively doing something, in conversation with people, or things are happening RIGHT NOW. just keep going. resting is only a suggestion for if nothing's actually happening and you're genuinely done; if you do rest, remember to tell your important people first.`
   console.warn(`[runner] ${reason}`)

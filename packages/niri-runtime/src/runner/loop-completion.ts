@@ -110,7 +110,7 @@ export function applyUsage(
     promptTokens: usage.input,
     completionTokens: usage.output,
     totalTokens: usage.totalTokens,
-    cacheReadTokens: usage.cacheRead || undefined,
+    cachedPromptTokens: usage.cacheRead || undefined,
     cacheWriteTokens: usage.cacheWrite || undefined,
     elapsedMs: timing.elapsedMs,
     tokensPerSecond: timing.tokensPerSecond,
@@ -132,11 +132,6 @@ export function emitThinking(msg: AssistantMessage): void {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function formatRetryAt(retryAfterMs: number): string {
-  const retryAt = new Date(Date.now() + retryAfterMs)
-  return retryAt.toLocaleString(undefined, { hour12: false, timeZoneName: "short" })
 }
 
 /**
@@ -263,7 +258,7 @@ async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Pro
  */
 export async function fetchCompletion(
   state: LoopState,
-  baseState: LoopState = state,
+  _baseState: LoopState = state,
 ): Promise<CompletionTurnResult> {
   let promptTooLargeAttempts = 0
   let imagesScrubbed = false

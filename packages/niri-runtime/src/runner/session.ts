@@ -6,6 +6,7 @@ import { findSummaryMessageIndex, messageStringContent } from "./messages"
 // Store session data in working directory, not install location (Nix store is read-only)
 const DATA_DIR = process.cwd()
 const REST_SNAPSHOT_FILE = path.join(DATA_DIR, ".coral-rest-snapshot.json")
+const SESSION_FILE = path.join(DATA_DIR, "session.json")
 
 // ── Rest snapshot ─────────────────────────────────────────────────────────────
 
@@ -40,4 +41,36 @@ export async function consumeRestSnapshot(): Promise<RestSnapshot | null> {
   } catch {
     return null
   }
+}
+
+export async function loadRestSnapshot(): Promise<RestSnapshot | null> {
+  try {
+    const raw = await fs.readFile(REST_SNAPSHOT_FILE, "utf-8")
+    const parsed = JSON.parse(raw) as RestSnapshot
+    if (!parsed || typeof parsed.restedAt !== "string" || typeof parsed.summary !== "string") return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+// ── Session persistence ───────────────────────────────────────────────────────
+
+export async function saveSession(messages: Message[]): Promise<void> {
+  await fs.writeFile(SESSION_FILE, JSON.stringify(messages), { encoding: "utf-8", mode: 0o666 })
+}
+
+export async function loadSession(): Promise<Message[] | null> {
+  try {
+    const raw = await fs.readFile(SESSION_FILE, "utf-8")
+    const msgs = JSON.parse(raw) as Message[]
+    console.log(`[runner] found saved session (${msgs.length} messages)`)
+    return msgs
+  } catch {
+    return null
+  }
+}
+
+export async function clearSession(): Promise<void> {
+  await fs.unlink(SESSION_FILE).catch(() => {})
 }
