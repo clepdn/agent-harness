@@ -22,6 +22,7 @@ export const SHIM_FAILED_ENV = "CORAL_SHIM_FAILED"
 interface ShimConfig {
   enable: boolean
   harnessPath: string
+  configPath?: string
 }
 
 function parseShimConfig(configPath: string): ShimConfig | null {
@@ -37,6 +38,7 @@ function parseShimConfig(configPath: string): ShimConfig | null {
   let inShimSection = false
   let enable = false
   let harnessPath = ""
+  let configPathOverride: string | undefined
 
   for (const raw of content.split(/\r?\n/)) {
     // strip comments (naive — doesn't handle # inside quoted strings)
@@ -66,10 +68,11 @@ function parseShimConfig(configPath: string): ShimConfig | null {
 
     if (key === "enable") enable = value === "true"
     else if (key === "harness_path") harnessPath = value
+    else if (key === "config_path") configPathOverride = value
   }
 
   if (!enable || !harnessPath) return null
-  return { enable, harnessPath }
+  return { enable, harnessPath, ...(configPathOverride ? { configPath: configPathOverride } : {}) }
 }
 
 /**
@@ -92,7 +95,7 @@ export async function tryShim(): Promise<void> {
   const shimConfig = parseShimConfig(shimConfigPath)
   if (!shimConfig) return
 
-  const { harnessPath } = shimConfig
+  const { harnessPath, configPath } = shimConfig
   const tsxPath = join(harnessPath, "node_modules", ".bin", "tsx")
   const indexPath = join(harnessPath, "src", "index.ts")
 
@@ -103,9 +106,22 @@ export async function tryShim(): Promise<void> {
     return
   }
 
+  // Build child args: forward service args but replace --config if config_path is set.
+  // Secrets are always passed through from the service args (never overridden).
+  const childArgs = [...process.argv.slice(2)]
+  if (configPath) {
+    const configIdx = childArgs.indexOf("--config")
+    if (configIdx >= 0) {
+      childArgs[configIdx + 1] = configPath
+    } else {
+      childArgs.push("--config", configPath)
+    }
+    console.log(`[shim] overriding config with ${configPath}`)
+  }
+
   console.log(`[shim] starting local harness from ${harnessPath}`)
 
-  const child = spawn(process.execPath, [tsxPath, indexPath, ...process.argv.slice(2)], {
+  const child = spawn(process.execPath, [tsxPath, indexPath, ...childArgs], {
     stdio: "inherit",
     env: { ...process.env, CORAL_SHIM_ACTIVE: "true" },
   })
