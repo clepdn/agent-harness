@@ -97,7 +97,7 @@ export async function tryShim(): Promise<void> {
 
   const { harnessPath, configPath } = shimConfig
   const tsxPath = join(harnessPath, "node_modules", ".bin", "tsx")
-  const indexPath = join(harnessPath, "src", "index.ts")
+  const indexPath = join(harnessPath, "packages", "niri-runtime", "src", "index.ts")
 
   if (!existsSync(tsxPath) || !existsSync(indexPath)) {
     console.error(`[shim] harness path missing required files: ${harnessPath}`)

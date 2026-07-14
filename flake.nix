@@ -57,12 +57,12 @@
 			runHook preInstall
 
 			mkdir -p $out/lib/coral
-			cp -r src packages pi apps node_modules package.json tsconfig.json \
+			cp -r packages pi apps node_modules package.json tsconfig.json tsconfig.base.json \
 			    $out/lib/coral/
 
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/coral \
 			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
-			    --add-flags "$out/lib/coral/src/index.ts"
+			    --add-flags "$out/lib/coral/packages/niri-runtime/src/index.ts"
 
 			runHook postInstall
 		    '';
