@@ -3,8 +3,10 @@ import { createChatClient, type StreamEvent } from "@niri/chat-client"
 import { renderMarkdownAnsi } from "./terminal-markdown"
 
 const HOST = process.env.NIRI_HOST ?? "http://localhost"
-const PORT = process.env.PORT ?? "3000"
-const BASE = `${HOST}:${PORT}`
+const directWorker = process.env.NIRI_CHAT_DIRECT_WORKER?.trim().toLowerCase() === "true"
+const controlAgentId = directWorker ? undefined : (process.env.NIRI_AGENT_ID ?? "niri").trim() || "niri"
+const PORT = directWorker ? process.env.PORT ?? "3000" : process.env.CONTROL_PORT ?? process.env.PORT ?? "3000"
+const BASE = process.env.NIRI_SERVER_URL?.replace(/\/+$/, "") || `${HOST}:${PORT}`
 
 const c = {
   gray: (s: string) => `\x1b[90m${s}\x1b[0m`,
@@ -25,6 +27,8 @@ const formatUsage = (event: Extract<StreamEvent, { type: "usage" }>): string => 
   if (typeof event.tokensPerSecond === "number") parts.push(`${formatNumber(event.tokensPerSecond)} tok/s`)
   if (typeof event.completionTokens === "number") parts.push(`${event.completionTokens} out`)
   if (typeof event.promptTokens === "number") parts.push(`${event.promptTokens} ctx`)
+  if (typeof event.cachedPromptTokens === "number") parts.push(`${event.cachedPromptTokens} cached`)
+  if (typeof event.cacheWriteTokens === "number") parts.push(`${event.cacheWriteTokens} cache write`)
   if (typeof event.totalTokens === "number") parts.push(`${event.totalTokens} total`)
   if (typeof event.elapsedMs === "number") parts.push(`${(event.elapsedMs / 1000).toFixed(1)}s`)
   return parts.length ? parts.join(" · ") : "usage unavailable"
@@ -61,7 +65,7 @@ const createClientId = (): string => {
 }
 
 const clientId = createClientId()
-const client = createChatClient({ baseUrl: BASE, clientId })
+const client = createChatClient({ baseUrl: BASE, clientId, agentId: controlAgentId })
 
 let showAllTools = false
 let showThinking = false

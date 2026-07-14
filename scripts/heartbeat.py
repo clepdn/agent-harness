@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 import time
 import re
+import os
 import urllib.request
 import urllib.error
 
-CONF = "/home/regent/Developer/niri/home/heartbeat.conf"
-TRIGGER = "http://localhost:3000/trigger/cron"
-DEFAULT_INTERVAL = 100 # minutes
+CONF = os.environ.get("NIRI_HEARTBEAT_CONF", "/home/regent/Developer/niri/home/heartbeat.conf")
+SERVER = os.environ.get("NIRI_SERVER_URL", "http://localhost:3000").rstrip("/")
+AGENT = os.environ.get("NIRI_AGENT_ID", "niri")
+TRIGGER = f"{SERVER}/agents/{AGENT}/trigger/cron"
+DEFAULT_INTERVAL = 100
 
 
 def read_interval() -> int:
