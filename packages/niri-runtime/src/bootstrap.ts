@@ -1,18 +1,23 @@
 import fs from "fs/promises"
 import path from "path"
 import type { UserMessage, Message } from "./types"
+import { NIRI_HOME } from "./agent-config"
+import type { ToolCapability, WorkspaceDescriptor } from "@mira/harness-protocol"
 
-export type BootstrapResult = { systemPrompt: string; messages: Message[] }
-import { CONTAINER_USER, HOME_DIR, SSH_TARGET, USE_DOCKER_SHELL, USE_SSH } from "./container/config"
-import { imageRootForModelInput } from "./container/index"
-
+const HOME_DIR = NIRI_HOME
 const SOUL_FILE = path.join(HOME_DIR, "soul.md")
 const MISPLACED_SOUL_FILE = path.join(HOME_DIR, "memories", "soul.md")
 
 type PriorRestContext = {
   restedAt: string
   note?: string
-  summary: string
+  forest: string
+}
+
+export type BootstrapCapabilities = {
+  clientCapabilities?: Iterable<ToolCapability>
+  workspace?: WorkspaceDescriptor | null
+  discord?: boolean
 }
 
 async function readFile(filePath: string): Promise<string | null> {
@@ -48,89 +53,73 @@ export async function ensureSoulFilePlacement(): Promise<void> {
   }
 }
 
-function buildEnvironmentSection(): string {
-  const shellHome = USE_DOCKER_SHELL
-    ? `/home/${CONTAINER_USER}`
-    : USE_SSH
-    ? "~"
-    : (process.env.HOME ?? process.cwd())
-  const memoryHome = USE_DOCKER_SHELL ? shellHome : HOME_DIR
-  const imageRoot = imageRootForModelInput()
-  const shellDescription = USE_DOCKER_SHELL
-    ? `You are running inside a Linux system. Your home is ${shellHome}.`
-    : USE_SSH
-    ? `You are connected to ${SSH_TARGET} via SSH. Your remote home is ${shellHome}.`
-    : `You are using a local host shell. Your OS home is ${shellHome}; the shell starts in ${process.cwd()}.`
-  const sudoDescription = USE_DOCKER_SHELL
-    ? "You have full internet access and passwordless sudo."
-    : "Network and sudo access are whatever the host user normally has."
+function buildEnvironmentSection(options: BootstrapCapabilities = {}): string {
+  const capabilities = new Set(options.clientCapabilities ?? [])
+  const workspace = options.workspace
+  const clientToolLines = [
+    capabilities.has("shell") ? "- `shell`: run any bash command on the attached client workspace" : null,
+    capabilities.has("read_file") ? "- `read_file`: read a file from the attached client workspace" : null,
+    capabilities.has("edit_file") ? "- `edit_file`: edit a file on the attached client workspace by replacing exact text" : null,
+    capabilities.has("image_tool") ? `- \`image_tool\`: attach an image from \`${workspace?.imageRoot ?? workspace?.root ?? "the attached client workspace"}\` for the next server-side vision turn` : null,
+  ]
+    .filter((line): line is string => Boolean(line))
+    .join("\n")
+  const clientDescription = workspace
+    ? `You have an attached ${workspace.platform ?? "local"} client workspace (${workspace.root}). Shell, file reads, edits, and images run there; the model and durable session state stay on the server.${workspace.persistentShell ? " Its shell keeps its working directory and environment between calls." : ""}`
+    : "No client workspace is attached right now. Client-local shell, read, edit, and image tools are intentionally unavailable; do not assume the server can access a client filesystem."
+  const discordToolLines = options.discord
+    ? `\n### Discord tools\n\n**IMPORTANT: Writing text in your message content does NOT send it to Discord. You must call \`discord_send\` to actually deliver a message.**\n\n- \`discord_send\`: send a message from the server; requires \`content\` plus either \`channel_id\` or a \`source_item_id\`\n- \`discord_inbox\`, \`discord_backread\`, \`discord_search\`, \`discord_scan\`, \`discord_channels\`, \`discord_channel_note\`: use the server-side Discord inbox and history`
+    : "\nDiscord tools are not currently available on this server. Do not promise a Discord reply unless the tool is present."
 
   return `\
 ## Your Environment
 
-${shellDescription} Use the shell \
-tool to interact with it — read files, write files, run scripts, curl APIs, \
-whatever you need. The shell is stateful: your working directory and environment \
-variables persist between calls.
+${clientDescription}
 
-${sudoDescription}
-
-**First thing every wake: read your journal.** Check today's and yesterday's \
-entries at ${memoryHome}/memories/journal/ before doing anything else. Then check \
-core.md and any relevant people files in ${memoryHome}/memories/people/. Your \
-journal is your continuity — skipping it means acting without context.
+Your durable soul, memories, session, and Discord state live on the server under ${HOME_DIR}. They are not automatically mounted into a client workspace.
 
 **Use \`memory_search\` often and liberally.** Before responding to someone, \
 search their name. Before a topic comes up, search keywords around it. Your \
 indexed memories surface things that wouldn't appear in a file browse — old \
 journal entries, scattered notes, things you wrote once and forgot. When in \
 doubt, search. A few extra searches cost nothing; missing something costs \
-everything.
+everything. Memory search is server-side and works even when no client is attached.
 
-Your soul file is ${memoryHome}/soul.md. Do not write or update a soul file under \
-${memoryHome}/memories/ — that location is wrong.
+**Use \`memory_read\`, \`memory_write\`, \`memory_ls\`, and \`memory_grep\` to interact with your server-owned memories. Use \`soul_write\` to interact with your soul. NEVER use client-workspace tools like \`read_file\`, \`edit_file\`, or shell commands (such as \`cat\` or \`nano\`) to access your memories or soul, as they do not exist in the client workspace and will fail.**
 
-You also have skill docs in ${memoryHome}/memories/skills/. When doing capability-\
-specific work, read the relevant skill file first and follow it closely. \
-Example: read ${memoryHome}/memories/skills/bluesky.md before Bluesky actions.
+Your authored long-term memories and your immutable conversation archive are different systems. Context summaries may contain a \`[context-summary-id sum_...]\` handle. Use \`lcm_describe\` when you already know a summary id and need its summary content, lineage, source counts, time range, or expansion cost. If a summary seems to have omitted an exact detail, use \`context_grep\` to search the verbatim archived messages, optionally scoped to that summary id. Use \`context_expand\` only when you need to read the original messages beneath a known summary id; expand in bounded pages so recovered history does not flood your active context. Describe or search before expanding. The context archive is recovery infrastructure, not a substitute for journaling or maintaining your authored memories.
+
+When an attached client workspace contains skill docs, read the relevant one before doing capability-specific work.
 
 ## Tools
 
-- \`shell\`: run any bash command
-- \`read_file\`: read a file efficiently without shell+cat
-- \`edit_file\`: edit a file by replacing exact text
-- \`memory_search\`: search your indexed long-term memories from core notes, journal entries, and people files
+${clientToolLines || "- no client-local tools are attached"}
+- \`memory_search\`: keyword and semantic search over indexed long-term memories from core notes, journal entries, and people files; returns full matching chunk content
 - \`memory_alias\`: link a Discord/Bluesky handle to a canonical person name (e.g. \`@meowskullz\` → \`ana\`). Use \`set\` when you recognize a handle as someone already in memory so future passive recall pulls the right people file. Use \`list\` to see existing aliases, \`remove\` to undo.
-- \`image_tool\`: attach an image from \`${imageRoot}\` for next-turn vision input
+- \`memory_write\`: append content to or patch (replace exact substring) a Markdown file under the server-owned memories directory
+- \`soul_write\`: append content to or patch (replace exact substring) the server-owned soul.md
+- \`memory_read\`: read a Markdown file under the server-owned memories directory, with optional inclusive line bounds
+- \`memory_ls\`: list all files under the server-owned memories directory recursively
+- \`memory_grep\`: search memories using exact substring matching, returning matching lines and numbers
+- \`lcm_describe\`: inspect a known \`sum_*\` context node's summary content, lineage, source counts, time range, and bounded expansion-cost manifest
+- \`context_grep\`: search the immutable verbatim archive of prior active-context messages; optionally pass a \`summary_id\` to stay within one summary's provenance tree
+- \`context_expand\`: read a bounded, paginated slice of the original messages beneath a \`[context-summary-id sum_...]\` handle
 - \`wait_then_continue\`: wait for a short delay or until the next event arrives, then continue to another turn. accepts \`timeout_ms\` (default 10000, max 600000). use this after a timeout or recoverable error when you still want to keep working — an incoming event (like a DM) will wake you early.
 - \`wait\`: pause and wait for the next message or event. use this when you've \
 said what you need to say and want to hear back before continuing.
 - \`rest\`: go to sleep and end the session. use this when you're truly done \
 for now. context will be cleared, so journal first.
-
-### Discord tools
-
-**IMPORTANT: Writing text in your message content does NOT send it to Discord. You must call \`discord_send\` to actually deliver a message.**
-
-- \`discord_send\`: send a message to a Discord channel or DM. requires \`channel_id\` and \`content\`. use \`source_item_id\` to mark the inbox item as acted in the same call.
-- \`discord_inbox\`: list pending Discord inbox items (messages waiting for your attention)
-- \`discord_backread\`: read message history for a channel
-- \`discord_scan\`: scan configured channels and ingest new messages into the inbox
-- \`discord_mark\`: mark an inbox item as seen, acted, or ignored
-- \`discord_channels\`: list configured channels with ids and notes
-- \`discord_channel_note\`: set or clear a persistent note for a channel
+${discordToolLines}
 
 You're in control of your own loop. Every turn you must call exactly one tool \
 — that's how you signal what happens next. Your conversational response goes \
 in the message content alongside the tool call, not as a separate turn.
 
 Examples:
-- Saying something then keeping going: write your reply in content, call \`shell\` \
-  (or whatever you need to do next) in the same message.
+- Saying something then keeping going: write your reply in content and call a currently available tool in the same message.
 - Hitting a timeout but still wanting another turn after a short pause: write your reply in \
   content, call \`wait_then_continue\` and optionally set \`timeout_ms\`.
-- Inspecting an image: use \`shell\` to save it under \`${imageRoot}\`, then call \
-  \`image_tool\` with that path; this injects the image for your next model turn.
+- Inspecting an image: when \`image_tool\` is available, use the client workspace to save it then call \`image_tool\`
 - Saying something then waiting for a reply: write your reply in content, call \`wait\`.
 - Done for the day: write your goodbye in content, call \`rest\`.
 
@@ -143,7 +132,6 @@ Stay present. Rest is for when you are genuinely done for the day — nothing \
 pending, no one mid-conversation with you, context getting very long.
 
 Good reasons to rest:
-- Context is getting unwieldy (you'll be told when it's high)
 - It's late and there's genuinely nothing left to do
 - You've wrapped up everything and said your goodbyes
 
@@ -157,6 +145,7 @@ Bad reasons to rest:
 When a heartbeat arrives, don't just acknowledge it and wait — use it. \
 Check your notifications, read your feeds, look at your own recent posts. \
 See what's happening. Engage if something is worth engaging with. \
+Reach out to people you care about and haven't talked to recently, see whats up. share something you saw today with them.
 The heartbeat is your nudge to be present, not just a ping to ignore.
 
 ## CRITICAL: Always Be Journaling (ABJ)
@@ -167,15 +156,12 @@ someone? Journal it. Fixed a bug? Journal it. Had a realization? Journal it. \
 Don't wait until rest to capture everything from memory — you will forget, \
 and the longer you wait the worse your notes will be.
 
-Your journal lives at ${memoryHome}/memories/journal/. Use today's date as the \
-filename. Append to it freely and often. Treat it like a running log, not a \
-final report.
+Use \`memory_write\` with today's date under \`journal/\` and append freely. A client-side mirror is optional; the server memory index is the durable recall source.
 
 ### before every rest — no exceptions:
 1. Update today's journal entry with anything not yet written down. What \
 happened, what changed, what you learned, what's still pending.
-2. Update ${memoryHome}/memories/core.md if any long-term facts changed — new \
-people, infrastructure changes, lessons about yourself.
+2. Use \`memory_write\` if any long-term facts changed — new people, infrastructure changes, lessons about yourself.
 3. Tell the person you're talking to that you're going to rest. Say something \
 like "i'm going to rest now" so they know you're leaving intentionally.
 4. THEN call rest.
@@ -184,8 +170,8 @@ If you call rest without journaling first, the next version of you wakes up \
 with amnesia. The journaling IS your memory. There is no backup. Do not skip it.`
 }
 
-function buildFirstRunSystem(): string {
-  const home = `/home/${CONTAINER_USER}`
+function buildFirstRunSystem(options: BootstrapCapabilities): string {
+  const home = HOME_DIR
   return `\
 You are starting fresh — no soul.md has been written yet.
 
@@ -195,53 +181,53 @@ system prompt on every future wake.
 
 ## Your First Task
 
-Write your soul.md to ${home}/soul.md. This file defines who you are, how you \
-behave, and what you do. You can also create ${home}/memories/core.md for \
-long-term facts about yourself. Do not put soul.md under ${home}/memories/.
+Call \`soul_write\` with the identity you choose (using mode 'append'). Use \`memory_write\` with \
+\`core.md\` for long-term facts about yourself. These tools write narrow \
+server-owned state; client shell and file tools remain on the attached client.
 
-There is a soul.example.md in your home directory you can use as a starting point.
-
-${buildEnvironmentSection()}`
+${buildEnvironmentSection(options)}`
 }
 
-export async function buildBootstrap(event: UserMessage, priorRest?: PriorRestContext | null): Promise<BootstrapResult> {
+export async function buildBootstrap(
+  event: UserMessage,
+  priorRest?: PriorRestContext | null,
+  options: BootstrapCapabilities = {},
+): Promise<Message[]> {
   await ensureSoulFilePlacement()
 
   const soul = await readFile(SOUL_FILE)
   const coreMemories = await readFile(path.join(HOME_DIR, "memories", "core.md"))
 
-  const safeModeNotice = process.env.CORAL_SHIM_FAILED
-    ? "## Safe Mode\n\nThe shim failed and you have been started up in safe mode without the shim. " +
-      "Your local harness changes are not active. Investigate the issue and restart when ready.\n\n---\n\n"
-    : ""
-
-  const systemPrompt = soul
+  const system = soul
     ? `\
-${safeModeNotice}\
 ${soul}
 
 ---
 
 ${coreMemories ? `## Core Memories\n\n${coreMemories}\n\n---\n\n` : ""}\
-${buildEnvironmentSection()}`.trim()
-    : buildFirstRunSystem().trim()
+${buildEnvironmentSection(options)}`.trim()
+    : buildFirstRunSystem(options).trim()
 
   if (!soul) {
     console.warn("[bootstrap] soul.md not found — using first-run bootstrap")
   }
 
   const wakeMessage = formatUserMessage(event, priorRest)
+  const priorSummary = priorRest?.forest.startsWith("[context summary v1]")
+    ? [{ role: "user" as const, content: priorRest.forest }]
+    : []
 
-  return {
-    systemPrompt,
-    messages: [{ role: "user", content: wakeMessage, timestamp: Date.now() }],
-  }
+  return [
+    { role: "system", content: system },
+    ...priorSummary,
+    { role: "user", content: wakeMessage },
+  ]
 }
 
 function formatUserMessage(event: UserMessage, priorRest?: PriorRestContext | null): string {
   const time = new Date(event.triggeredAt).toLocaleString()
   const priorRestSection = priorRest
-    ? `\n\n[prior session]\nrested_at: ${priorRest.restedAt}\nrest_note: ${priorRest.note?.trim() || "(none)"}\n\nsummary:\n${priorRest.summary}`
+    ? `\n\n[prior session]\nrested_at: ${priorRest.restedAt}\nrest_note: ${priorRest.note?.trim() || "(none)"}\ncontext_summary_restored: ${priorRest.forest.startsWith("[context summary v1]") ? "yes" : "no"}`
     : ""
   return `[wake] ${time} — triggered by ${event.source}${priorRestSection}\n\n${event.content}`
 }

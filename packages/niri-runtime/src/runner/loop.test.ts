@@ -4,9 +4,16 @@ import { __loopTest } from "./loop"
 import type { Message } from "../types"
 import type { LoopState } from "./types"
 
+const testClientTools = {
+  getCapabilities: () => [],
+  getWorkspace: () => null,
+  execute: async () => {
+    throw new Error("unexpected client tool execution")
+  },
+}
+
 function makeState(): LoopState {
   return {
-    systemPrompt: "",
     conversation: [],
     pendingInputs: [],
     tokenCount: 0,
@@ -15,22 +22,21 @@ function makeState(): LoopState {
     memoryRecallCooldowns: {},
     memoryRecallTurn: 0,
     memoryRecallPending: false,
+    shutdownRequested: false,
+    turnInFlight: false,
   }
 }
 
 test("applyDiscordSendNudge appends a follow-up user nudge for unsent Discord replies", () => {
   const state = makeState()
   const turnMessages: Message[] = [
-    { role: "user", content: "[user/discord] [discord/dm] hey are you there", timestamp: Date.now() },
+    {
+      role: "user",
+      content: "[user/discord] [discord/dm] hey are you there",
+    },
     {
       role: "assistant",
-      content: [{ type: "text", text: "yeah, i'm here" }],
-      api: "openai-completions",
-      provider: "openai",
-      model: "test",
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-      stopReason: "stop" as const,
-      timestamp: Date.now(),
+      content: "yeah, i'm here",
     },
   ]
 
@@ -44,16 +50,13 @@ test("applyDiscordSendNudge appends a follow-up user nudge for unsent Discord re
 test("applyDiscordSendNudge fires for [discord batch] envelopes (space, not slash)", () => {
   const state = makeState()
   const turnMessages: Message[] = [
-    { role: "user", content: "[user/discord] [discord batch] 2026-05-01T03:10:50.162Z -> 2026-05-01T03:11:22.198Z\n@meowskullz: hi\n@meowskullz: u there", timestamp: Date.now() },
+    {
+      role: "user",
+      content: "[user/discord] [discord batch] 2026-05-01T03:10:50.162Z -> 2026-05-01T03:11:22.198Z\n@meowskullz: hi\n@meowskullz: u there",
+    },
     {
       role: "assistant",
-      content: [{ type: "text", text: "yeah hi" }],
-      api: "openai-completions",
-      provider: "openai",
-      model: "test",
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-      stopReason: "stop" as const,
-      timestamp: Date.now(),
+      content: "yeah hi",
     },
   ]
 
@@ -67,23 +70,19 @@ test("applyDiscordSendNudge fires for [discord batch] envelopes (space, not slas
 test("applyDiscordSendNudge fires after a harness restart when the discord event is pre-turn context", () => {
   const state = makeState()
   state.conversation.push(
-    { role: "user", content: "[harness restarted — discord @ 2026-05-01T04:30:00.000Z]\n\n[discord/dm] hi starfish", timestamp: Date.now() },
+    {
+      role: "user",
+      content: "[harness restarted — discord @ 2026-05-01T04:30:00.000Z]\n\n[discord/dm] hi starfish",
+    },
     {
       role: "assistant",
-      content: [{ type: "text", text: "i keep getting bounced by harness restarts sorry ^^ still here though! what's up?" }],
-      api: "openai-completions",
-      provider: "openai",
-      model: "test",
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-      stopReason: "stop" as const,
-      timestamp: Date.now(),
+      content: "i keep getting bounced by harness restarts sorry ^^ still here though! what's up?",
     },
   )
 
-  const turnStart = 1
   const turnMessages: Message[] = [state.conversation[1]!]
 
-  const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages, turnStart)
+  const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
 
   assert.equal(nudged, true)
   assert.equal(state.conversation.length, 3)
@@ -92,21 +91,24 @@ test("applyDiscordSendNudge fires after a harness restart when the discord event
 
 test("applyDiscordSendNudge does not fire when discord_send was already called", () => {
   const state = makeState()
-  const t = Date.now()
   const turnMessages: Message[] = [
-    { role: "user", content: "[user/discord] [discord/channel] can you reply", timestamp: t },
+    {
+      role: "user",
+      content: "[user/discord] [discord/channel] can you reply",
+    },
     {
       role: "assistant",
-      content: [
-        { type: "text", text: "sending now" },
-        { type: "toolCall", id: "call_123", name: "discord_send", arguments: { channel_id: "1", content: "sending now" } },
+      content: "sending now",
+      tool_calls: [
+        {
+          id: "call_123",
+          type: "function",
+          function: {
+            name: "discord_send",
+            arguments: "{\"channel_id\":\"1\",\"content\":\"sending now\"}",
+          },
+        },
       ],
-      api: "openai-completions",
-      provider: "openai",
-      model: "test",
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-      stopReason: "toolUse" as const,
-      timestamp: t,
     },
   ]
 
@@ -116,22 +118,103 @@ test("applyDiscordSendNudge does not fire when discord_send was already called",
   assert.equal(state.conversation.length, 0)
 })
 
-test("applyLoopGuardNudge appends an in-band user nudge", async () => {
+test("applyDiscordSendNudge keeps a wake DM active across a preliminary tool step", () => {
   const state = makeState()
+  state.conversation.push(
+    {
+      role: "user",
+      content: "[wake] 7/14/2026, 3:22:59 AM — triggered by discord\n\n[discord/dm] @meowskullz\n\nboop",
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "call_memory",
+          type: "function",
+          function: { name: "memory_read", arguments: '{"path":"wake.md"}' },
+        },
+      ],
+    },
+    {
+      role: "tool",
+      tool_call_id: "call_memory",
+      content: "wake notes",
+    },
+    {
+      role: "assistant",
+      content: "hey you ^.^",
+    },
+  )
+
+  const nudged = __loopTest.applyDiscordSendNudge(state, [state.conversation[3]!])
+
+  assert.equal(nudged, true)
+  assert.match(String(state.conversation[4]?.content), /did not call discord_send/i)
+})
+
+test("applyDiscordSendNudge sees discord_send from an earlier tool step in the active user turn", () => {
+  const state = makeState()
+  state.conversation.push(
+    {
+      role: "user",
+      content: "[wake] 7/14/2026, 3:22:59 AM — triggered by discord\n\n[discord/dm] @meowskullz\n\nboop",
+    },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "call_send",
+          type: "function",
+          function: { name: "discord_send", arguments: '{"source_item_id":"1","content":"boop"}' },
+        },
+      ],
+    },
+    {
+      role: "tool",
+      tool_call_id: "call_send",
+      content: "sent!",
+    },
+    {
+      role: "assistant",
+      content: "okay, delivered",
+    },
+  )
+
+  const nudged = __loopTest.applyDiscordSendNudge(state, [state.conversation[3]!])
+
+  assert.equal(nudged, false)
+  assert.equal(state.conversation.length, 4)
+})
+
+test("applyLoopGuardNudge appends an in-band user nudge and saves", async () => {
+  const state = makeState()
+  let saved = false
 
   await __loopTest.applyLoopGuardNudge(
     state,
     {
+      clientTools: testClientTools,
+      getTools: () => [],
       waitForEvent: async () => {
         throw new Error("unexpected wait")
       },
       waitForEventWithTimeout: async () => null,
       injectIncomingEvent: () => {},
       flushDeferredEvents: () => {},
+      clearSession: async () => {},
+      saveSession: async () => {
+        saved = true
+      },
+      saveShutdownSnapshot: async () => {},
+      shouldShutdown: () => false,
+      resolveShutdown: () => {},
     },
     "loop guard tripped after 120 turns",
   )
 
+  assert.equal(saved, true)
   assert.equal(state.conversation.length, 1)
   assert.equal(state.conversation[0]?.role, "user")
   assert.match(String(state.conversation[0]?.content), /loop guard tripped after 120 turns/i)
@@ -147,6 +230,8 @@ test("waitForNextEvent waits for and injects the next external event", async () 
   }
 
   await __loopTest.waitForNextEvent(42, {
+    clientTools: testClientTools,
+    getTools: () => [],
     waitForEvent: async () => {
       calls.push("wait")
       return event
@@ -158,6 +243,11 @@ test("waitForNextEvent waits for and injects the next external event", async () 
       assert.equal(incoming, event)
     },
     flushDeferredEvents: () => {},
+    clearSession: async () => {},
+    saveSession: async () => {},
+    saveShutdownSnapshot: async () => {},
+    shouldShutdown: () => false,
+    resolveShutdown: () => {},
   })
 
   assert.deepEqual(calls, ["wait", "inject:still here"])

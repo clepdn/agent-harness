@@ -1,49 +1,91 @@
-
-import { tryShim, SHIM_FAILED_ENV } from "./shim"
-import { config } from "./config"
+import { spawn } from "node:child_process"
+import { REPO_ROOT } from "./agent-config"
 import { createServer } from "./server"
 import { initDb } from "./db"
 import { initMetricsDb } from "./metrics"
 import { shutdown } from "./runner/index"
 import { startDiscordGateway } from "./discord/gateway"
+import { startDiscordEmbeddingBackfill } from "./discord/search"
+import { setDiscordToolsAvailable } from "./discord/availability"
 import { ensureSoulFilePlacement } from "./bootstrap"
+import { startAntigravityBridge, stopAntigravityBridge } from "./antigravity-bridge"
+import { startCodexBridge, stopCodexBridge } from "./codex-bridge"
+import { clientTools } from "./client"
 
-const PORT = config.server.port
+const PORT = Number.parseInt(process.env.PORT ?? "3000", 10)
+const WORKER_HOST = process.env.NIRI_WORKER_HOST?.trim() || "127.0.0.1"
+const RESTART_COMMAND = process.env.NIRI_RESTART_COMMAND?.trim() || "npm run start:worker"
+const MANAGED_WORKER = process.env.NIRI_MANAGED_WORKER?.trim().toLowerCase() === "true"
+
+function spawnReplacementProcess(): void {
+  console.log(`[niri] spawning replacement: ${RESTART_COMMAND}`)
+  const child = spawn(RESTART_COMMAND, {
+    cwd: process.env.NIRI_RESTART_CWD?.trim() || REPO_ROOT,
+    env: process.env,
+    shell: true,
+    detached: true,
+    stdio: "inherit",
+  })
+  child.unref()
+}
 
 async function main() {
-  // Check for shim mode before anything else.
-  // If the shim is active, this blocks until the child exits.
-  // On clean exit (0) the process terminates here.
-  // On failure we fall through to normal startup in safe mode.
-  await tryShim()
-
-  if (process.env[SHIM_FAILED_ENV]) {
-    console.warn("[niri] started in safe mode — shim child failed, running from nix store")
-  }
-
+  if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error(`invalid worker port: ${process.env.PORT}`)
+  process.umask(0o077)
   console.log("[niri] starting up...")
+
+  await clientTools.start()
 
   await ensureSoulFilePlacement()
   initDb()
   initMetricsDb()
+  try {
+    await startAntigravityBridge()
+    await startCodexBridge()
+  } catch (err) {
+    console.error("[bridge] failed to start:", err)
+  }
+
+  const discordEmbeddingBackfill = startDiscordEmbeddingBackfill()
+
   let discordGateway: Awaited<ReturnType<typeof startDiscordGateway>> = null
   try {
     discordGateway = await startDiscordGateway()
   } catch (err) {
     console.warn("[discord gateway] startup failed:", err)
   }
-
-  const server = createServer()
-
-  await server.listen({ port: PORT, host: "0.0.0.0" })
-  console.log(`[niri] listening on :${PORT}`)
+  setDiscordToolsAvailable(Boolean(discordGateway))
 
   let shuttingDown = false
+  let restartRequested = false
+  let restartReason: string | undefined
+
+  function requestRestart(reason?: string): void {
+    if (restartRequested || shuttingDown) return
+    restartRequested = true
+    restartReason = reason?.trim() || undefined
+    setTimeout(() => {
+      void gracefulShutdown("RESTART")
+    }, 50).unref?.()
+  }
+
+  function requestShutdown(): void {
+    if (restartRequested || shuttingDown) return
+    setTimeout(() => {
+      void gracefulShutdown("SHUTDOWN")
+    }, 50).unref?.()
+  }
+
+  const server = createServer({ requestRestart, requestShutdown })
+
+  await server.listen({ port: PORT, host: WORKER_HOST })
+  console.log(`[niri] listening on ${WORKER_HOST}:${PORT}`)
 
   async function gracefulShutdown(sig: string) {
     if (shuttingDown) return  // ignore duplicate signals
     shuttingDown = true
-    console.log(`\n[niri] ${sig} received, asking niri to journal and rest...`)
+    const detail = restartRequested && restartReason ? ` (${restartReason})` : ""
+    console.log(`\n[niri] ${sig} received${detail}, saving session snapshot...`)
 
     const timeout = new Promise<void>((resolve) =>
       setTimeout(() => { console.log("[niri] shutdown timed out, forcing exit"); resolve() }, 60_000)
@@ -51,12 +93,23 @@ async function main() {
 
     await Promise.race([shutdown(), timeout])
 
-    if (discordGateway) await discordGateway.stop()
-    await server.close()
+    const cleanup = async () => {
+      discordEmbeddingBackfill.stop()
+      if (discordGateway) await discordGateway.stop()
+      setDiscordToolsAvailable(false)
+      await server.close()
+      await clientTools.stop()
+      await stopAntigravityBridge()
+      await stopCodexBridge()
+    }
+    const cleanupTimeout = new Promise<void>((resolve) =>
+      setTimeout(() => { console.log("[niri] cleanup timed out, exiting anyway"); resolve() }, 10_000)
+    )
+    await Promise.race([cleanup(), cleanupTimeout])
+    if (restartRequested && !MANAGED_WORKER) spawnReplacementProcess()
     process.exit(0)
   }
 
-  // Second SIGINT = user is insisting
   process.on("SIGINT", async () => {
     if (shuttingDown) {
       console.log("\n[niri] force exit")

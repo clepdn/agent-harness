@@ -1,11 +1,26 @@
 import type { UserMessage } from "../types"
 import { getDb } from "../db"
-import { asObject, asString, extractImageAttachments } from "../discord/parse"
+import { asObject, asString, extractImageAttachments, renderDiscordUserMentions } from "../discord/parse"
+import { getCachedPronouns } from "../discord/pronouns"
 
 function asIsoTimestamp(value: unknown, fallback: string): string {
   if (typeof value !== "string" && typeof value !== "number") return fallback
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? fallback : parsed.toISOString()
+}
+
+function formatDiscordTimestamp(value: string): string {
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) return value
+  return parsed.toLocaleString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  })
 }
 
 const asRecord = asObject
@@ -30,9 +45,17 @@ function embeddedReferencedMessage(
   if (!messageId) return null
 
   const author = asRecord(referenced.author)
+  const member = asRecord(referenced.member)
   return {
     message_id: messageId,
-    author_username: asString(author?.global_name) ?? asString(author?.username),
+    author_username:
+      asString(member?.display_name) ??
+      asString(member?.displayName) ??
+      asString(member?.nickname) ??
+      asString(member?.nick) ??
+      asString(author?.global_name) ??
+      asString(author?.globalName) ??
+      asString(author?.username),
     content: String(referenced.content ?? ""),
   }
 }
@@ -92,11 +115,36 @@ export function fromDiscord(body: unknown): UserMessage {
     (!guildId && Number.isNaN(channelType))
 
   const content =
-    String(message.content ?? b.content ?? "").trim() ||
+    renderDiscordUserMentions(body, String(message.content ?? b.content ?? "")).trim() ||
     "(no text content)"
   const triggeredAt = new Date().toISOString()
-  const timestamp = asIsoTimestamp(message.timestamp ?? b.timestamp, triggeredAt)
-  const authorName = String(author?.global_name ?? author?.username ?? b.author_username ?? b.author ?? "unknown")
+  const timestamp = formatDiscordTimestamp(asIsoTimestamp(message.timestamp ?? b.timestamp, triggeredAt))
+  const member =
+    typeof message.member === "object" && message.member
+      ? (message.member as Record<string, unknown>)
+      : typeof b.member === "object" && b.member
+      ? (b.member as Record<string, unknown>)
+      : null
+  const authorName = String(
+    member?.display_name ??
+      member?.displayName ??
+      member?.nickname ??
+      member?.nick ??
+      author?.global_name ??
+      author?.globalName ??
+      author?.username ??
+      b.author_username ??
+      b.author ??
+      "unknown",
+  )
+  const authorId = String(author?.id ?? b.author_id ?? "")
+  let pronouns = ""
+  if (authorId) {
+    const cached = getCachedPronouns(authorId)
+    if (cached) pronouns = cached
+  }
+  const pronounsSuffix = pronouns ? ` (${pronouns})` : ""
+
   const channelId = String(message.channel_id ?? b.channel_id ?? channel?.id ?? "unknown")
   const messageId = String(message.id ?? b.message_id ?? "unknown")
   const location = isDm
@@ -112,7 +160,7 @@ export function fromDiscord(body: unknown): UserMessage {
   return {
     source: "discord",
     triggeredAt,
-    content: `${header} @${authorName}\ncontext: ${location}\nmessage_id: ${messageId}\ntimestamp: ${timestamp}${replyLine ? `\n${replyLine}` : ""}\naction: ${action}\n\n${content}${imageBlock}`,
+    content: `${header} @${authorName}${pronounsSuffix}\ncontext: ${location}\nmessage_id: ${messageId}\nsource_item_id: ${messageId}\ntimestamp: ${timestamp}${replyLine ? `\n${replyLine}` : ""}\naction: ${action}\n\n${content}${imageBlock}`,
     raw: body,
   }
 }

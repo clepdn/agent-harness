@@ -16,16 +16,15 @@ import { recordMetric } from "../metrics"
 import { syncMemoryIndex } from "./sync"
 import {
   MEMORY_RECALL_COOLDOWN_TURNS,
-  MEMORY_RECALL_MAX_CHARS,
   MEMORY_RECALL_MAX_CHUNKS,
   MEMORY_RECALL_MAX_CHUNKS_HARD_CAP,
-  MEMORY_RECALL_PER_EXTRA_PERSON_CHARS,
+  MEMORY_RECALL_INTENT_SIMILARITY_THRESHOLD,
   normalizeText,
   SCHEDULED_HEARTBEAT_CONTENT,
   trimForPrompt,
   type MemorySearchResult,
 } from "./shared"
-import { loadAliasMap, resolveAliases, listAliases, setAlias, removeAlias, normalizeHandle } from "./aliases"
+import { resolveAliases, normalizeHandle } from "./aliases"
 import {
   buildSearchProfile,
   semanticQuerySignal,
@@ -34,6 +33,7 @@ import {
   isRelevant,
   buildMemoryRecallMessage,
   toMemorySearchResult,
+  __memorySearchTest,
 } from "./search"
 import {
   memoryQueryForUserMessage,
@@ -98,13 +98,6 @@ export async function buildCompletionMessages(
   const profile = await buildSearchProfile(queryParts)
   if (profile.tokens.length === 0) return { messages: conversation, recalledChunkIds: [] }
 
-  if ((profile.sender || profile.bodyPeople.length > 0) && !profile.bodyInformative) {
-    console.log(
-      `[memory] skipped query=${JSON.stringify(trimForPrompt(normalizeText(memoryQuery), 120))} sender=${profile.sender ?? "-"} reason=trivial-body`,
-    )
-    return { messages: conversation, recalledChunkIds: [] }
-  }
-
   let semanticSignal: import("./shared").SemanticQuerySignal | null = null
   try {
     semanticSignal = await semanticQuerySignal(memoryQuery)
@@ -115,6 +108,16 @@ export async function buildCompletionMessages(
   if (shouldSkipForSemanticChatter(profile, semanticSignal)) {
     console.log(
       `[memory] skipped query=${JSON.stringify(trimForPrompt(normalizeText(memoryQuery), 120))} sender=${profile.sender ?? "-"} reason=semantic-chatter chatter=${semanticSignal?.chatterSimilarity?.toFixed(3) ?? "-"} recallIntent=${semanticSignal?.recallIntentSimilarity?.toFixed(3) ?? "-"}`,
+    )
+    return { messages: conversation, recalledChunkIds: [] }
+  }
+
+  const hasSemanticRecallIntent =
+    (semanticSignal?.recallIntentSimilarity ?? 0) >= MEMORY_RECALL_INTENT_SIMILARITY_THRESHOLD
+
+  if ((profile.sender || profile.bodyPeople.length > 0) && !profile.bodyInformative && !hasSemanticRecallIntent) {
+    console.log(
+      `[memory] skipped query=${JSON.stringify(trimForPrompt(normalizeText(memoryQuery), 120))} sender=${profile.sender ?? "-"} reason=trivial-body`,
     )
     return { messages: conversation, recalledChunkIds: [] }
   }
@@ -141,9 +144,7 @@ export async function buildCompletionMessages(
     return { messages: conversation, recalledChunkIds: [] }
   }
 
-  const extraPersons = Math.max(0, personCount - 1)
-  const recallChars = MEMORY_RECALL_MAX_CHARS + extraPersons * MEMORY_RECALL_PER_EXTRA_PERSON_CHARS
-  const recallContent = buildMemoryRecallMessage(hits, recallChars)
+  const recallContent = buildMemoryRecallMessage(hits)
   console.log(
     `[memory] recalled query=${JSON.stringify(trimForPrompt(normalizeText(memoryQuery), 120))} ${debugTag}\n${recallContent}`,
   )
@@ -215,6 +216,7 @@ export async function searchMemories(rawQuery: string, limit = 5): Promise<Memor
     Number.POSITIVE_INFINITY,
     Math.max(1, Math.min(limit, 10)),
     semanticSignal,
+    true,
   )).map(toMemorySearchResult)
   recordMetric({
     type: "memory",
@@ -267,6 +269,7 @@ export const __memoryTest = {
     return unique
   },
   buildSearchProfile,
+  buildSearchProfileWithContext: __memorySearchTest.buildSearchProfileWithContext,
   resolveAliases,
   normalizeHandle,
 }

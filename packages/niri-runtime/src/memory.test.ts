@@ -25,10 +25,10 @@ channel_flag_repairs=0
 channel messages are context, not direct requests. replying is optional; use judgment.
 
 recent messages:
-- [channel/staying up till 1 billion oclock/#niri] [2026-05-01 03:11:14.553Z] @meowskullz: awa
+- source_item_id=1499679672404021248 [channel/staying up till 1 billion oclock/#niri] [2026-05-01 03:11:14.553Z] @meowskullz: awa
 
 pending preview:
-- 1499679672404021248 [mention] [channel/staying up till 1 billion oclock/#niri] [2026-05-01 03:11:14.553Z] @meowskullz: awa`
+- source_item_id=1499679672404021248 bucket=mention [channel/staying up till 1 billion oclock/#niri] [2026-05-01 03:11:14.553Z] @meowskullz: awa`
 
   assert.deepEqual(__memoryTest.memoryQueryForUserMessage(batch), {
     sender: "meowskullz",
@@ -37,12 +37,12 @@ pending preview:
   })
 })
 
-test("latestMemoryRecallQuery skips ambient discord batch without pending items", () => {
+test("latestMemoryRecallQuery skips ambient discord batch without items", () => {
   const batch = `[user/discord] [discord batch] 2026-05-01T03:10:50.162Z -> 2026-05-01T03:11:22.198Z
 new_messages=1 channels=1 pending_inbox=0 scope=configured+dm
 
 recent messages:
-- [channel/meowskullz's server/#ai-sister-yap] [2026-05-01 08:01:35.639Z] @rose: foxie emoji
+- (none)
 
 pending preview:
 - (none)`
@@ -60,20 +60,20 @@ pending preview:
   )
 })
 
-test("memoryQueryForUserMessage ignores ambient discord batch recent messages", () => {
+test("memoryQueryForUserMessage processes discord batch recent messages when pending preview is empty", () => {
   const batch = `[user/discord] [discord batch] 2026-05-01T03:10:50.162Z -> 2026-05-01T03:11:22.198Z
 new_messages=1 channels=1 pending_inbox=0 scope=configured+dm
 
 recent messages:
-- [channel/meowskullz's server/#ai-sister-yap] [2026-05-01 08:01:35.639Z] @rose: foxie emoji
+- source_item_id=1499680000000000000 [channel/meowskullz's server/#ai-sister-yap] [2026-05-01 08:01:35.639Z] @rose: foxie emoji
 
 pending preview:
 - (none)`
 
   assert.deepEqual(__memoryTest.memoryQueryForUserMessage(batch), {
-    sender: null,
-    source: null,
-    body: batch,
+    sender: "rose",
+    source: "channel/meowskullz's server/#ai-sister-yap",
+    body: "foxie emoji",
   })
 })
 
@@ -118,50 +118,35 @@ test("resolveAliases follows transitive mappings without cycles", () => {
   assert.deepEqual(__memoryTest.resolveAliases(null, map), [])
 })
 
-test("buildSearchProfile expands sender via alias map", async (t) => {
-  const fs = await import("node:fs/promises")
-  const path = await import("node:path")
-  const url = await import("node:url")
-  const memoriesDir = path.resolve(url.fileURLToPath(import.meta.url), "../../home/memories")
-  const aliasFile = path.join(memoriesDir, "aliases.json")
-  const had = await fs.readFile(aliasFile, "utf-8").catch(() => null)
-
-  await fs.mkdir(memoriesDir, { recursive: true })
-  await fs.writeFile(aliasFile, JSON.stringify({ meowskullz: ["ana"] }), "utf-8")
-
-  t.after(async () => {
-    if (had !== null) await fs.writeFile(aliasFile, had, "utf-8")
-    else await fs.rm(aliasFile, { force: true })
-  })
-
-  const profile = await __memoryTest.buildSearchProfile({
-    sender: "meowskullz",
-    source: "DM",
-    body: "thanks",
-  })
+test("buildSearchProfile expands sender via alias map", () => {
+  const profile = __memoryTest.buildSearchProfileWithContext(
+    { sender: "meowskullz", source: "DM", body: "thanks" },
+    { meowskullz: ["ana"] },
+    [],
+  )
 
   assert.deepEqual(profile.senderAliases, ["ana"])
   assert.ok(profile.tokens.includes("ana"))
 })
 
 test("buildSearchProfile body informativeness short-circuits on body-people", async () => {
-  const withPerson = await __memoryTest.buildSearchProfile({
-    sender: "meowskullz",
-    source: "DM",
-    body: "yayy, who is rea",
-  })
+  const withPerson = __memoryTest.buildSearchProfileWithContext(
+    { sender: "meowskullz", source: "DM", body: "yayy, who is rea" },
+    {},
+    ["rea"],
+  )
   assert.equal(withPerson.bodyInformative, true)
 
   const empty = await __memoryTest.buildSearchProfile({ sender: "meowskullz", source: "DM", body: "" })
   assert.equal(empty.bodyInformative, false)
 })
 
-test("buildSearchProfile detects people mentioned in body", async () => {
-  const profile = await __memoryTest.buildSearchProfile({
-    sender: "meowskullz",
-    source: "DM",
-    body: "patpat, who is rea",
-  })
+test("buildSearchProfile detects people mentioned in body", () => {
+  const profile = __memoryTest.buildSearchProfileWithContext(
+    { sender: "meowskullz", source: "DM", body: "patpat, who is rea" },
+    {},
+    ["rea"],
+  )
 
   assert.ok(profile.bodyPeople.includes("rea"), `expected rea in bodyPeople, got ${JSON.stringify(profile.bodyPeople)}`)
   assert.ok(profile.tokens.includes("rea"))

@@ -1,35 +1,33 @@
 import { buildBootstrap } from "../bootstrap"
+import { clientTools } from "../client"
+import { areDiscordToolsAvailable } from "../discord/availability"
+import { markDiscordItem } from "../discord/state"
 import { endConversation, logMessage, startConversation } from "../db"
-import { initJobManager } from "./jobs"
-import { recordMetric } from "../metrics"
 import { emit } from "../stream"
-import type { UserMessage } from "../types"
-import { configuredSummaryProvider } from "./loop-completion"
 import { runLoop } from "./loop"
 import { setRunnerPresence } from "./presence"
+import { createNiriToolCatalog } from "./tool-catalog"
+import { archiveContextMessages } from "./context-store"
 import type { RunnerStateInternal } from "./types"
-import {
-  BOREDOM_WAKE_MS,
-  COMPACTION_MIN_CHARS,
-  COMPACTION_TURN_AGE,
-  consumeRestSnapshot,
-  CONTEXT_COMPACT_TRIGGER_TOKENS,
-  estimatePromptTokens,
-  findSummaryMessageIndex,
-  IDLE_COMPACTION_TIMEOUT_MS,
-  loadAgentSummaryContext,
-  proactiveCompaction,
-  RESPECT_CACHE,
-  summarizeConversationViaLLM,
-} from "./util"
+import { clearSession, loadRestSnapshot, loadSession, saveRestSnapshot, saveSession } from "./util"
+import type { UserMessage } from "../types"
 
-let eventResolvers: Array<(event: UserMessage) => void> = []
-let shutdownResolve: (() => void) | null = null
+let eventResolvers: Array<(event: UserMessage | null) => void> = []
+let shutdownResolvers: Array<() => void> = []
+const PROCESS_STARTED_AT = new Date().toISOString()
+
+function currentToolCatalog() {
+  return createNiriToolCatalog({
+    clientCapabilities: clientTools.getCapabilities(),
+    workspace: clientTools.getWorkspace(),
+    memory: true,
+    discord: areDiscordToolsAvailable(),
+  })
+}
 
 const state: RunnerStateInternal = {
   contextSize: 0,
   running: false,
-  systemPrompt: "",
   conversation: [],
   pendingInputs: [],
   tokenCount: 0,
@@ -37,6 +35,8 @@ const state: RunnerStateInternal = {
   memoryRecallCooldowns: {},
   memoryRecallTurn: 0,
   memoryRecallPending: false,
+  shutdownRequested: false,
+  turnInFlight: false,
   deferredEvents: [],
 }
 
@@ -54,35 +54,22 @@ export function isWaitingForEvent(): boolean {
   return eventResolvers.length > 0
 }
 
-// ── Boredom wake timer ────────────────────────────────────────────────────────
-// When BOREDOM_WAKE_MS > 0, starts a timer after each session ends. If no
-// external event arrives within the window, fires a synthetic wake so the
-// agent gets a turn to be present. Any real wake cancels the pending timer.
-
-let boredomTimer: ReturnType<typeof setTimeout> | null = null
-
-function cancelBoredomTimer(): void {
-  if (boredomTimer) {
-    clearTimeout(boredomTimer)
-    boredomTimer = null
+export function getRunnerStatus(): {
+  running: boolean
+  idle: boolean
+  tokenCount: number
+  contextSize: number
+  processStartedAt: string
+  uptimeMs: number
+} {
+  return {
+    running: state.running,
+    idle: isWaitingForEvent(),
+    tokenCount: state.tokenCount,
+    contextSize: state.contextSize,
+    processStartedAt: PROCESS_STARTED_AT,
+    uptimeMs: Math.max(0, Date.now() - new Date(PROCESS_STARTED_AT).getTime()),
   }
-}
-
-function startBoredomTimer(): void {
-  if (BOREDOM_WAKE_MS <= 0) return
-  cancelBoredomTimer()
-  boredomTimer = setTimeout(() => {
-    boredomTimer = null
-    if (state.running) return
-    if (state.pendingInputs.length > 0) return
-    console.log("[runner] boredom timer fired — waking agent")
-    void wake({
-      source: "boredom",
-      triggeredAt: new Date().toISOString(),
-      content: "[boredom] no events for a while. check your inbox, feeds, or anything pending. if there's truly nothing to do, rest.",
-      raw: null,
-    })
-  }, BOREDOM_WAKE_MS)
 }
 
 type EnqueueOptions = {
@@ -92,6 +79,11 @@ type EnqueueOptions = {
 
 /** Push an event into the live session, resolving the loop's wait if it's idle. */
 function deliverEvent(event: UserMessage, options: EnqueueOptions = {}): boolean {
+  if (state.shutdownRequested) {
+    console.log("[runner] dropping event during shutdown from", event.source)
+    return false
+  }
+
   if (options.onlyIfWaiting && eventResolvers.length === 0) {
     return false
   }
@@ -154,53 +146,60 @@ export function enqueueEvent(event: UserMessage, options: EnqueueOptions = {}): 
   return true
 }
 
-// Wire the job manager to deliver results through the event loop.
-// If the runner is active, enqueue the event. If not, wake directly.
-initJobManager((event) => {
-  if (state.running) {
-    enqueueEvent(event)
-  } else {
-    void wake(event)
-  }
-})
-
 /**
- * Requests graceful shutdown by injecting a final chat event and waiting for rest.
+ * Persists the active runner state for a process shutdown.
  *
  * Resolves immediately if no session is currently running.
  *
- * @returns A promise that resolves when shutdown handling has completed.
+ * @returns A promise that resolves when shutdown persistence has completed.
  */
-export function shutdown(): Promise<void> {
-  if (!state.running) return Promise.resolve()
+export async function shutdown(): Promise<void> {
+  if (!state.running || state.conversation.length === 0) return
 
-  return new Promise<void>((resolve) => {
-    if (!state.running) {
-      resolve()
-      return
-    }
-    shutdownResolve = resolve
-    deliverEvent({
-      source: "chat",
-      content: "hey, the harness is shutting down. please journal this session and rest 💙",
-      triggeredAt: new Date().toISOString(),
-      raw: {},
+  state.shutdownRequested = true
+  interruptEventWaiters()
+  if (state.turnInFlight || state.toolInFlight) {
+    await new Promise<void>((resolve) => {
+      shutdownResolvers.push(resolve)
     })
-  })
+    return
+  }
+
+  await saveRuntimeSnapshot()
+}
+
+function interruptEventWaiters(): void {
+  const resolvers = eventResolvers
+  eventResolvers = []
+  for (const resolve of resolvers) resolve(null)
+}
+
+function resolveShutdown(): void {
+  const resolvers = shutdownResolvers
+  shutdownResolvers = []
+  for (const resolve of resolvers) resolve()
+}
+
+async function saveRuntimeSnapshot(): Promise<void> {
+  archiveContextMessages(state.conversation, "runtime-checkpoint")
+  await saveSession(state.conversation)
+  await saveRestSnapshot(state.conversation, "runtime checkpoint")
 }
 
 /** Wait until the next event arrives (or return immediately if one is pending). */
-function waitForEvent(): Promise<UserMessage> {
+function waitForEvent(): Promise<UserMessage | null> {
+  if (state.shutdownRequested) return Promise.resolve(null)
   if (state.pendingInputs.length > 0) {
     return Promise.resolve(state.pendingInputs.shift()!)
   }
-  return new Promise<UserMessage>((resolve) => {
+  return new Promise<UserMessage | null>((resolve) => {
     eventResolvers.push(resolve)
   })
 }
 
 /** Wait up to timeoutMs for the next event; resolves null if the timer fires first. */
 function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null> {
+  if (state.shutdownRequested) return Promise.resolve(null)
   if (state.pendingInputs.length > 0) {
     return Promise.resolve(state.pendingInputs.shift()!)
   }
@@ -215,7 +214,7 @@ function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null>
       resolve(null)
     }, timeoutMs)
 
-    const resolver = (event: UserMessage) => {
+    const resolver = (event: UserMessage | null) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
@@ -226,149 +225,22 @@ function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null>
   })
 }
 
-// ── Idle compaction ───────────────────────────────────────────────────────────
-
-const LLM_RECENT_MIN_KEEP = 6
-const LLM_RECENT_MAX_KEEP = 40
-const LLM_TAIL_CHAR_BUDGET = 60_000
-
-/**
- * Attempts to proactively compact old large tool results while idle.
- * Only runs when respect_cache is false.
- */
-async function applyIdleProactiveCompaction(): Promise<boolean> {
-  if (RESPECT_CACHE) return false
-
-  const provider = configuredSummaryProvider()
-  if (!provider.model) return false
-
-  const { messages, compacted } = await proactiveCompaction(
-    state.conversation,
-    provider.model,
-    provider.apiKey,
-    COMPACTION_TURN_AGE,
-    COMPACTION_MIN_CHARS,
-  )
-
-  if (compacted === 0) return false
-
-  const beforeEstimate = state.contextSize
-  state.conversation = messages
-  state.contextSize = estimatePromptTokens(state.conversation)
-
-  console.log(
-    `[context] idle proactive: compacted ${compacted} tool result(s) (${beforeEstimate} -> ${state.contextSize} tokens)`,
-  )
-
-  recordMetric({
-    type: "compaction",
-    before: beforeEstimate,
-    after: state.contextSize,
-    method: "idle-proactive",
-    summary: undefined,
-  })
-
-  return true
-}
-
-/**
- * Attempts to compact the conversation via LLM summarization while idle.
- * Returns true if compaction occurred and session was saved.
- */
-async function applyIdleCompaction(): Promise<boolean> {
-  // Only compact if we're above the token threshold
-  if (state.contextSize < CONTEXT_COMPACT_TRIGGER_TOKENS) return false
-
-  const summaryProvider = configuredSummaryProvider()
-  if (!summaryProvider.model) {
-    console.warn("[context] idle: no summary model available; skipping idle compaction")
-    return false
-  }
-
-  const beforeEstimate = estimatePromptTokens(state.conversation)
-  const beforeCount = state.conversation.length
-  const agentContext = await loadAgentSummaryContext()
-
-  console.log(`[context] idle: starting compaction (${beforeCount} msgs, ~${beforeEstimate} tokens)`)
-
-  const summarized = await summarizeConversationViaLLM(
-    state.conversation,
-    summaryProvider.model,
-    summaryProvider.apiKey,
-    {
-      recentMinKeep: LLM_RECENT_MIN_KEEP,
-      recentMaxKeep: LLM_RECENT_MAX_KEEP,
-      tailCharBudget: LLM_TAIL_CHAR_BUDGET,
-      agentContext,
-    },
-  )
-
-  if (!summarized) {
-    console.warn("[context] idle: llm summary unavailable; keeping raw conversation")
-    return false
-  }
-
-  const afterEstimate = estimatePromptTokens(summarized)
-  if (afterEstimate >= beforeEstimate) {
-    console.warn(`[context] idle: llm summary not smaller (${beforeEstimate} -> ${afterEstimate}); keeping raw conversation`)
-    return false
-  }
-
-  state.conversation = summarized
-  state.contextSize = afterEstimate
-
-  const summaryIdx = findSummaryMessageIndex(state.conversation)
-  const summaryMsg = summaryIdx >= 0 ? state.conversation[summaryIdx] : undefined
-  const summary = summaryMsg?.role === "user" && typeof summaryMsg.content === "string" ? summaryMsg.content : undefined
-
-  console.log(
-    `[context] idle: llm-summarized conversation via ${summaryProvider.model} (${beforeCount} -> ${summarized.length} msgs, ${beforeEstimate} -> ${afterEstimate} tokens)`,
-  )
-
-  recordMetric({
-    type: "compaction",
-    before: beforeEstimate,
-    after: afterEstimate,
-    method: "idle-llm",
-    summary,
-  })
-
-  return true
-}
-
-/**
- * Waits for an event, periodically running idle compaction if IDLE_COMPACTION_TIMEOUT_MS is set.
- * Returns immediately if an event is already pending.
- */
-async function waitForEventWithIdleCompaction(): Promise<UserMessage> {
-  // Fast path: event already pending
-  if (state.pendingInputs.length > 0) {
-    return state.pendingInputs.shift()!
-  }
-
-  // If idle compaction is disabled, fall back to simple wait
-  if (IDLE_COMPACTION_TIMEOUT_MS <= 0) {
-    return waitForEvent()
-  }
-
-  // Loop: wait with timeout, run compaction if timeout fires, repeat
-  while (true) {
-    const event = await waitForEventWithTimeout(IDLE_COMPACTION_TIMEOUT_MS)
-    if (event) return event
-
-    // Timeout fired — try proactive compaction first, then full idle compaction
-    try {
-      await applyIdleProactiveCompaction()
-      await applyIdleCompaction()
-    } catch (err) {
-      console.warn(`[context] idle compaction failed: ${err instanceof Error ? err.message : String(err)}`)
-    }
-    // Continue waiting for the next event or timeout
-  }
-}
-
 function formatIncomingEvent(event: UserMessage): string {
   return `[incoming — ${event.source}]\n\n${event.content}`
+}
+
+function autoSeeDiscordEvent(event: UserMessage): void {
+  if (event.source !== "discord") return
+
+  const match = event.content.match(/^source_item_id:\s*(\S+)/m)
+  const itemId = match?.[1]?.trim()
+  if (!itemId) return
+
+  try {
+    markDiscordItem(itemId, "seen", "auto-seen after injection into runner context", "noted")
+  } catch (err) {
+    console.warn(`[runner] failed to auto-see Discord item ${itemId}: ${err instanceof Error ? err.message : String(err)}`)
+  }
 }
 
 function emitUserEvent(event: UserMessage): void {
@@ -382,11 +254,11 @@ function emitUserEvent(event: UserMessage): void {
 }
 
 function injectIncomingEvent(convId: number, event: UserMessage): void {
+  autoSeeDiscordEvent(event)
   const incomingMessage = formatIncomingEvent(event)
   state.conversation.push({
     role: "user",
     content: incomingMessage,
-    timestamp: Date.now(),
   })
   logMessage(convId, "user", incomingMessage)
   emitUserEvent(event)
@@ -404,8 +276,6 @@ function injectIncomingEvent(convId: number, event: UserMessage): void {
  * @returns A promise that resolves once this wake cycle fully completes.
  */
 export async function wake(event: UserMessage): Promise<void> {
-  cancelBoredomTimer()
-
   if (state.running) {
     enqueueEvent(event)
     return
@@ -420,11 +290,22 @@ export async function wake(event: UserMessage): Promise<void> {
   // The wake event is the first turn — recall once for it.
   state.memoryRecallPending = true
 
-  // Always start a fresh context on wake. The rest snapshot carries forward
-  // any summarized continuity between sessions; conversation resume is gone.
-  const bootstrap = await buildBootstrap(event, await consumeRestSnapshot())
-  state.systemPrompt = bootstrap.systemPrompt
-  state.conversation = bootstrap.messages
+  const saved = await loadSession()
+  if (saved) {
+    state.conversation = saved
+    autoSeeDiscordEvent(event)
+    state.conversation.push({
+      role: "user",
+      content: `[harness restarted — ${event.source} @ ${event.triggeredAt}]\n\n${event.content}`,
+    })
+  } else {
+    autoSeeDiscordEvent(event)
+    state.conversation = await buildBootstrap(event, await loadRestSnapshot(), {
+      clientCapabilities: clientTools.getCapabilities(),
+      workspace: clientTools.getWorkspace(),
+      discord: areDiscordToolsAvailable(),
+    })
+  }
 
   const convId = startConversation(event.source, event.triggeredAt)
 
@@ -438,42 +319,50 @@ export async function wake(event: UserMessage): Promise<void> {
 
   try {
     const exit = await runLoop(convId, state, {
-      waitForEvent: waitForEventWithIdleCompaction,
+      clientTools,
+      getTools: currentToolCatalog,
+      waitForEvent,
       waitForEventWithTimeout,
       injectIncomingEvent,
       flushDeferredEvents,
+      clearSession,
+      saveSession: saveRuntimeSnapshot,
+      saveShutdownSnapshot: saveRuntimeSnapshot,
+      shouldShutdown: () => state.shutdownRequested,
+      resolveShutdown,
     })
     if (exit === "rest") setRunnerPresence("resting")
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    console.error(`[runner] fatal loop error: ${message}`)
+    console.error(`[runner] loop aborted: ${message}`)
     if (err instanceof Error && err.stack) console.error(err.stack)
-    // Let it crash — systemd will restart the process with a clean state.
-    // Trying to continue after an unexpected error risks zombie state.
-    process.exit(1)
+    try {
+      await saveRuntimeSnapshot()
+    } catch (saveErr) {
+      console.warn(`[runner] failed to persist session after abort: ${saveErr instanceof Error ? saveErr.message : String(saveErr)}`)
+    }
   } finally {
+    const wasShutdownRequested = state.shutdownRequested
     endConversation(convId, state.tokenCount)
     state.running = false
-    state.systemPrompt = ""
     state.conversation = []
     state.toolInFlight = false
     state.memoryRecallCooldowns = {}
     state.memoryRecallTurn = 0
     state.memoryRecallPending = false
-    flushDeferredEvents()
+    state.shutdownRequested = false
+    state.turnInFlight = false
+    if (!wasShutdownRequested) flushDeferredEvents()
     state.deferredEvents = []
     eventResolvers = []
+    resolveShutdown()
     setRunnerPresence("resting")
     console.log("[runner] niri is resting")
-    shutdownResolve?.()
-    shutdownResolve = null
 
-    if (state.pendingInputs.length > 0) {
+    if (!wasShutdownRequested && state.pendingInputs.length > 0) {
       const next = state.pendingInputs.shift()!
       console.log("[runner] pending event queued, waking again")
       await wake(next)
-    } else {
-      startBoredomTimer()
     }
   }
 }

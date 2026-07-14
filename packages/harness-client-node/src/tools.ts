@@ -1,83 +1,25 @@
-import { randomBytes } from "crypto"
-import fs from "fs/promises"
-import path from "path"
+import { randomBytes } from "node:crypto"
+import fs from "node:fs/promises"
+import path from "node:path"
+import type { ClientImageArtifact } from "@mira/harness-protocol"
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
   DEFAULT_FILE_TIMEOUT_MS,
   IMAGE_MAX_BYTES,
   IMAGE_ROOT,
+  MAX_LINE_LENGTH,
+  MAX_RESULT_BYTES,
   USE_DOCKER_SHELL,
   normalizeTimeoutMs,
   resolveMaxLines,
-} from "./config"
-import { currentWorkingDirectory, runOneOff, runRaw } from "./shell"
-import type { EditResult, ImageToolPayload, ModelImageInput } from "./types"
+} from "./config.js"
+import { currentWorkingDirectory, runOneOff, runRaw } from "./shell.js"
+import type { EditResult, ImageToolPayload } from "./types.js"
 
 function invokesSudo(command: string): boolean {
   return /(^|[;&|({]\s*)sudo(\s|$)/.test(String(command ?? ""))
 }
 
-function shouldRedirectStdinToDevNullByDefault(command: string): boolean {
-  // This runner executes in a real PTY, but we still want to avoid accidentally
-  // hanging forever on commands that commonly read from stdin (REPLs, pagers,
-  // editors, etc.). For most non-interactive commands we keep stdin attached.
-  const trimmed = String(command ?? "").trim()
-  if (!trimmed) return true
-
-  // Only inspect the leading program token (optionally prefixed by sudo).
-  // This is intentionally heuristic; it avoids trying to fully parse shell.
-  const m = trimmed.match(/^(?:sudo\s+)?([^\s]+)/)
-  const prog = (m?.[1] ?? "").toLowerCase()
-  if (!prog) return true
-
-  // Common interactive tools.
-  if (
-    [
-      "bash",
-      "sh",
-      "zsh",
-      "fish",
-      "python",
-      "python3",
-      "node",
-      "ruby",
-      "irb",
-      "php",
-      "psql",
-      "mysql",
-      "sqlite3",
-      "less",
-      "more",
-      "man",
-      "top",
-      "htop",
-      "nano",
-      "vim",
-      "vi",
-      "emacs",
-      "ssh",
-    ].includes(prog)
-  ) {
-    return true
-  }
-
-  // `cat` with no args is a very common accidental hang.
-  if (prog === "cat" && !/\bcat\b\s+\S/.test(trimmed)) return true
-
-  return false
-}
-
-/**
- * Run a shell command.
- * Output is capped at `maxLines` lines (default 150, 40 for known-verbose commands).
- * When truncated, a "[truncated]" header is prepended so niri knows lines were dropped.
- * Pass `maxLines: 0` to disable truncation entirely.
- *
- * @param command - Shell command to execute.
- * @param maxLines - Optional line cap override (`0` disables truncation).
- * @param timeoutMs - Optional command timeout in milliseconds.
- * @returns Cleaned command output, potentially truncated with a header.
- */
 export async function runCommand(command: string, maxLines?: number, timeoutMs?: number): Promise<string> {
   const cap = resolveMaxLines(command, maxLines)
   const opTimeoutMs = normalizeTimeoutMs(timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS)
@@ -85,86 +27,204 @@ export async function runCommand(command: string, maxLines?: number, timeoutMs?:
     ? await runOneOff(command, await currentWorkingDirectory(opTimeoutMs), { timeoutMs: opTimeoutMs })
     : await runRaw(command, {
         timeoutMs: opTimeoutMs,
-        redirectStdinToDevNull: shouldRedirectStdinToDevNullByDefault(command),
+        // Always detach stdin from the PTY. The agent cannot type into a prompt,
+        // so an interactive child (clack/inquirer prompts, pagers, REPLs) would
+        // only consume the trailing completion sentinels still buffered in the
+        // PTY — poisoning completion detection and flooding the session with
+        // prompt redraw garbage. /dev/null gives such children immediate EOF
+        // so they abort cleanly and bash reaches the end sentinel.
+        redirectStdinToDevNull: true,
       })
 
   if (cap === 0) return raw
 
   const lines = raw.split("\n")
-  if (lines.length <= cap) return raw
+  const processedLines = lines.map((line) => {
+    if (line.length > MAX_LINE_LENGTH) {
+      return line.slice(0, MAX_LINE_LENGTH) + ` ... [truncated line of ${line.length} characters]`
+    }
+    return line
+  })
 
-  const kept = lines.slice(-cap)
+  if (processedLines.length <= cap) {
+    return processedLines.join("\n")
+  }
+
+  const kept = processedLines.slice(-cap)
   return `[truncated — showing last ${cap} of ${lines.length} lines]\n${kept.join("\n")}`
 }
 
 function normalizeImagePath(filePath: string): string {
   const raw = String(filePath ?? "").trim()
   if (!raw) throw new Error("image path is required")
-  const normalized = path.posix.normalize(raw)
+  const normalized = USE_DOCKER_SHELL ? path.posix.normalize(raw) : path.resolve(raw)
   if (!(normalized === IMAGE_ROOT || normalized.startsWith(`${IMAGE_ROOT}/`))) {
     throw new Error(`image path must be inside ${IMAGE_ROOT}`)
   }
   return normalized
 }
 
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const expired = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs}ms`)), timeoutMs)
+    timer.unref?.()
+  })
+  try {
+    return await Promise.race([operation, expired])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+async function resolveLocalImagePath(filePath: string, timeoutMs: number): Promise<string> {
+  const [root, target] = await withTimeout(
+    Promise.all([fs.realpath(IMAGE_ROOT), fs.realpath(filePath)]),
+    timeoutMs,
+    "image path resolution",
+  )
+  const relative = path.relative(root, target)
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error(`image path must resolve inside ${IMAGE_ROOT}`)
+  }
+  return target
+}
+
 async function resolveLocalPath(filePath: string, timeoutMs: number): Promise<string> {
   const raw = String(filePath ?? "").trim()
   if (!raw) throw new Error("path is required")
-  if (path.isAbsolute(raw)) return path.normalize(raw)
-  return path.resolve(await currentWorkingDirectory(timeoutMs), raw)
+  const resolved = path.isAbsolute(raw) ? path.normalize(raw) : path.resolve(await currentWorkingDirectory(timeoutMs), raw)
+  return withTimeout(fs.realpath(resolved), timeoutMs, "file path resolution")
 }
 
-function imageMimeFromBytes(filePath: string, data: Buffer): string | null {
-  if (data.length >= 8 && data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
+function localFileLimitBytes(): number {
+  return Math.max(2_000_000, MAX_RESULT_BYTES * 4)
+}
+
+async function readBoundedLocalFile(filePath: string, timeoutMs: number): Promise<{ content: string; mode: number }> {
+  const handle = await withTimeout(fs.open(filePath, "r"), timeoutMs, "file open")
+  try {
+    const stat = await withTimeout(handle.stat(), timeoutMs, "file stat")
+    if (!stat.isFile()) throw new Error(`not a regular file: ${filePath}`)
+    const limit = localFileLimitBytes()
+    if (stat.size > limit) throw new Error(`file is too large to read safely (${stat.size} > ${limit} bytes)`)
+    const buffer = Buffer.alloc(Math.min(stat.size + 1, limit + 1))
+    const { bytesRead } = await withTimeout(handle.read(buffer, 0, buffer.length, 0), timeoutMs, "file read")
+    if (bytesRead > limit) throw new Error(`file is too large to read safely (>${limit} bytes)`)
+    const after = await withTimeout(handle.stat(), timeoutMs, "file stat")
+    if (after.size !== stat.size || after.mtimeMs !== stat.mtimeMs) throw new Error(`file changed while it was being read: ${filePath}`)
+    return { content: buffer.subarray(0, bytesRead).toString("utf8"), mode: stat.mode & 0o777 }
+  } finally {
+    await handle.close()
+  }
+}
+
+function isValidPng(data: Buffer): boolean {
+  return (
+    data.length >= 33 &&
+    data.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) &&
+    data.readUInt32BE(8) === 13 &&
+    data.subarray(12, 16).toString("ascii") === "IHDR" &&
+    data.readUInt32BE(16) > 0 &&
+    data.readUInt32BE(20) > 0
+  )
+}
+
+function isValidGif(data: Buffer): boolean {
+  const header = data.length >= 6 ? data.subarray(0, 6).toString("ascii") : ""
+  return (
+    data.length >= 10 &&
+    (header === "GIF87a" || header === "GIF89a") &&
+    data.readUInt16LE(6) > 0 &&
+    data.readUInt16LE(8) > 0
+  )
+}
+
+function isValidJpeg(data: Buffer): boolean {
+  if (data.length < 4 || data[0] !== 0xff || data[1] !== 0xd8 || data[data.length - 2] !== 0xff || data[data.length - 1] !== 0xd9) {
+    return false
+  }
+
+  let offset = 2
+  while (offset + 3 < data.length) {
+    while (offset < data.length && data[offset] === 0xff) offset++
+    if (offset >= data.length) return false
+
+    const marker = data[offset++]!
+    if (marker === 0xd9) break
+    if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue
+    if (offset + 2 > data.length) return false
+
+    const segmentLength = data.readUInt16BE(offset)
+    if (segmentLength < 2 || offset + segmentLength > data.length) return false
+
+    const isSofMarker =
+      (marker >= 0xc0 && marker <= 0xc3) ||
+      (marker >= 0xc5 && marker <= 0xc7) ||
+      (marker >= 0xc9 && marker <= 0xcb) ||
+      (marker >= 0xcd && marker <= 0xcf)
+    if (isSofMarker) {
+      if (segmentLength < 7) return false
+      const height = data.readUInt16BE(offset + 3)
+      const width = data.readUInt16BE(offset + 5)
+      return width > 0 && height > 0
+    }
+
+    offset += segmentLength
+  }
+
+  return false
+}
+
+function isValidWebp(data: Buffer): boolean {
+  if (data.length < 16) return false
+  if (data.subarray(0, 4).toString("ascii") !== "RIFF" || data.subarray(8, 12).toString("ascii") !== "WEBP") return false
+  const riffSize = data.readUInt32LE(4) + 8
+  if (riffSize > data.length) return false
+  const chunk = data.subarray(12, 16).toString("ascii")
+  return chunk === "VP8 " || chunk === "VP8L" || chunk === "VP8X"
+}
+
+function isValidBmp(data: Buffer): boolean {
+  if (data.length < 54 || data.subarray(0, 2).toString("ascii") !== "BM") return false
+  const declaredSize = data.readUInt32LE(2)
+  const pixelOffset = data.readUInt32LE(10)
+  const dibSize = data.readUInt32LE(14)
+  const width = data.readInt32LE(18)
+  const height = data.readInt32LE(22)
+  return declaredSize <= data.length && pixelOffset < data.length && dibSize >= 40 && width !== 0 && height !== 0
+}
+
+function isValidTiff(data: Buffer): boolean {
+  if (data.length < 8) return false
+  const little = data.subarray(0, 4).equals(Buffer.from([0x49, 0x49, 0x2a, 0x00]))
+  const big = data.subarray(0, 4).equals(Buffer.from([0x4d, 0x4d, 0x00, 0x2a]))
+  if (!little && !big) return false
+  const firstIfdOffset = little ? data.readUInt32LE(4) : data.readUInt32BE(4)
+  return firstIfdOffset >= 8 && firstIfdOffset < data.length
+}
+
+function imageMimeFromBytes(data: Buffer): string | null {
+  if (isValidPng(data)) {
     return "image/png"
   }
-  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return "image/jpeg"
-  if (data.length >= 6 && (data.subarray(0, 6).toString("ascii") === "GIF87a" || data.subarray(0, 6).toString("ascii") === "GIF89a")) {
-    return "image/gif"
-  }
-  if (data.length >= 12 && data.subarray(0, 4).toString("ascii") === "RIFF" && data.subarray(8, 12).toString("ascii") === "WEBP") {
-    return "image/webp"
-  }
-  if (data.length >= 2 && data.subarray(0, 2).toString("ascii") === "BM") return "image/bmp"
-  if (
-    data.length >= 4 &&
-    (data.subarray(0, 4).equals(Buffer.from([0x49, 0x49, 0x2a, 0x00])) ||
-      data.subarray(0, 4).equals(Buffer.from([0x4d, 0x4d, 0x00, 0x2a])))
-  ) {
-    return "image/tiff"
-  }
-
-  const ext = path.extname(filePath).toLowerCase()
-  const byExt: Record<string, string> = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".bmp": "image/bmp",
-    ".tif": "image/tiff",
-    ".tiff": "image/tiff",
-  }
-  return byExt[ext] ?? null
+  if (isValidJpeg(data)) return "image/jpeg"
+  if (isValidGif(data)) return "image/gif"
+  if (isValidWebp(data)) return "image/webp"
+  if (isValidBmp(data)) return "image/bmp"
+  if (isValidTiff(data)) return "image/tiff"
+  return null
 }
 
-/**
- * Read an image from the container and encode it as a data URL for multimodal input.
- * Only paths inside the configured IMAGE_ROOT are allowed.
- *
- * @param filePath - Absolute image path inside the allowed image root.
- * @param timeoutMs - Optional read timeout in milliseconds.
- * @returns Parsed image payload suitable for model multimodal input.
- * @throws If validation, decoding, or path checks fail.
- */
-export async function readImageForModel(filePath: string, timeoutMs?: number): Promise<ModelImageInput> {
+export async function readImageForModel(filePath: string, timeoutMs?: number): Promise<ClientImageArtifact> {
   const safePath = normalizeImagePath(filePath)
   const opTimeoutMs = normalizeTimeoutMs(timeoutMs, DEFAULT_FILE_TIMEOUT_MS)
 
   if (!USE_DOCKER_SHELL) {
+    const resolvedPath = await resolveLocalImagePath(safePath, opTimeoutMs)
     let st
     try {
-      st = await fs.stat(safePath)
+      st = await withTimeout(fs.stat(resolvedPath), opTimeoutMs, "image stat")
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       throw new Error(`could not stat ${safePath}: ${message}`)
@@ -173,8 +233,8 @@ export async function readImageForModel(filePath: string, timeoutMs?: number): P
     if (st.size <= 0) throw new Error(`file is empty: ${safePath}`)
     if (st.size > IMAGE_MAX_BYTES) throw new Error(`file too large: ${st.size} bytes (max ${IMAGE_MAX_BYTES})`)
 
-    const data = await fs.readFile(safePath)
-    const mime = imageMimeFromBytes(safePath, data)
+    const data = await fs.readFile(resolvedPath, { signal: AbortSignal.timeout(opTimeoutMs) })
+    const mime = imageMimeFromBytes(data)
     if (!mime) throw new Error(`unsupported image type: ${safePath}`)
     return {
       path: safePath,
@@ -185,13 +245,17 @@ export async function readImageForModel(filePath: string, timeoutMs?: number): P
   }
 
   const py = [
-    "import base64, imghdr, json, mimetypes, os, stat, sys, warnings",
+    "import base64, imghdr, json, os, stat, sys, warnings",
     "warnings.filterwarnings('ignore', category=DeprecationWarning)",
-    "path = sys.argv[1]",
+    "path = os.path.realpath(sys.argv[1])",
     "max_bytes = int(sys.argv[2])",
+    "root = os.path.realpath(sys.argv[3])",
     "def out(obj):",
     "    print(json.dumps(obj, ensure_ascii=False))",
     "try:",
+    "    if os.path.commonpath([root, path]) != root:",
+    "        out({'ok': False, 'message': f'image path must resolve inside {root}'})",
+    "        raise SystemExit(0)",
     "    st = os.stat(path)",
     "except FileNotFoundError:",
     "    out({'ok': False, 'message': f'file not found: {path}'})",
@@ -221,10 +285,6 @@ export async function readImageForModel(filePath: string, timeoutMs?: number): P
     "}",
     "mime = mime_map.get(kind)",
     "if not mime:",
-    "    guessed, _ = mimetypes.guess_type(path)",
-    "    if guessed and guessed.startswith('image/'):",
-    "        mime = guessed",
-    "if not mime:",
     "    out({'ok': False, 'message': f'unsupported image type: {path}'})",
     "    raise SystemExit(0)",
     "encoded = base64.b64encode(data).decode('ascii')",
@@ -237,7 +297,7 @@ export async function readImageForModel(filePath: string, timeoutMs?: number): P
     "})",
   ].join("\n")
 
-  const raw = await runRaw(pythonCommand(py, [safePath, String(IMAGE_MAX_BYTES)]), { timeoutMs: opTimeoutMs })
+  const raw = await runRaw(pythonCommand(py, [safePath, String(IMAGE_MAX_BYTES), IMAGE_ROOT]), { timeoutMs: opTimeoutMs })
 
   let parsed: ImageToolPayload
 
@@ -264,16 +324,13 @@ export async function readImageForModel(filePath: string, timeoutMs?: number): P
   }
 }
 
-/**
- * Escape a string for safe interpolation into a POSIX shell command.
- */
 function shellQuote(str: string): string {
   return "'" + str.replace(/'/g, "'\\''") + "'"
 }
 
 function pythonCommand(source: string, args: string[] = []): string {
-  const token = `NIRI_PY_${randomBytes(8).toString("hex").toUpperCase()}`
-  const scriptPath = `/tmp/niri-${randomBytes(8).toString("hex")}.py`
+  const token = `HARNESS_PY_${randomBytes(8).toString("hex").toUpperCase()}`
+  const scriptPath = `/tmp/harness-${randomBytes(8).toString("hex")}.py`
   return [
     `cat > ${shellQuote(scriptPath)} << '${token}'`,
     source,
@@ -287,17 +344,6 @@ function wrappedBase64(str: string): string {
   return Buffer.from(str, "utf8").toString("base64").match(/.{1,76}/g)?.join("\n") ?? ""
 }
 
-/**
- * Read a file from the container with optional line-range selection.
- * Returns content with a metadata header showing the line range and total line count.
- * Defaults to lines 1–100 when no range is given.
- *
- * @param filePath - Path to the file inside the container.
- * @param startLine - Inclusive 1-based start line.
- * @param endLine - Optional inclusive 1-based end line.
- * @param timeoutMs - Optional read timeout in milliseconds.
- * @returns Header plus selected file content.
- */
 export async function readFile(filePath: string, startLine = 1, endLine?: number, timeoutMs?: number): Promise<string> {
   const start = Math.max(1, Math.trunc(Number(startLine)) || 1)
   const end = endLine !== undefined ? Math.max(start, Math.trunc(Number(endLine)) || start) : undefined
@@ -309,7 +355,7 @@ export async function readFile(filePath: string, startLine = 1, endLine?: number
 
   if (!USE_DOCKER_SHELL) {
     const resolvedPath = await resolveLocalPath(filePath, opTimeoutMs)
-    const content = await fs.readFile(resolvedPath, "utf8")
+    const { content } = await readBoundedLocalFile(resolvedPath, opTimeoutMs)
     const lines = content.split("\n")
     if (lines.at(-1) === "") lines.pop()
     const totalLines = lines.length
@@ -336,19 +382,7 @@ export async function readFile(filePath: string, startLine = 1, endLine?: number
   return header + content
 }
 
-/**
- * Edit a file by replacing an exact snippet of text.
- * old_text must appear exactly once; errors clearly if 0 or >1 matches.
- *
- * Uses an in-container python transform so we do not stream huge file bodies
- * through the PTY (which is fragile on very large files).
- *
- * @param filePath - File path to edit.
- * @param oldText - Exact text to replace (must match exactly once).
- * @param newText - Replacement text.
- * @param timeoutMs - Optional operation timeout in milliseconds.
- * @returns Structured edit result describing success/failure.
- */
+// Docker edits stay in-container so large file bodies never cross the PTY.
 export async function editFile(filePath: string, oldText: string, newText: string, timeoutMs?: number): Promise<EditResult> {
   if (oldText.length === 0) {
     return { ok: false, message: "old_text must not be empty" }
@@ -359,8 +393,11 @@ export async function editFile(filePath: string, oldText: string, newText: strin
   if (!USE_DOCKER_SHELL) {
     const resolvedPath = await resolveLocalPath(filePath, opTimeoutMs)
     let content: string
+    let mode: number
     try {
-      content = await fs.readFile(resolvedPath, "utf8")
+      const snapshot = await readBoundedLocalFile(resolvedPath, opTimeoutMs)
+      content = snapshot.content
+      mode = snapshot.mode
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       return { ok: false, message: `could not read ${filePath}: ${message}` }
@@ -370,11 +407,24 @@ export async function editFile(filePath: string, oldText: string, newText: strin
     if (count === 0) return { ok: false, message: `old_text not found in ${filePath}` }
     if (count > 1) return { ok: false, message: `old_text found ${count} times in ${filePath} — must be unique` }
 
+    const temporary = path.join(path.dirname(resolvedPath), `.${path.basename(resolvedPath)}.${randomBytes(8).toString("hex")}.tmp`)
     try {
-      await fs.writeFile(resolvedPath, content.replace(oldText, newText), "utf8")
+      const current = await readBoundedLocalFile(resolvedPath, opTimeoutMs)
+      if (current.content !== content) return { ok: false, message: `file changed before edit could be applied: ${filePath}` }
+      const handle = await fs.open(temporary, "wx", mode)
+      try {
+        await handle.writeFile(content.replace(oldText, newText), "utf8")
+        await handle.sync()
+      } finally {
+        await handle.close()
+      }
+      await fs.rename(temporary, resolvedPath)
+      await fs.chmod(resolvedPath, mode)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       return { ok: false, message: `could not write ${filePath}: ${message}` }
+    } finally {
+      await fs.rm(temporary, { force: true })
     }
 
     const linesDelta = newText.split("\n").length - oldText.split("\n").length
@@ -386,22 +436,27 @@ export async function editFile(filePath: string, oldText: string, newText: strin
   }
 
   const payload = wrappedBase64(JSON.stringify({ path: filePath, old_text: oldText, new_text: newText }))
-  const payloadToken = `NIRI_EDIT_PAYLOAD_${randomBytes(8).toString("hex").toUpperCase()}`
-  const payloadPath = `/tmp/niri-edit-${randomBytes(8).toString("hex")}.b64`
+  const payloadToken = `HARNESS_EDIT_PAYLOAD_${randomBytes(8).toString("hex").toUpperCase()}`
+  const payloadPath = `/tmp/harness-edit-${randomBytes(8).toString("hex")}.b64`
 
   const py = [
-    "import base64, json, sys",
+    "import base64, json, os, sys, tempfile",
     "def out(obj):",
     "    print(json.dumps(obj, ensure_ascii=False))",
     "with open(sys.argv[1], 'r', encoding='ascii') as f:",
     "    payload = json.loads(base64.b64decode(f.read()).decode('utf-8'))",
-    "path = payload.get('path', '')",
+    "path = os.path.realpath(payload.get('path', ''))",
     "old = payload.get('old_text', '')",
     "new = payload.get('new_text', '')",
+    "max_bytes = int(sys.argv[2])",
     "if old == '':",
     "    out({'ok': False, 'message': 'old_text must not be empty'})",
     "    raise SystemExit(0)",
     "try:",
+    "    original_stat = os.stat(path)",
+    "    if original_stat.st_size > max_bytes:",
+    "        out({'ok': False, 'message': f'file is too large to edit safely ({original_stat.st_size} > {max_bytes} bytes)'})",
+    "        raise SystemExit(0)",
     "    with open(path, 'r', encoding='utf-8') as f:",
     "        content = f.read()",
     "except FileNotFoundError:",
@@ -418,12 +473,27 @@ export async function editFile(filePath: string, oldText: string, newText: strin
     "    out({'ok': False, 'message': f'old_text found {count} times in {path} — must be unique'})",
     "    raise SystemExit(0)",
     "updated = content.replace(old, new, 1)",
+    "temporary = None",
     "try:",
-    "    with open(path, 'w', encoding='utf-8') as f:",
+    "    with open(path, 'r', encoding='utf-8') as f:",
+    "        if f.read() != content:",
+    "            out({'ok': False, 'message': f'file changed before edit could be applied: {path}'})",
+    "            raise SystemExit(0)",
+    "    fd, temporary = tempfile.mkstemp(prefix='.' + os.path.basename(path) + '.', suffix='.tmp', dir=os.path.dirname(os.path.abspath(path)))",
+    "    with os.fdopen(fd, 'w', encoding='utf-8') as f:",
     "        f.write(updated)",
+    "        f.flush()",
+    "        os.fsync(f.fileno())",
+    "    os.chmod(temporary, original_stat.st_mode & 0o777)",
+    "    os.replace(temporary, path)",
+    "    temporary = None",
     "except Exception as e:",
     "    out({'ok': False, 'message': f'could not write {path}: {e}'})",
     "    raise SystemExit(0)",
+    "finally:",
+    "    if temporary:",
+    "        try: os.unlink(temporary)",
+    "        except FileNotFoundError: pass",
     "out({'ok': True})",
   ].join("\n")
 
@@ -432,7 +502,7 @@ export async function editFile(filePath: string, oldText: string, newText: strin
       `cat > ${shellQuote(payloadPath)} << '${payloadToken}'`,
       payload,
       payloadToken,
-      pythonCommand(py, [payloadPath]),
+      pythonCommand(py, [payloadPath, String(localFileLimitBytes())]),
       `rm -f ${shellQuote(payloadPath)}`,
     ].join("\n"),
     { timeoutMs: opTimeoutMs },

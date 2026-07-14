@@ -202,6 +202,51 @@ export function extractImageAttachmentsFromRawJson(rawJson: string): DiscordImag
   }
 }
 
+function userDisplayName(value: unknown): string | null {
+  const user = asObject(value)
+  if (!user) return null
+  return (
+    asString(user.display_name) ??
+    asString(user.displayName) ??
+    asString(user.nickname) ??
+    asString(user.nick) ??
+    asString(user.global_name) ??
+    asString(user.globalName) ??
+    asString(user.username) ??
+    asString(user.name)
+  )
+}
+
+/**
+ * Replaces Discord user mention tokens like `<@123>` with display names from
+ * the payload's `mentions` array, so event text names the pinged person.
+ *
+ * @param payload - Raw Discord gateway/webhook payload or message object.
+ * @param content - Message content to render.
+ * @returns Content with resolvable user mentions rendered as `@name`.
+ */
+export function renderDiscordUserMentions(payload: unknown, content: string): string {
+  const root = asObject(payload)
+  if (!root || !content) return content
+  const message = asObject(root.message) ?? root
+  const mentions = Array.isArray(message.mentions) ? message.mentions : []
+  if (mentions.length === 0) return content
+
+  const namesById = new Map<string, string>()
+  for (const entry of mentions) {
+    const mention = asObject(entry)
+    const id = asString(mention?.id)
+    const name = userDisplayName(mention)
+    if (id && name) namesById.set(id, name)
+  }
+  if (namesById.size === 0) return content
+
+  return content.replace(/<@!?(\d+)>/g, (token, id: string) => {
+    const name = namesById.get(id)
+    return name ? `@${name}` : token
+  })
+}
+
 /**
  * Parses a raw Discord gateway/webhook payload into a structured message record.
  *
@@ -217,6 +262,7 @@ export function parseMessageRecord(payload: unknown, botUserId?: string): Discor
   const message = asObject(root.message) ?? root
   const channel = asObject(root.channel)
   const author = asObject(message.author) ?? asObject(root.author)
+  const member = asObject(message.member) ?? asObject(root.member)
 
   const messageId = asString(message.id ?? root.message_id)
   const channelId = asString(message.channel_id ?? root.channel_id ?? channel?.id)
@@ -228,9 +274,17 @@ export function parseMessageRecord(payload: unknown, botUserId?: string): Discor
 
   const authorId = asString(author?.id ?? root.author_id)
   const authorUsername =
-    asString(author?.global_name) ?? asString(author?.username) ?? asString(root.author_username) ?? asString(root.author)
+    asString(member?.display_name) ??
+    asString(member?.displayName) ??
+    asString(member?.nickname) ??
+    asString(member?.nick) ??
+    asString(author?.global_name) ??
+    asString(author?.globalName) ??
+    asString(author?.username) ??
+    asString(root.author_username) ??
+    asString(root.author)
 
-  const content = String(message.content ?? root.content ?? "")
+  const content = renderDiscordUserMentions(payload, String(message.content ?? root.content ?? ""))
   const createdAt = toIsoString(message.timestamp ?? root.timestamp)
 
   const isDm =

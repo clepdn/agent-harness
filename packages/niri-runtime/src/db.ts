@@ -2,7 +2,8 @@ import Database from "better-sqlite3"
 import fs from "fs"
 import path from "path"
 import * as sqliteVec from "sqlite-vec"
-import { HOME_DIR } from "./container/config"
+import { publishWorkerEvent } from "./awp/outbox"
+import { NIRI_HOME as HOME_DIR } from "./agent-config"
 
 const DB_PATH = path.join(HOME_DIR, "niri.db")
 export const MEMORY_EMBEDDING_DIMENSIONS = 3072
@@ -12,7 +13,7 @@ let vecAvailable = false
 
 function ensureWritableDirOrThrow(dirPath: string, purpose: string): void {
   try {
-    fs.mkdirSync(dirPath, { recursive: true })
+    fs.mkdirSync(dirPath, { recursive: true, mode: 0o700 })
     fs.accessSync(dirPath, fs.constants.W_OK)
   } catch (err: any) {
     let owner = "unknown"
@@ -46,6 +47,7 @@ function ensureWritableDirOrThrow(dirPath: string, purpose: string): void {
 export function initDb(): void {
   ensureWritableDirOrThrow(HOME_DIR, "niri.db")
   db = new Database(DB_PATH)
+  fs.chmodSync(DB_PATH, 0o600)
 
   db.pragma("journal_mode = WAL")
   db.pragma("foreign_keys = ON")
@@ -75,6 +77,45 @@ export function initDb(): void {
       createdAt  text    not null default (datetime('now'))
     );
 
+    create table if not exists context_messages (
+      id           text primary key,
+      role         text not null,
+      content_json text not null,
+      content_text text not null,
+      first_seen_at text not null,
+      source       text not null
+    );
+
+    create index if not exists idx_context_messages_seen
+      on context_messages(first_seen_at desc);
+
+    create table if not exists context_summaries (
+      id           text primary key,
+      summary_text text not null,
+      method       text not null,
+      created_at   text not null
+    );
+
+    create table if not exists context_summary_messages (
+      summary_id text not null references context_summaries(id) on delete cascade,
+      message_id text not null references context_messages(id),
+      ordinal    integer not null,
+      primary key (summary_id, ordinal)
+    );
+
+    create index if not exists idx_context_summary_messages_order
+      on context_summary_messages(summary_id, ordinal);
+
+    create index if not exists idx_context_summary_messages_message
+      on context_summary_messages(message_id);
+
+    create table if not exists context_summary_parents (
+      summary_id text not null references context_summaries(id) on delete cascade,
+      parent_id  text not null references context_summaries(id),
+      ordinal    integer not null,
+      primary key (summary_id, parent_id)
+    );
+
     create table if not exists discord_messages (
       message_id    text primary key,
       channel_id    text not null,
@@ -96,6 +137,14 @@ export function initDb(): void {
       on discord_messages(channel_id, message_id desc);
     create index if not exists idx_discord_messages_created
       on discord_messages(created_at desc);
+
+    create table if not exists discord_message_embedding_meta (
+      message_id    text primary key references discord_messages(message_id) on delete cascade,
+      model         text not null,
+      dimensions    integer not null,
+      content_hash  text not null,
+      updated_at    text not null default (datetime('now'))
+    );
 
     create table if not exists discord_items (
       item_id         text primary key,
@@ -138,6 +187,12 @@ export function initDb(): void {
     create table if not exists discord_meta (
       key        text primary key,
       value      text not null,
+      updated_at text not null
+    );
+
+    create table if not exists discord_user_pronouns (
+      user_id    text primary key,
+      pronouns   text not null,
       updated_at text not null
     );
 
@@ -227,6 +282,10 @@ export function initDb(): void {
       create virtual table if not exists memory_prototype_vec using vec0(
         embedding float[${MEMORY_EMBEDDING_DIMENSIONS}] distance_metric=cosine
       );
+
+      create virtual table if not exists discord_message_vec using vec0(
+        embedding float[${MEMORY_EMBEDDING_DIMENSIONS}] distance_metric=cosine
+      );
     `)
   }
 
@@ -236,7 +295,13 @@ export function initDb(): void {
 export function startConversation(source: string, startedAt: string): number {
   const stmt = db.prepare("insert into conversations (startedAt, source) values (?, ?)")
   const result = stmt.run(startedAt, source)
-  return result.lastInsertRowid as number
+  const conversationId = result.lastInsertRowid as number
+  publishWorkerEvent("conversation.started", {
+    conversationId,
+    source,
+    startedAt,
+  })
+  return conversationId
 }
 
 export function logMessage(
@@ -246,8 +311,9 @@ export function logMessage(
   toolCalls?: unknown,
   toolCallId?: string,
 ): void {
+  const createdAt = new Date().toISOString()
   const stmt = db.prepare(
-    "insert into messages (convId, role, content, toolCalls, toolCallId) values (?, ?, ?, ?, ?)",
+    "insert into messages (convId, role, content, toolCalls, toolCallId, createdAt) values (?, ?, ?, ?, ?, ?)",
   )
   stmt.run(
     convId,
@@ -255,11 +321,25 @@ export function logMessage(
     content,
     toolCalls ? JSON.stringify(toolCalls) : null,
     toolCallId ?? null,
+    createdAt,
   )
+  publishWorkerEvent("conversation.message", {
+    conversationId: convId,
+    role,
+    content,
+    ...(toolCalls ? { toolCalls } : {}),
+    ...(toolCallId ? { toolCallId } : {}),
+    createdAt,
+  })
 }
 
 export function endConversation(id: number, tokens: number): void {
   db.prepare("update conversations set tokens = ? where id = ?").run(tokens, id)
+  publishWorkerEvent("conversation.ended", {
+    conversationId: id,
+    tokens,
+    endedAt: new Date().toISOString(),
+  })
 }
 
 export function getDb(): Database.Database {

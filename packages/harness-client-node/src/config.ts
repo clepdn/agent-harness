@@ -1,61 +1,12 @@
-import path from "path"
-import { config } from "../config"
+import fs from "node:fs"
+import path from "node:path"
 
-const configuredContainerName = config.container.name
-const configuredContainerUser = config.container.user
-const configuredSshTarget = config.ssh.target
-const configuredSshIdentity = config.ssh.identity
-
-/** Whether command execution should go through Docker instead of a local shell. */
-export const USE_DOCKER_SHELL = configuredContainerName.length > 0 && configuredContainerUser.length > 0
-/** Docker container name used for command execution. */
-export const CONTAINER_NAME = configuredContainerName || "niri"
-/** Linux user inside the container used for command execution. */
-export const CONTAINER_USER = configuredContainerUser || "niri"
-
-/** Whether command execution should go through SSH instead of a local shell. */
-export const USE_SSH = configuredSshTarget.length > 0
-/** SSH target in user@host form. */
-export const SSH_TARGET = configuredSshTarget
-/** Path to the SSH identity file, or null if not configured. */
-export const SSH_IDENTITY: string | null = configuredSshIdentity || null
-
-if (USE_DOCKER_SHELL && USE_SSH) {
-  throw new Error(
-    "SSH_TARGET and NIRI_CONTAINER/NIRI_USER cannot both be set — choose one execution backend.",
-  )
-}
-
-/** Repository fallback home used when a local OS home is unavailable. */
-export const REPO_HOME_DIR = path.resolve(process.cwd(), "home")
-/** Harness home for soul, memories, and local databases. */
-export const HOME_DIR = (USE_DOCKER_SHELL || USE_SSH) ? REPO_HOME_DIR : path.resolve(process.env.HOME ?? REPO_HOME_DIR)
-
-/** Absolute image root allowed for `image_tool` operations. */
-export const IMAGE_ROOT = (() => {
-  const configured = config.image_tool.root
-  const root = configured || (USE_DOCKER_SHELL ? `/home/${CONTAINER_USER}/images` : path.resolve(process.cwd(), "home", "images"))
-  if (!root.startsWith("/")) {
-    throw new Error(`[image_tool].root must be an absolute path, got: ${root}`)
-  }
-  return path.posix.normalize(root)
-})()
-
-const DEFAULT_IMAGE_MAX_BYTES = 150_000
-/** Maximum image size (bytes) accepted by `image_tool`. */
-export const IMAGE_MAX_BYTES = (() => {
-  const parsed = config.image_tool.max_bytes
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_IMAGE_MAX_BYTES
-  return parsed
-})()
-
-/** Default max lines returned by shell enough for most output without flooding context. */
+const DEFAULT_IMAGE_MAX_BYTES = 1_000_000
 const DEFAULT_MAX_LINES = 150
+const DEFAULT_MAX_LINE_LENGTH = 2_000
+const DEFAULT_MAX_RESULT_BYTES = 512_000
+const VERBOSE_MAX_LINES = 40
 
-/**
- * Commands that routinely produce thousands of lines of noise.
- * When matched, the default cap is tightened to VERBOSE_MAX_LINES.
- */
 const VERBOSE_PATTERNS: RegExp[] = [
   /\bapt(-get)?\s+(install|upgrade|update|dist-upgrade|autoremove)\b/,
   /\bpip3?\s+install\b/,
@@ -67,44 +18,164 @@ const VERBOSE_PATTERNS: RegExp[] = [
   /\bsnap\s+install\b/,
 ]
 
-const VERBOSE_MAX_LINES = 40
-/** Default timeout for shell command execution in milliseconds. */
+export type NodeToolRuntimeOptions = {
+  workspaceRoot?: string
+  home?: string
+  imageRoot?: string
+  imageMaxBytes?: number
+  maxLineLength?: number
+  maxResultBytes?: number
+  containerName?: string
+  containerUser?: string
+  shellEnvironment?: Record<string, string | undefined>
+}
+
 export const DEFAULT_COMMAND_TIMEOUT_MS = 30_000
-/** Default timeout for file operations in milliseconds. */
 export const DEFAULT_FILE_TIMEOUT_MS = 120_000
-/** Upper bound for all tool timeouts in milliseconds. */
 export const MAX_TIMEOUT_MS = 10 * 60_000
 
-/**
- * Returns the effective image root path exposed to model/tool descriptions.
- *
- * @returns The normalized absolute image root path.
- */
-export function imageRootForModelInput(): string {
-  return IMAGE_ROOT
+export let CLIENT_WORKSPACE_ROOT = ""
+export let CLIENT_HOME = ""
+export let IMAGE_ROOT = ""
+export let IMAGE_MAX_BYTES = DEFAULT_IMAGE_MAX_BYTES
+export let MAX_LINE_LENGTH = DEFAULT_MAX_LINE_LENGTH
+export let MAX_RESULT_BYTES = DEFAULT_MAX_RESULT_BYTES
+export let USE_DOCKER_SHELL = false
+export let CONTAINER_NAME = "harness"
+export let CONTAINER_USER = "harness"
+export let SHELL_ENV: Record<string, string> = {}
+export let NODE_TOOL_RUNTIME_GENERATION = 0
+
+const SAFE_SHELL_ENV = new Set([
+  "COLORTERM",
+  "DISPLAY",
+  "FORCE_COLOR",
+  "HOME",
+  "LANG",
+  "LOGNAME",
+  "NO_COLOR",
+  "PATH",
+  "SHELL",
+  "SSH_AUTH_SOCK",
+  "TEMP",
+  "TERM",
+  "TMP",
+  "TMPDIR",
+  "USER",
+  "WAYLAND_DISPLAY",
+  "XDG_CACHE_HOME",
+  "XDG_CONFIG_HOME",
+  "XDG_DATA_HOME",
+  "XDG_RUNTIME_DIR",
+])
+
+function defaultShellEnvironment(): Record<string, string> {
+  const env: Record<string, string> = {}
+  for (const [key, value] of Object.entries(process.env)) {
+    if (typeof value !== "string") continue
+    if (SAFE_SHELL_ENV.has(key) || key.startsWith("LC_")) env[key] = value
+  }
+  return env
 }
 
-/**
- * Resolves the effective output line cap for a shell command.
- *
- * @param command - Command text used to detect verbose command patterns.
- * @param requested - Optional explicit line cap override.
- * @returns Effective max line count (`0` means no truncation).
- */
+function parseShellEnvironment(value: string | undefined): Record<string, string | undefined> | undefined {
+  if (!value?.trim()) return undefined
+  const parsed = JSON.parse(value) as unknown
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("HARNESS_SHELL_ENV_JSON must be an object of strings")
+  }
+  const env: Record<string, string> = {}
+  for (const [key, item] of Object.entries(parsed as Record<string, unknown>)) {
+    if (typeof item !== "string") throw new Error(`HARNESS_SHELL_ENV_JSON.${key} must be a string`)
+    env[key] = item
+  }
+  return env
+}
+
+function positiveInteger(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : fallback
+}
+
+function environmentOptions(): NodeToolRuntimeOptions {
+  const containerName = process.env.HARNESS_CONTAINER?.trim()
+  const containerUser = process.env.HARNESS_CONTAINER_USER?.trim()
+  const workspaceRoot = process.env.HARNESS_CLIENT_WORKSPACE?.trim()
+  const home = process.env.HARNESS_CLIENT_HOME?.trim()
+  const imageRoot = process.env.HARNESS_IMAGE_ROOT?.trim()
+  const shellEnvironment = parseShellEnvironment(process.env.HARNESS_SHELL_ENV_JSON)
+  return {
+    ...(workspaceRoot ? { workspaceRoot } : {}),
+    ...(home ? { home } : {}),
+    ...(imageRoot ? { imageRoot } : {}),
+    imageMaxBytes: Number(process.env.HARNESS_IMAGE_MAX_BYTES),
+    maxLineLength: Number(process.env.HARNESS_MAX_LINE_LENGTH),
+    maxResultBytes: Number(process.env.HARNESS_MAX_RESULT_BYTES),
+    ...(containerName ? { containerName } : {}),
+    ...(containerUser ? { containerUser } : {}),
+    ...(shellEnvironment ? { shellEnvironment } : {}),
+  }
+}
+
+export function configureNodeToolRuntime(options: NodeToolRuntimeOptions = {}): number {
+  const defaults = environmentOptions()
+  const containerName = options.containerName?.trim() || defaults.containerName?.trim() || ""
+  const containerUser = options.containerUser?.trim() || defaults.containerUser?.trim() || ""
+  if (Boolean(containerName) !== Boolean(containerUser)) {
+    throw new Error("container name and container user must be configured together")
+  }
+  USE_DOCKER_SHELL = Boolean(containerName && containerUser)
+  CONTAINER_NAME = containerName || "harness"
+  CONTAINER_USER = containerUser || "harness"
+
+  const configuredRoot = options.workspaceRoot?.trim() || defaults.workspaceRoot?.trim()
+  const fallbackRoot = USE_DOCKER_SHELL ? `/home/${CONTAINER_USER}` : process.env.INIT_CWD ?? process.cwd()
+  if (USE_DOCKER_SHELL) {
+    CLIENT_WORKSPACE_ROOT = path.posix.normalize(configuredRoot || fallbackRoot)
+  } else {
+    const resolvedRoot = path.resolve(configuredRoot || fallbackRoot)
+    try {
+      CLIENT_WORKSPACE_ROOT = fs.realpathSync.native(resolvedRoot)
+    } catch {
+      CLIENT_WORKSPACE_ROOT = resolvedRoot
+    }
+  }
+  CLIENT_HOME = USE_DOCKER_SHELL
+    ? path.posix.normalize(options.home?.trim() || defaults.home?.trim() || `/home/${CONTAINER_USER}`)
+    : path.resolve(options.home?.trim() || defaults.home?.trim() || process.env.HOME || CLIENT_WORKSPACE_ROOT)
+
+  const configuredImageRoot = options.imageRoot?.trim() || defaults.imageRoot?.trim()
+  const fallbackImageRoot = USE_DOCKER_SHELL
+    ? path.posix.join(CLIENT_HOME, "images")
+    : path.join(CLIENT_WORKSPACE_ROOT, "home", "images")
+  IMAGE_ROOT = USE_DOCKER_SHELL
+    ? path.posix.normalize(configuredImageRoot || fallbackImageRoot)
+    : path.resolve(configuredImageRoot || fallbackImageRoot)
+  if (!path.isAbsolute(IMAGE_ROOT)) throw new Error(`image root must be absolute: ${IMAGE_ROOT}`)
+
+  IMAGE_MAX_BYTES = positiveInteger(options.imageMaxBytes, positiveInteger(defaults.imageMaxBytes, DEFAULT_IMAGE_MAX_BYTES))
+  MAX_LINE_LENGTH = positiveInteger(options.maxLineLength, positiveInteger(defaults.maxLineLength, DEFAULT_MAX_LINE_LENGTH))
+  MAX_RESULT_BYTES = positiveInteger(options.maxResultBytes, positiveInteger(defaults.maxResultBytes, DEFAULT_MAX_RESULT_BYTES))
+  SHELL_ENV = defaultShellEnvironment()
+  for (const [key, value] of Object.entries(defaults.shellEnvironment ?? {})) {
+    if (typeof value === "string") SHELL_ENV[key] = value
+  }
+  for (const [key, value] of Object.entries(options.shellEnvironment ?? {})) {
+    if (typeof value === "string") SHELL_ENV[key] = value
+    else delete SHELL_ENV[key]
+  }
+  SHELL_ENV.HOME = CLIENT_HOME
+  NODE_TOOL_RUNTIME_GENERATION += 1
+  return NODE_TOOL_RUNTIME_GENERATION
+}
+
+configureNodeToolRuntime()
+
 export function resolveMaxLines(command: string, requested?: number): number {
-  if (requested !== undefined) return requested
-  return VERBOSE_PATTERNS.some((p) => p.test(command)) ? VERBOSE_MAX_LINES : DEFAULT_MAX_LINES
+  if (requested !== undefined && Number.isFinite(requested) && requested > 0) return Math.trunc(requested)
+  return VERBOSE_PATTERNS.some((pattern) => pattern.test(command)) ? VERBOSE_MAX_LINES : DEFAULT_MAX_LINES
 }
 
-/**
- * Normalizes a timeout value by applying defaults, integer coercion, and hard cap.
- *
- * @param requested - User-provided timeout value.
- * @param fallback - Default timeout to use when the provided value is invalid.
- * @returns A bounded timeout in milliseconds.
- */
 export function normalizeTimeoutMs(requested: number | undefined, fallback: number): number {
-  const numeric = Number(requested)
-  if (!Number.isFinite(numeric) || numeric <= 0) return fallback
-  return Math.min(Math.trunc(numeric), MAX_TIMEOUT_MS)
+  if (typeof requested !== "number" || !Number.isFinite(requested) || requested <= 0) return fallback
+  return Math.min(Math.trunc(requested), MAX_TIMEOUT_MS)
 }

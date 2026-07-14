@@ -1,4 +1,5 @@
-import type { StreamEvent } from "@niri/chat-client"
+import type { StreamEvent } from "@niri/protocol"
+import { publishWorkerEvent } from "./awp/outbox"
 
 export type { StreamEvent }
 
@@ -22,12 +23,19 @@ export function emit(event: StreamEvent): void {
       activeConsoleText = true
     }
     process.stdout.write(event.text)
+  } else if (event.type === "thinking") {
+    if (!activeConsoleText) {
+      process.stdout.write("[thinking] ")
+      activeConsoleText = true
+    }
+    process.stdout.write(event.text)
   } else {
     endConsoleText()
     if (event.type === "user") console.log(`[user/${event.source}] ${event.text}`)
   }
   buffer.push(event)
   if (buffer.length > BUFFER_SIZE) buffer.shift()
+  publishWorkerEvent("stream.event", event)
   for (const fn of listeners) fn(event)
 }
 

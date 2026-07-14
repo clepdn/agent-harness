@@ -1,18 +1,26 @@
 import OpenAI from "openai"
-import { config } from "./config"
 import { MEMORY_EMBEDDING_DIMENSIONS } from "./db"
+import { openAIHeaders, openAIUserAgent } from "./openai-headers"
 
-export const EMBEDDING_MODEL = config.embeddings.model
-export const EMBEDDING_DIMENSIONS = config.embeddings.dimensions || MEMORY_EMBEDDING_DIMENSIONS
+export const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL ?? "google/gemini-embedding-2-preview"
+export const EMBEDDING_DIMENSIONS = parseInt(
+  process.env.EMBEDDING_DIMENSIONS ?? String(MEMORY_EMBEDDING_DIMENSIONS),
+  10,
+)
 
-const embeddingClient = config.embeddings.api_key
+const EMBEDDING_BASE_URL = process.env.EMBEDDING_BASE_URL ?? "https://openrouter.ai/api/v1"
+const EMBEDDING_API_KEY = process.env.EMBEDDING_API_KEY
+const embeddingHeaders = openAIHeaders([
+  ["HTTP-Referer", process.env.EMBEDDING_OPENAI_REFERER],
+  ["X-Title", process.env.EMBEDDING_TITLE],
+  ["User-Agent", openAIUserAgent(process.env.EMBEDDING_OPENAI_USER_AGENT)],
+])
+
+const embeddingClient = EMBEDDING_API_KEY
   ? new OpenAI({
-      baseURL: config.embeddings.base_url,
-      apiKey: config.embeddings.api_key,
-      defaultHeaders: {
-        ...(config.embeddings.referer ? { "HTTP-Referer": config.embeddings.referer } : {}),
-        ...(config.embeddings.title ? { "X-Title": config.embeddings.title } : {}),
-      },
+      baseURL: EMBEDDING_BASE_URL,
+      apiKey: EMBEDDING_API_KEY,
+      defaultHeaders: embeddingHeaders,
     })
   : null
 
@@ -29,6 +37,11 @@ export async function embedTexts(texts: string[]): Promise<number[][]> {
     dimensions: EMBEDDING_DIMENSIONS,
     encoding_format: "float",
   })
+
+  if (!Array.isArray(response.data)) {
+    const keys = response && typeof response === "object" ? Object.keys(response).join(",") : typeof response
+    throw new Error(`embedding response missing data array (model=${EMBEDDING_MODEL}, inputs=${texts.length}, keys=${keys || "none"})`)
+  }
 
   return response.data.map((item) => item.embedding)
 }

@@ -19,6 +19,7 @@ import {
   parseMessageRecord,
   type DiscordObject,
 } from "./parse"
+import { inactiveCooldownChannelIds } from "./cooldown"
 import {
   autoDemoteStalePendingItems,
   buildReplyTargetContextMap,
@@ -49,9 +50,6 @@ import {
   upsertDiscordChannel,
   upsertInboxItem,
   upsertDiscordMessage,
-  type BackreadRow,
-  type BatchMessageRow,
-  type BatchPendingRow,
   type DiscordReplyContext,
   type InboxAction,
   type InboxStatus,
@@ -63,6 +61,7 @@ import {
   makeRestClient,
   withDiscordRestRetry,
 } from "./rest"
+import { maybeFetchAndCachePronouns } from "./pronouns"
 
 // ── result types ───────────────────────────────────────────────────────
 
@@ -70,6 +69,7 @@ export type DiscordIngestResult = {
   stored: boolean
   isNew: boolean
   messageId?: string
+  channelId?: string
   itemId?: string
   bucket?: "dm" | "mention"
   isFromBot?: boolean
@@ -118,7 +118,15 @@ function formatBatchTimestamp(value: string | null | undefined): string {
   if (!value) return "unknown-time"
   const parsed = new Date(value)
   if (Number.isNaN(parsed.getTime())) return value
-  return parsed.toISOString().replace("T", " ").replace(".000Z", "Z")
+  return parsed.toLocaleString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZoneName: "short",
+  })
 }
 
 function formatBatchImages(rawJson: string): string {
@@ -165,6 +173,20 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
     return { stored: false, isNew: false, reason: "payload is missing message/channel identity" }
   }
 
+  if (record.isDm && !record.isFromSelf) {
+    const whitelist = process.env.DISCORD_DM_WHITELIST
+    if (whitelist && whitelist.trim()) {
+      const allowedIds = whitelist.split(",").map((id) => id.trim()).filter(Boolean)
+      if (!record.authorId || !allowedIds.includes(record.authorId)) {
+        return {
+          stored: false,
+          isNew: false,
+          reason: "ignored DM: sender is not in DISCORD_DM_WHITELIST",
+        }
+      }
+    }
+  }
+
   const isNew = !messageExists(record.messageId)
 
   const channelRecord = parseChannelRecord(payload, {
@@ -177,6 +199,10 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
 
   upsertDiscordMessage(record)
 
+  if (record.authorId) {
+    void maybeFetchAndCachePronouns(record.authorId)
+  }
+
   const bucket = detectInboxBucket(record)
   if (bucket) {
     upsertInboxItem(record.messageId, bucket)
@@ -184,6 +210,7 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
       stored: true,
       isNew,
       messageId: record.messageId,
+      channelId: record.channelId,
       itemId: record.messageId,
       bucket,
       isFromBot: record.isFromBot,
@@ -195,6 +222,7 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
     stored: true,
     isNew,
     messageId: record.messageId,
+    channelId: record.channelId,
     isFromBot: record.isFromBot,
     isFromSelf: record.isFromSelf,
     ...(!record.isDm && record.mentionsBot && !isConfiguredDiscordChannel(record.channelId)
@@ -239,6 +267,7 @@ export function listDiscordBackread(channelId: string, limit = 40, beforeMessage
   const replyByMessageId = buildReplyTargetContextMap(rows)
   return rows.map(({ raw_json: _rawJson, ...row }) => ({
     ...row,
+    source_item_id: row.message_id,
     created_at: formatHumanTimestamp(row.created_at),
     ...(replyByMessageId.has(row.message_id) ? { reply_to: replyByMessageId.get(row.message_id) } : {}),
   }))
@@ -322,22 +351,27 @@ export function buildDiscordBatchDigest(params?: {
   const batchOnlyConfigured = config.discord.batch_only_configured
   const autoSeenMinutes = Math.max(0, config.discord.pending_auto_seen_minutes)
   const configuredIds = parseChannelIds()
-  const configuredPlaceholders = configuredIds.map(() => "?").join(", ")
+  // Cooldown channels outside their active window: spare their pending items
+  // from both the stale-demote and this digest, so they resurface when active.
+  const inactiveChannelIds = inactiveCooldownChannelIds()
+  const activeConfiguredIds =
+    inactiveChannelIds.length > 0 ? configuredIds.filter((id) => !inactiveChannelIds.includes(id)) : configuredIds
+  const configuredPlaceholders = activeConfiguredIds.map(() => "?").join(", ")
   const channelScopeClause = batchOnlyConfigured
-    ? configuredIds.length > 0
+    ? activeConfiguredIds.length > 0
       ? `and (m.is_dm = 1 or m.channel_id in (${configuredPlaceholders}))`
       : "and m.is_dm = 1"
     : ""
   const botUserId = config.discord.bot_user_id
 
-  const autoDemotedCount = autoDemoteStalePendingItems(autoSeenMinutes)
-  const repairedMessageCount = repairDiscordMessageChannelFlags()
+  autoDemoteStalePendingItems(autoSeenMinutes, inactiveChannelIds)
+  repairDiscordMessageChannelFlags()
 
   const from =
     getDiscordMeta("discord_batch_last_dispatched_at") ??
     new Date(now.getTime() - intervalMs).toISOString()
 
-  const queryOpts = { botUserId, from, configuredIds, channelScopeClause }
+  const queryOpts = { botUserId, from, configuredIds: activeConfiguredIds, channelScopeClause }
 
   const messageRows = queryBatchMessages({ ...queryOpts, limit: maxMessages + 1 })
 
@@ -350,17 +384,27 @@ export function buildDiscordBatchDigest(params?: {
 
   const pendingPreview = queryBatchPendingPreview({ ...queryOpts, limit: previewLimit })
 
-  const uniqueChannels = new Set(recentMessages.map((row) => row.channel_id))
-  const replyContextByMessageId = buildReplyTargetContextMap([...recentMessages, ...pendingPreview])
-  const hasImages = [...recentMessages, ...pendingPreview].some(
+  // Cooldown channels outside their active window are dropped from this digest
+  // and left as `pending` so they resurface once the window opens. The inactive
+  // set was computed above (before the stale-demote) and reused here.
+  const visibleRecentMessages = inactiveChannelIds.length
+    ? recentMessages.filter((row) => !inactiveChannelIds.includes(row.channel_id))
+    : recentMessages
+  const visiblePendingPreview = inactiveChannelIds.length
+    ? pendingPreview.filter((row) => !inactiveChannelIds.includes(row.channel_id))
+    : pendingPreview
+
+  // If cooldown filtering removed everything, skip this batch (leave items
+  // pending) rather than waking the agent with an empty digest.
+  if (visibleRecentMessages.length === 0 && visiblePendingPreview.length === 0) return null
+
+  const replyContextByMessageId = buildReplyTargetContextMap([...visibleRecentMessages, ...visiblePendingPreview])
+  const hasImages = [...visibleRecentMessages, ...visiblePendingPreview].some(
     (row) => extractImageAttachmentsFromRawJson(row.raw_json).length > 0,
   )
 
   const lines: string[] = [
-    `[discord batch] ${from} -> ${nowIso}`,
-    `new_messages=${recentMessages.length}${truncated ? "+" : ""} channels=${uniqueChannels.size} pending_inbox=${pendingCount} scope=${batchOnlyConfigured ? "configured+dm" : "all"}`,
-    `auto_seen_timeout=${autoSeenMinutes}m auto_demoted=${autoDemotedCount}`,
-    `channel_flag_repairs=${repairedMessageCount}`,
+    `[discord batch] ${formatBatchTimestamp(from)} -> ${formatBatchTimestamp(nowIso)}`,
     "channel messages are context, not direct requests. replying is optional; use judgment.",
     ...(hasImages
       ? ["image attachments appear as [images: <discord cdn urls>]; download with shell, then inspect with image_tool if useful."]
@@ -369,12 +413,13 @@ export function buildDiscordBatchDigest(params?: {
     "recent messages:",
   ]
 
-  for (const row of recentMessages) {
+  for (const row of visibleRecentMessages) {
     const label = channelLabel(row)
-    const author = row.author_username ? `@${row.author_username}` : "@unknown"
+    const pronounsSuffix = row.pronouns ? ` (${row.pronouns})` : ""
+    const author = row.author_username ? `@${row.author_username}${pronounsSuffix}` : "@unknown"
     const ts = formatBatchTimestamp(row.created_at)
     const replyTo = replyContextByMessageId.get(row.message_id)
-    lines.push(`- [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${fullMessageText(row.content)}${formatBatchImages(row.raw_json)}`)
+    lines.push(`- source_item_id=${row.message_id} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${fullMessageText(row.content)}${formatBatchImages(row.raw_json)}`)
   }
 
   if (truncated) {
@@ -383,22 +428,35 @@ export function buildDiscordBatchDigest(params?: {
 
   lines.push("")
   lines.push("pending preview:")
-  if (pendingPreview.length === 0) {
+  if (visiblePendingPreview.length === 0) {
     lines.push("- (none)")
   } else {
-    for (const row of pendingPreview) {
+    for (const row of visiblePendingPreview) {
       const label = channelLabel(row)
-      const author = row.author_username ? `@${row.author_username}` : "@unknown"
+      const pronounsSuffix = row.pronouns ? ` (${row.pronouns})` : ""
+      const author = row.author_username ? `@${row.author_username}${pronounsSuffix}` : "@unknown"
       const ts = formatBatchTimestamp(row.created_at)
       const replyTo = replyContextByMessageId.get(row.message_id)
-      lines.push(`- ${row.item_id} [${row.bucket}] [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${compactText(row.content, 120)}${formatBatchImages(row.raw_json)}`)
+      lines.push(`- source_item_id=${row.item_id} bucket=${row.bucket} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${compactText(row.content, 120)}${formatBatchImages(row.raw_json)}`)
     }
   }
 
   lines.push("")
-  lines.push("you can reply if useful via discord_send, or choose not to reply. mark decisions with discord_mark when you handle pending items.")
+  lines.push("you can reply if useful via discord_send using source_item_id from the target message, or choose not to reply.")
 
-  setDiscordMeta("discord_batch_last_dispatched_at", nowIso)
+  // Only mark items we actually surfaced as seen. Inactive cooldown-channel
+  // items are left `pending` so they reappear once their window opens.
+  for (const row of visibleRecentMessages) {
+    if (row.item_id) {
+      updateInboxItem(row.item_id, "seen", "noted", "auto-seen after inclusion in Discord batch context")
+    }
+  }
+  for (const row of visiblePendingPreview) {
+    updateInboxItem(row.item_id, "seen", "noted", "auto-seen after inclusion in Discord batch context")
+  }
+
+  const lastVisibleRecent = visibleRecentMessages.at(-1)
+  setDiscordMeta("discord_batch_last_dispatched_at", truncated && lastVisibleRecent ? lastVisibleRecent.first_seen_at : nowIso)
 
   return {
     content: lines.join("\n"),
@@ -429,8 +487,19 @@ function resolveReferenceMessage(channelId: string, sourceItemId?: string, refer
     return null
   }
 
-  if (!sourceItemId?.trim()) return null
-  return getItemMessageId(sourceItemId.trim())
+  return resolveSourceMessageId(sourceItemId)
+}
+
+function resolveSourceMessageId(sourceItemId?: string): string | null {
+  const safeSourceItemId = sourceItemId?.trim()
+  if (!safeSourceItemId) return null
+  return getItemMessageId(safeSourceItemId) ?? (messageExistsById(safeSourceItemId) ? safeSourceItemId : null)
+}
+
+function resolveSourceChannelId(sourceItemId?: string): string | null {
+  const sourceMessageId = resolveSourceMessageId(sourceItemId)
+  if (!sourceMessageId) return null
+  return getMessageForReference(sourceMessageId)?.channel_id?.trim() || null
 }
 
 const AUTO_REPLY_STALE_MINUTES = 10
@@ -490,7 +559,7 @@ export async function sendDiscordMessage(params: {
 }): Promise<Record<string, unknown>> {
   let channelId = String(params.channelId ?? "").trim()
   if (!channelId && params.sourceItemId?.trim()) {
-    channelId = getItemChannelId(params.sourceItemId.trim()) ?? ""
+    channelId = getItemChannelId(params.sourceItemId.trim()) ?? resolveSourceChannelId(params.sourceItemId) ?? ""
   }
   if (!channelId) throw new Error("channel_id is required (or provide source_item_id that maps to one)")
 
@@ -501,6 +570,7 @@ export async function sendDiscordMessage(params: {
   const explicitSourceItemId = params.sourceItemId?.trim() ? params.sourceItemId.trim() : null
   const inferredSourceItemId = explicitSourceItemId ? null : inferPendingDmItemId(channelId)
   const resolvedSourceItemId = explicitSourceItemId ?? inferredSourceItemId
+  const resolvedSourceMessageId = resolveSourceMessageId(resolvedSourceItemId ?? undefined)
   const referenceMessageId = await chooseMessageReference({
     channelId,
     replyMode,
@@ -543,7 +613,7 @@ export async function sendDiscordMessage(params: {
     { botUserId },
   )
 
-  if (resolvedSourceItemId) {
+  if (resolvedSourceItemId && getItemMessageId(resolvedSourceItemId)) {
     const wasInferred = !explicitSourceItemId
     markDiscordItem(
       resolvedSourceItemId,
@@ -560,6 +630,7 @@ export async function sendDiscordMessage(params: {
     reply_mode: replyMode,
     used_reference_message_id: referenceMessageId,
     resolved_source_item_id: resolvedSourceItemId,
+    resolved_source_message_id: resolvedSourceMessageId,
     inferred_source_item_id: inferredSourceItemId,
     stored: ingest.stored,
   }
