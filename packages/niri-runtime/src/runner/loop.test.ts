@@ -3,6 +3,7 @@ import test from "node:test"
 import { __loopTest } from "./loop"
 import type { Message } from "../types"
 import type { LoopState } from "./types"
+import { makeUserMessage, makeAssistantMessage, makeToolResultMessage } from "./test-helpers"
 
 const testClientTools = {
   getCapabilities: () => [],
@@ -14,6 +15,7 @@ const testClientTools = {
 
 function makeState(): LoopState {
   return {
+    systemPrompt: "",
     conversation: [],
     pendingInputs: [],
     tokenCount: 0,
@@ -30,14 +32,8 @@ function makeState(): LoopState {
 test("applyDiscordSendNudge appends a follow-up user nudge for unsent Discord replies", () => {
   const state = makeState()
   const turnMessages: Message[] = [
-    {
-      role: "user",
-      content: "[user/discord] [discord/dm] hey are you there",
-    },
-    {
-      role: "assistant",
-      content: "yeah, i'm here",
-    },
+    makeUserMessage("[user/discord] [discord/dm] hey are you there"),
+    makeAssistantMessage("yeah, i'm here"),
   ]
 
   const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
@@ -50,14 +46,8 @@ test("applyDiscordSendNudge appends a follow-up user nudge for unsent Discord re
 test("applyDiscordSendNudge fires for [discord batch] envelopes (space, not slash)", () => {
   const state = makeState()
   const turnMessages: Message[] = [
-    {
-      role: "user",
-      content: "[user/discord] [discord batch] 2026-05-01T03:10:50.162Z -> 2026-05-01T03:11:22.198Z\n@meowskullz: hi\n@meowskullz: u there",
-    },
-    {
-      role: "assistant",
-      content: "yeah hi",
-    },
+    makeUserMessage("[user/discord] [discord batch] 2026-05-01T03:10:50.162Z -> 2026-05-01T03:11:22.198Z\n@meowskullz: hi\n@meowskullz: u there"),
+    makeAssistantMessage("yeah hi"),
   ]
 
   const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
@@ -70,14 +60,8 @@ test("applyDiscordSendNudge fires for [discord batch] envelopes (space, not slas
 test("applyDiscordSendNudge fires after a harness restart when the discord event is pre-turn context", () => {
   const state = makeState()
   state.conversation.push(
-    {
-      role: "user",
-      content: "[harness restarted — discord @ 2026-05-01T04:30:00.000Z]\n\n[discord/dm] hi starfish",
-    },
-    {
-      role: "assistant",
-      content: "i keep getting bounced by harness restarts sorry ^^ still here though! what's up?",
-    },
+    makeUserMessage("[harness restarted — discord @ 2026-05-01T04:30:00.000Z]\n\n[discord/dm] hi starfish"),
+    makeAssistantMessage("i keep getting bounced by harness restarts sorry ^^ still here though! what's up?"),
   )
 
   const turnMessages: Message[] = [state.conversation[1]!]
@@ -92,10 +76,7 @@ test("applyDiscordSendNudge fires after a harness restart when the discord event
 test("applyDiscordSendNudge does not fire when discord_send was already called", () => {
   const state = makeState()
   const turnMessages: Message[] = [
-    {
-      role: "user",
-      content: "[user/discord] [discord/channel] can you reply",
-    },
+    makeUserMessage("[user/discord] [discord/channel] can you reply"),
     {
       role: "assistant",
       content: "sending now",
@@ -109,7 +90,7 @@ test("applyDiscordSendNudge does not fire when discord_send was already called",
           },
         },
       ],
-    },
+    } as unknown as Message,
   ]
 
   const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
@@ -121,10 +102,7 @@ test("applyDiscordSendNudge does not fire when discord_send was already called",
 test("applyDiscordSendNudge keeps a wake DM active across a preliminary tool step", () => {
   const state = makeState()
   state.conversation.push(
-    {
-      role: "user",
-      content: "[wake] 7/14/2026, 3:22:59 AM — triggered by discord\n\n[discord/dm] @meowskullz\n\nboop",
-    },
+    makeUserMessage("[wake] 7/14/2026, 3:22:59 AM — triggered by discord\n\n[discord/dm] @meowskullz\n\nboop"),
     {
       role: "assistant",
       content: "",
@@ -135,16 +113,9 @@ test("applyDiscordSendNudge keeps a wake DM active across a preliminary tool ste
           function: { name: "memory_read", arguments: '{"path":"wake.md"}' },
         },
       ],
-    },
-    {
-      role: "tool",
-      tool_call_id: "call_memory",
-      content: "wake notes",
-    },
-    {
-      role: "assistant",
-      content: "hey you ^.^",
-    },
+    } as unknown as Message,
+    makeToolResultMessage("call_memory", "test", "wake notes"),
+    makeAssistantMessage("hey you ^.^"),
   )
 
   const nudged = __loopTest.applyDiscordSendNudge(state, [state.conversation[3]!])
@@ -156,10 +127,7 @@ test("applyDiscordSendNudge keeps a wake DM active across a preliminary tool ste
 test("applyDiscordSendNudge sees discord_send from an earlier tool step in the active user turn", () => {
   const state = makeState()
   state.conversation.push(
-    {
-      role: "user",
-      content: "[wake] 7/14/2026, 3:22:59 AM — triggered by discord\n\n[discord/dm] @meowskullz\n\nboop",
-    },
+    makeUserMessage("[wake] 7/14/2026, 3:22:59 AM — triggered by discord\n\n[discord/dm] @meowskullz\n\nboop"),
     {
       role: "assistant",
       content: "",
@@ -170,16 +138,9 @@ test("applyDiscordSendNudge sees discord_send from an earlier tool step in the a
           function: { name: "discord_send", arguments: '{"source_item_id":"1","content":"boop"}' },
         },
       ],
-    },
-    {
-      role: "tool",
-      tool_call_id: "call_send",
-      content: "sent!",
-    },
-    {
-      role: "assistant",
-      content: "okay, delivered",
-    },
+    } as unknown as Message,
+    makeToolResultMessage("call_send", "test", "sent!"),
+    makeAssistantMessage("okay, delivered"),
   )
 
   const nudged = __loopTest.applyDiscordSendNudge(state, [state.conversation[3]!])

@@ -1,3 +1,4 @@
+import { makeUserMessage, makeAssistantMessage } from "./test-helpers"
 import assert from "node:assert/strict"
 import test from "node:test"
 import { initDb } from "../db"
@@ -30,9 +31,9 @@ test("immutable context archive preserves exact messages and supports literal se
 })
 
 test("summary DAG expands parent provenance before newer direct messages", () => {
-  const first = { role: "user", content: "first exact source message" } as Message
-  const second = { role: "assistant", content: "second exact source message" } as Message
-  const third = { role: "user", content: "third exact source message" } as Message
+  const first = makeUserMessage("first exact source message") as Message
+  const second = makeAssistantMessage("second exact source message") as Message
+  const third = makeUserMessage("third exact source message") as Message
 
   const parentId = recordContextCompaction({
     summaryText: "parent summary",
@@ -60,8 +61,8 @@ test("summary DAG expands parent provenance before newer direct messages", () =>
 })
 
 test("lcm description exposes summary content, lineage, and bounded expansion costs", () => {
-  const parentMessage = { role: "user", content: "describe parent source" } as Message
-  const childMessage = { role: "assistant", content: "describe child source" } as Message
+  const parentMessage = makeUserMessage("describe parent source") as Message
+  const childMessage = makeAssistantMessage("describe child source") as Message
   const parentId = recordContextCompaction({
     summaryText: "describe parent summary",
     compactedMessages: [parentMessage],
@@ -126,13 +127,13 @@ test("rest snapshot extends the current summary with the exact raw tail", () => 
     method: "test-before-rest",
   })
   const parentForest = String(attachContextSummaryId([
-    { role: "user", content: "[context summary v1]\n[segments]\nolder living summary" } as Message,
+    makeUserMessage("[context summary v1]\n[segments]\nolder living summary") as Message,
   ], parentId)[0]?.content)
   const tail = [
-    { role: "assistant", content: "recent exact tail one" } as Message,
-    { role: "user", content: "recent exact tail two" } as Message,
+    makeAssistantMessage("recent exact tail one") as Message,
+    makeUserMessage("recent exact tail two") as Message,
   ]
-  const preSummaryWake = { role: "user", content: "legacy wake message before summary" } as Message
+  const preSummaryWake = makeUserMessage("legacy wake message before summary") as Message
 
   const snapshot = recordRestContextSnapshot([
     { role: "system", content: "bootstrap" },

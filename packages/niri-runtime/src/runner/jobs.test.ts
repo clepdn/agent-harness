@@ -1,20 +1,19 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { initJobManager, startJob, getJob, listJobs, getRunningJobs, clearFinishedJobs } from "./jobs"
+import { initJobManager, startJob, getJob, getRunningJobs, clearFinishedJobs } from "./jobs"
 
 test("startJob returns immediately with a job ID", () => {
-  let delivered = false
-  initJobManager(() => { delivered = true })
+  initJobManager(() => {})
 
   const jobId = startJob("test", async () => {
     return "result"
   })
 
   assert.ok(jobId, "should return a job ID")
-  const job = getJob(jobId)
+  const job = getJob(jobId)!
   assert.ok(job, "job should exist in registry")
   assert.equal(job.name, "test")
-  assert.equal(job.status, "running")
+  assert.equal(job!.status, "running")
 })
 
 test("job completes and delivers result", async () => {
@@ -28,9 +27,9 @@ test("job completes and delivers result", async () => {
 
   await new Promise(r => setTimeout(r, 150))
 
-  const job = getJob(jobId)
-  assert.equal(job.status, "completed")
-  assert.equal(job.result, "task completed successfully")
+  const job = getJob(jobId)!
+  assert.equal(job!.status, "completed")
+  assert.equal(job!.result, "task completed successfully")
   assert.ok(deliveredEvent, "should have delivered an event")
   assert.equal(deliveredEvent.source, "job")
   assert.ok(deliveredEvent.content.includes("task completed successfully"))
@@ -47,9 +46,9 @@ test("job failure delivers error", async () => {
 
   await new Promise(r => setTimeout(r, 150))
 
-  const job = getJob(jobId)
-  assert.equal(job.status, "failed")
-  assert.equal(job.error, "task exploded")
+  const job = getJob(jobId)!
+  assert.equal(job!.status, "failed")
+  assert.equal(job!.error, "task exploded")
   assert.ok(deliveredEvent.content.includes("task exploded"))
 })
 
@@ -60,7 +59,7 @@ test("getRunningJobs returns only running jobs", async () => {
     await new Promise(r => setTimeout(r, 100))
     return "done"
   })
-  const id2 = startJob("fast", async () => "done")
+  startJob("fast", async () => "done")
 
   await new Promise(r => setTimeout(r, 10))
   const running = getRunningJobs()
@@ -76,7 +75,7 @@ test("clearFinishedJobs removes completed/failed jobs", async () => {
   const id = startJob("temp", async () => "done")
   await new Promise(r => setTimeout(r, 100))
 
-  assert.equal(getJob(id).status, "completed")
+  assert.equal(getJob(id)!.status, "completed")
   clearFinishedJobs()
   assert.equal(getJob(id), undefined, "completed job should be cleared")
 })
