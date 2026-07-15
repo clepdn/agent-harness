@@ -37,8 +37,8 @@ export async function startLlmBridge(): Promise<void> {
   const cfg = config.llm_bridge
   if (!cfg.enabled) return
 
-  if (!cfg.base_url || !cfg.api_key) {
-    console.warn("[llm-bridge] enabled=true but api_key or base_url not set — skipping")
+  if (!cfg.provider || !cfg.model) {
+    console.warn("[llm-bridge] enabled=true but provider or model not set — skipping")
     return
   }
 
@@ -50,11 +50,14 @@ export async function startLlmBridge(): Promise<void> {
     ...process.env,
     BRIDGE_PORT: String(cfg.port),
     BRIDGE_HOST: cfg.host,
+    BRIDGE_PROVIDER: cfg.provider,
+    BRIDGE_MODEL: cfg.model,
     ...(cfg.api_key ? { BRIDGE_API_KEY: cfg.api_key } : {}),
     ...(cfg.base_url ? { BRIDGE_BASE_URL: cfg.base_url } : {}),
+    ...(cfg.oauth_refresh_token ? { BRIDGE_OAUTH_REFRESH_TOKEN: cfg.oauth_refresh_token } : {}),
   }
 
-  console.log(`[llm-bridge] starting on ${cfg.host}:${cfg.port} (upstream=${cfg.base_url})`)
+  console.log(`[llm-bridge] starting on ${cfg.host}:${cfg.port} (provider=${cfg.provider}, model=${cfg.model})`)
 
   bridgeProcess = spawn(tsxBin, [bridgeEntry], {
     env,

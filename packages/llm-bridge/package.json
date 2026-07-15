@@ -11,6 +11,7 @@
     "dev": "tsx watch src/index.ts"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "file:../../pi/packages/ai",
     "fastify": "^5.0.0"
   }
 }
