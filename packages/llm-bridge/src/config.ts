@@ -10,6 +10,8 @@ export interface BridgeModelConfig {
   contextWindow?: number
   maxTokens?: number
   reasoning?: boolean
+  // Anthropic subscription OAuth — if set, the bridge manages token refresh
+  oauthRefreshToken?: string
 }
 
 export interface BridgeConfig {
@@ -17,13 +19,16 @@ export interface BridgeConfig {
   host: string
   models: Record<string, BridgeModelConfig>
   defaultModel: string
-  authToken?: string
+  keysPath?: string
 }
 
 export function loadConfig(): BridgeConfig {
   const port = parseInt(process.env.BRIDGE_PORT ?? "4040", 10)
   const host = process.env.BRIDGE_HOST ?? "127.0.0.1"
-  const authToken = process.env.BRIDGE_AUTH_TOKEN
+
+  // Keys file path from env or argv
+  const keysArgIdx = process.argv.indexOf("--keys")
+  const keysPath = process.env.BRIDGE_KEYS ?? (keysArgIdx >= 0 ? process.argv[keysArgIdx + 1] : undefined)
 
   // Model config from env: BRIDGE_MODEL_<NAME>=provider:model_id:api_key
   // Or from BRIDGE_MODELS as JSON
@@ -44,15 +49,17 @@ export function loadConfig(): BridgeConfig {
   const modelId = process.env.BRIDGE_MODEL ?? process.env.MODEL_MODEL
   const apiKey = process.env.BRIDGE_API_KEY ?? process.env.MODEL_API_KEY
   const baseUrl = process.env.BRIDGE_BASE_URL ?? process.env.MODEL_BASE_URL
+  const oauthRefreshToken = process.env.BRIDGE_OAUTH_REFRESH_TOKEN
 
-  if (provider && modelId && apiKey) {
+  if (provider && modelId && (apiKey || oauthRefreshToken)) {
     const id = modelId
     models[id] = {
       id,
       name: modelId,
       provider,
       baseUrl,
-      apiKey,
+      apiKey: apiKey ?? "", // will be filled from OAuth refresh
+      ...(oauthRefreshToken ? { oauthRefreshToken } : {}),
       contextWindow: parseInt(process.env.BRIDGE_CONTEXT_WINDOW ?? "200000", 10),
       maxTokens: parseInt(process.env.BRIDGE_MAX_TOKENS ?? "8192", 10),
       reasoning: process.env.BRIDGE_REASONING === "true",
@@ -64,5 +71,5 @@ export function loadConfig(): BridgeConfig {
     throw new Error("[bridge] no models configured. set BRIDGE_MODELS or BRIDGE_PROVIDER + BRIDGE_MODEL + BRIDGE_API_KEY")
   }
 
-  return { port, host, models, defaultModel, authToken }
+  return { port, host, models, defaultModel, keysPath }
 }

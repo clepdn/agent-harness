@@ -1,8 +1,24 @@
 import http from "node:http"
-import type { BridgeConfig } from "./config"
+import type { BridgeConfig, BridgeModelConfig } from "./config"
 import { oaiMessagesToContext, oaiSseChunk, oaiCompletionResponse } from "./translate"
 import { buildModel, streamCompletion } from "./pi-ai"
 import { authenticate, isModelAllowed, type ApiKeyEntry } from "./auth"
+import { AnthropicTokenStore, parseOAuthCredentials } from "./anthropic-oauth"
+
+// Token stores for models with OAuth — keyed by model id
+const tokenStores = new Map<string, AnthropicTokenStore>()
+
+function getApiKey(modelConfig: BridgeModelConfig): Promise<string> {
+  if (modelConfig.oauthRefreshToken) {
+    let store = tokenStores.get(modelConfig.id)
+    if (!store) {
+      store = new AnthropicTokenStore(parseOAuthCredentials(modelConfig.oauthRefreshToken) ?? undefined)
+      tokenStores.set(modelConfig.id, store)
+    }
+    return store.getAccessToken()
+  }
+  return Promise.resolve(modelConfig.apiKey)
+}
 
 export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEntry>): http.Server {
   return http.createServer(async (req, res) => {
@@ -73,8 +89,9 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
         const stream = request.stream ?? false
         const context = oaiMessagesToContext(request.messages ?? [], request.tools)
         const piModel = buildModel(modelConfig)
+        const resolvedApiKey = await getApiKey(modelConfig)
         const options = {
-          apiKey: modelConfig.apiKey,
+          apiKey: resolvedApiKey,
           temperature: request.temperature,
           maxTokens: request.max_tokens ?? modelConfig.maxTokens,
         }
