@@ -1,50 +1,52 @@
 /**
  * LLM Bridge — unified inference proxy.
  *
- * All AI requests from the harness go through this bridge. It routes to
- * the appropriate backend based on model name:
+ * Acts as our own OpenRouter. Accepts standard OpenAI format requests,
+ * routes to the best available provider, and returns standard OpenAI
+ * format responses.
  *
- *   - pi-ai models (umans-*, glm-*, etc.) → pi-ai stream()
- *   - gemini-* / antigravity models     → Antigravity backend
- *   - gpt-* / o3-* / codex models       → Codex backend
- *   - claude-* with OAuth               → Direct Anthropic SDK
+ * Provider routing:
+ *   - gemini-* / agy-*     → Antigravity backend (custom)
+ *   - gpt-* / o3-* / codex → Codex backend (custom)
+ *   - claude-* with OAuth  → Direct Anthropic SDK (custom)
+ *   - everything else      → pi-ai registry (openrouter, openai, deepseek, etc.)
  *
- * The bridge listens on a single port (default 4040) and exposes
- * OpenAI-compatible endpoints. The harness points model.base_url here.
+ * Custom providers are overlaid on top of pi-ai's built-in model registry.
  */
 
 import { loadConfig } from "./config"
-import { createServer } from "./server"
+import { createServer, discoverModels } from "./server"
 import { loadApiKeys } from "./auth"
 
-// Parse --keys <path> from argv for the API keys file
 const keysArgIdx = process.argv.indexOf("--keys")
 const keysPath = keysArgIdx >= 0 ? process.argv[keysArgIdx + 1] : undefined
 
 const apiKeys = loadApiKeys(keysPath)
 if (apiKeys.size > 0) {
-  console.log(`[bridge] loaded ${apiKeys.size} API key(s) from ${keysPath}`)
-  for (const [, entry] of apiKeys) {
-    console.log(`[bridge]   key: ${entry.name ?? "(unnamed)"} — models: ${entry.allowedModels.join(", ")}`)
-  }
+  console.log(`[bridge] loaded ${apiKeys.size} API key(s)`)
 } else {
   console.log("[bridge] no API keys configured — running open (no auth)")
 }
 
 const config = loadConfig()
 
-const server = createServer(config, apiKeys)
+async function main() {
+  // Discover models from custom providers + pi-ai registry
+  await discoverModels(config)
 
-server.listen({ port: config.port, host: config.host }, () => {
+  const server = createServer(config, apiKeys)
+
+  await server.listen({ port: config.port, host: config.host })
   console.log(`[bridge] listening on http://${config.host}:${config.port}`)
-  console.log(`[bridge] models: ${Object.keys(config.models).join(", ")}`)
-  console.log(`[bridge] default: ${config.defaultModel}`)
+}
+
+main().catch((err) => {
+  console.error("[bridge] fatal:", err)
+  process.exit(1)
 })
 
-// Graceful shutdown
 async function shutdown() {
   console.log("[bridge] shutting down...")
-  await server.close()
   process.exit(0)
 }
 

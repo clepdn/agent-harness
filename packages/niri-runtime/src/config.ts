@@ -415,11 +415,19 @@ export const config = {
     enabled: bool(llmBridgeT.enabled, false),
     host: str(llmBridgeT.host, "127.0.0.1").trim(),
     port: int(llmBridgeT.port, 4040),
-    provider: str(llmBridgeT.provider, "").trim(),
-    model: str(llmBridgeT.model, "").trim(),
-    api_key: str(llmBridgeT.api_key, "").trim(),
-    base_url: str(llmBridgeT.base_url, "").trim(),
-    oauth_refresh_token: str(llmBridgeT.oauth_refresh_token, "").trim(),
+    providers: (() => {
+      const raw = llmBridgeT.providers
+      if (!Array.isArray(raw)) return []
+      return raw
+        .filter((entry): entry is TomlTable => isTable(entry))
+        .map((entry) => ({
+          name: str(entry.name, "").trim(),
+          api_key: str(entry.api_key, "").trim(),
+          base_url: str(entry.base_url, "").trim(),
+          oauth_refresh_token: str(entry.oauth_refresh_token, "").trim(),
+        }))
+        .filter((p) => p.name.length > 0)
+    })(),
   },
   subagents: subagentConfigs,
 }

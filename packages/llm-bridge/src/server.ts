@@ -7,13 +7,13 @@ import { authenticate, isModelAllowed, type ApiKeyEntry } from "./auth"
 import { AnthropicTokenStore, parseOAuthCredentials } from "./anthropic-oauth"
 import { handleAntigravityCompletion } from "./antigravity"
 import { handleCodexCompletion } from "./codex"
+import { getProviders, getModels } from "@earendil-works/pi-ai"
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai"
 
 // Token stores for models with OAuth — keyed by model id
 const tokenStores = new Map<string, AnthropicTokenStore>()
 
 // ── Model routing ─────────────────────────────────────────────────────────────
-// Models are routed to the appropriate backend based on their name.
 
 function isAntigravityModel(modelId: string): boolean {
   const lower = modelId.toLowerCase()
@@ -37,6 +37,80 @@ function getApiKey(modelConfig: BridgeModelConfig): Promise<string> {
   return Promise.resolve(modelConfig.apiKey)
 }
 
+/**
+ * Discover models from custom providers and merge with pi-ai's registry.
+ * Called on startup.
+ */
+export async function discoverModels(config: BridgeConfig): Promise<void> {
+  // 1. Add models from pi-ai's built-in registry
+  for (const provider of getProviders()) {
+    for (const model of getModels(provider)) {
+      // Only add if not already present (custom providers take priority)
+      if (!config.models[model.id]) {
+        config.models[model.id] = {
+          id: model.id,
+          name: model.name,
+          provider,
+          baseUrl: model.baseUrl,
+          apiKey: "", // pi-ai handles key resolution from env
+          contextWindow: model.contextWindow,
+          maxTokens: model.maxTokens,
+          reasoning: model.reasoning,
+        }
+      }
+    }
+  }
+
+  // 2. Discover models from custom providers with base_url + api_key
+  for (const provider of config.providers) {
+    if (provider.api_key && provider.base_url) {
+      try {
+        const resp = await fetch(`${provider.base_url}/models`, {
+          headers: { Authorization: `Bearer ${provider.api_key}` },
+        })
+        if (resp.ok) {
+          const data = await resp.json() as { data?: Array<{ id: string; context_length?: number }> }
+          for (const m of data.data ?? []) {
+            config.models[m.id] = {
+              id: m.id,
+              name: m.id,
+              provider: provider.name,
+              baseUrl: provider.base_url,
+              apiKey: provider.api_key,
+              ...(m.context_length ? { contextWindow: m.context_length } : {}),
+            }
+          }
+          console.log(`[bridge] discovered ${data.data?.length ?? 0} models from ${provider.name}`)
+        }
+      } catch (err) {
+        console.error(`[bridge] failed to fetch models from ${provider.name}:`, err)
+      }
+    }
+
+    // 3. Add OAuth providers (Anthropic subscription)
+    if (provider.oauth_refresh_token) {
+      // Claude models via OAuth — these use the direct Anthropic SDK
+      const claudeModels = [
+        "claude-sonnet-4-5-20250514",
+        "claude-opus-4-20250515",
+        "claude-haiku-4-20250414",
+      ]
+      for (const id of claudeModels) {
+        config.models[id] = {
+          id,
+          name: id,
+          provider: "anthropic-oauth",
+          apiKey: "",
+          oauthRefreshToken: provider.oauth_refresh_token,
+        }
+      }
+      console.log(`[bridge] added ${claudeModels.length} Anthropic OAuth models from ${provider.name}`)
+    }
+  }
+
+  console.log(`[bridge] total models in registry: ${Object.keys(config.models).length}`)
+}
+
 export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEntry>): FastifyInstance {
   const app = Fastify({
     logger: false,
@@ -52,11 +126,12 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
   })
 
   // Health check
-  app.get("/health", async () => {
-    return { ok: true, models: Object.keys(config.models) }
-  })
+  app.get("/health", async () => ({
+    ok: true,
+    models: Object.keys(config.models).length,
+  }))
 
-  // List models
+  // List all models
   app.get("/v1/models", async () => {
     const models = Object.values(config.models).map((m) => ({
       id: m.id,
@@ -69,7 +144,7 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
 
   // Unified chat completions — routes based on model name
   app.post("/v1/chat/completions", async (req: any, reply: any) => {
-    // Auth check — if keys are configured, require valid Bearer token
+    // Auth check
     let authKey: ApiKeyEntry | null = null
     if (apiKeys.size > 0) {
       authKey = authenticate(req.headers.authorization, apiKeys)
@@ -79,9 +154,14 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
     }
 
     const body = req.body || {}
-    const modelId = body.model ?? config.defaultModel
+    const modelId = body.model ?? ""
 
-    // Route to sub-bridge backends based on model name
+    // Check model access if auth is enabled
+    if (authKey && !isModelAllowed(authKey, modelId)) {
+      return reply.code(403).send({ error: { message: `Key is not allowed to access model '${modelId}'`, type: "permission_error" } })
+    }
+
+    // Route to custom backends based on model name
     if (isAntigravityModel(modelId)) {
       return handleAntigravityCompletion(req, reply)
     }
@@ -90,15 +170,10 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
       return reply.code(result.status).headers(result.headers).send(result.body)
     }
 
-    // Pi-ai / Anthropic direct handler
+    // Look up model in registry
     const modelConfig = config.models[modelId]
     if (!modelConfig) {
       return reply.code(404).send({ error: { message: `Model '${modelId}' not found`, type: "invalid_request_error" } })
-    }
-
-    // Check model access if auth is enabled
-    if (authKey && !isModelAllowed(authKey, modelId)) {
-      return reply.code(403).send({ error: { message: `Key is not allowed to access model '${modelId}'`, type: "permission_error" } })
     }
 
     const stream = body.stream ?? false
@@ -106,7 +181,7 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
     const resolvedApiKey = await getApiKey(modelConfig)
 
     // For OAuth (Anthropic subscription), use direct SDK — bypasses pi-ai
-    // For standard API keys, use pi-ai's stream()
+    // For everything else, use pi-ai's stream()
     const eventIterator: AsyncIterable<AssistantMessageEvent> = isOAuth
       ? streamAnthropicDirect(createAnthropicClient(resolvedApiKey, modelConfig.baseUrl), {
           model: modelId,
@@ -133,7 +208,6 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
         Connection: "keep-alive",
       })
 
-      // Initial role chunk
       reply.raw.write(oaiSseChunk(modelId, { content: "" }, null))
 
       try {

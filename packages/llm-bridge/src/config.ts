@@ -1,5 +1,13 @@
 // Config for the LLM bridge.
-// Reads from env vars or a TOML config file.
+// The bridge acts as our own OpenRouter — it routes requests to the best
+// available provider using pi-ai's model registry + custom providers.
+
+export interface CustomProvider {
+  name: string
+  api_key?: string
+  base_url?: string
+  oauth_refresh_token?: string
+}
 
 export interface BridgeModelConfig {
   id: string
@@ -10,66 +18,45 @@ export interface BridgeModelConfig {
   contextWindow?: number
   maxTokens?: number
   reasoning?: boolean
-  // Anthropic subscription OAuth — if set, the bridge manages token refresh
   oauthRefreshToken?: string
 }
 
 export interface BridgeConfig {
   port: number
   host: string
+  providers: CustomProvider[]
+  // Models discovered at startup (from custom providers + pi-ai registry)
   models: Record<string, BridgeModelConfig>
-  defaultModel: string
-  keysPath?: string
 }
 
 export function loadConfig(): BridgeConfig {
   const port = parseInt(process.env.BRIDGE_PORT ?? "4040", 10)
   const host = process.env.BRIDGE_HOST ?? "127.0.0.1"
 
-  // Keys file path from env or argv
-  const keysArgIdx = process.argv.indexOf("--keys")
-  const keysPath = process.env.BRIDGE_KEYS ?? (keysArgIdx >= 0 ? process.argv[keysArgIdx + 1] : undefined)
-
-  // Model config from env: BRIDGE_MODEL_<NAME>=provider:model_id:api_key
-  // Or from BRIDGE_MODELS as JSON
-  const models: Record<string, BridgeModelConfig> = {}
-  let defaultModel = ""
-
-  const modelsJson = process.env.BRIDGE_MODELS
-  if (modelsJson) {
-    const parsed = JSON.parse(modelsJson) as BridgeModelConfig[]
-    for (const m of parsed) {
-      models[m.id] = m
-      if (!defaultModel) defaultModel = m.id
-    }
+  // Providers passed as JSON from the runtime
+  const providersJson = process.env.BRIDGE_PROVIDERS
+  let providers: CustomProvider[] = []
+  if (providersJson) {
+    providers = JSON.parse(providersJson) as CustomProvider[]
   }
 
-  // Also support individual env vars
-  const provider = process.env.BRIDGE_PROVIDER ?? process.env.MODEL_PROVIDER
-  const modelId = process.env.BRIDGE_MODEL ?? process.env.MODEL_MODEL
-  const apiKey = process.env.BRIDGE_API_KEY ?? process.env.MODEL_API_KEY
-  const baseUrl = process.env.BRIDGE_BASE_URL ?? process.env.MODEL_BASE_URL
-  const oauthRefreshToken = process.env.BRIDGE_OAUTH_REFRESH_TOKEN
-
-  if (provider && modelId && (apiKey || oauthRefreshToken)) {
-    const id = modelId
-    models[id] = {
-      id,
-      name: modelId,
-      provider,
-      baseUrl,
-      apiKey: apiKey ?? "", // will be filled from OAuth refresh
-      ...(oauthRefreshToken ? { oauthRefreshToken } : {}),
-      contextWindow: parseInt(process.env.BRIDGE_CONTEXT_WINDOW ?? "200000", 10),
-      maxTokens: parseInt(process.env.BRIDGE_MAX_TOKENS ?? "8192", 10),
-      reasoning: process.env.BRIDGE_REASONING === "true",
-    }
-    if (!defaultModel) defaultModel = id
+  // Also support individual env vars for standalone use
+  const singleProvider = process.env.BRIDGE_PROVIDER
+  const singleApiKey = process.env.BRIDGE_API_KEY
+  const singleBaseUrl = process.env.BRIDGE_BASE_URL
+  const singleOAuth = process.env.BRIDGE_OAUTH_REFRESH_TOKEN
+  if (singleProvider && (singleApiKey || singleOAuth)) {
+    providers.push({
+      name: singleProvider,
+      ...(singleApiKey ? { api_key: singleApiKey } : {}),
+      ...(singleBaseUrl ? { base_url: singleBaseUrl } : {}),
+      ...(singleOAuth ? { oauth_refresh_token: singleOAuth } : {}),
+    })
   }
 
-  if (!defaultModel) {
-    throw new Error("[bridge] no models configured. set BRIDGE_MODELS or BRIDGE_PROVIDER + BRIDGE_MODEL + BRIDGE_API_KEY")
+  if (providers.length === 0) {
+    throw new Error("[bridge] no providers configured. set BRIDGE_PROVIDERS or BRIDGE_PROVIDER + BRIDGE_API_KEY")
   }
 
-  return { port, host, models, defaultModel, keysPath }
+  return { port, host, providers, models: {} }
 }

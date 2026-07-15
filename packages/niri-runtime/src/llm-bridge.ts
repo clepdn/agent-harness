@@ -1,8 +1,9 @@
 /**
  * LLM Bridge — spawns the llm-bridge package as a child process.
  *
- * All AI requests go through the bridge. It runs locally and the harness
- * points model.base_url at it.
+ * The bridge is our own OpenRouter. It accepts standard OpenAI format
+ * requests, routes to the best available provider (pi-ai registry +
+ * custom providers), and returns standard OpenAI format responses.
  *
  * Configured via [llm_bridge] in the TOML config:
  *
@@ -10,10 +11,15 @@
  *   enabled = true
  *   host = "127.0.0.1"
  *   port = 4040
- *   provider = "openai"
- *   model = "umans-glm-5.2"
- *   api_key = "..."        # upstream API key
+ *
+ *   [[llm_bridge.providers]]
+ *   name = "umans"
+ *   api_key = "..."
  *   base_url = "https://api.code.umans.ai/v1"
+ *
+ *   [[llm_bridge.providers]]
+ *   name = "anthropic-oauth"
+ *   oauth_refresh_token = "..."
  */
 
 import { spawn, type ChildProcess } from "node:child_process"
@@ -37,8 +43,8 @@ export async function startLlmBridge(): Promise<void> {
   const cfg = config.llm_bridge
   if (!cfg.enabled) return
 
-  if (!cfg.provider || !cfg.model) {
-    console.warn("[llm-bridge] enabled=true but provider or model not set — skipping")
+  if (cfg.providers.length === 0) {
+    console.warn("[llm-bridge] enabled=true but no providers configured — skipping")
     return
   }
 
@@ -46,18 +52,17 @@ export async function startLlmBridge(): Promise<void> {
   const bridgeEntry = path.join(repoRoot, "packages", "llm-bridge", "src", "index.ts")
   const tsxBin = path.join(repoRoot, "node_modules", ".bin", "tsx")
 
+  // Pass providers as JSON env var
+  const providersJson = JSON.stringify(cfg.providers)
+
   const env: Record<string, string> = {
     ...process.env,
     BRIDGE_PORT: String(cfg.port),
     BRIDGE_HOST: cfg.host,
-    BRIDGE_PROVIDER: cfg.provider,
-    BRIDGE_MODEL: cfg.model,
-    ...(cfg.api_key ? { BRIDGE_API_KEY: cfg.api_key } : {}),
-    ...(cfg.base_url ? { BRIDGE_BASE_URL: cfg.base_url } : {}),
-    ...(cfg.oauth_refresh_token ? { BRIDGE_OAUTH_REFRESH_TOKEN: cfg.oauth_refresh_token } : {}),
+    BRIDGE_PROVIDERS: providersJson,
   }
 
-  console.log(`[llm-bridge] starting on ${cfg.host}:${cfg.port} (provider=${cfg.provider}, model=${cfg.model})`)
+  console.log(`[llm-bridge] starting on ${cfg.host}:${cfg.port} (${cfg.providers.length} providers: ${cfg.providers.map((p) => p.name).join(", ")})`)
 
   bridgeProcess = spawn(tsxBin, [bridgeEntry], {
     env,
