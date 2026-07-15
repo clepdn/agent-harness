@@ -1,5 +1,4 @@
 import { readFileSync, existsSync } from "node:fs"
-import { randomUUID } from "node:crypto"
 
 export interface ApiKeyEntry {
   key: string           // UUID format, enforced
@@ -97,6 +96,3 @@ export function authenticate(
  * Generate a new UUID for use as an API key.
  * Useful for creating key files.
  */
-export function generateApiKey(): string {
-  return randomUUID()
-}

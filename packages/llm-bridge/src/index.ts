@@ -1,12 +1,6 @@
 import { loadConfig } from "./config"
 import { createServer } from "./server"
-import { loadApiKeys, generateApiKey } from "./auth"
-
-// --keys-gen: generate a new UUID for use as an API key and exit
-if (process.argv.includes("--keys-gen")) {
-  console.log(generateApiKey())
-  process.exit(0)
-}
+import { loadApiKeys } from "./auth"
 
 // Parse --keys <path> from argv for the API keys file
 const keysArgIdx = process.argv.indexOf("--keys")
