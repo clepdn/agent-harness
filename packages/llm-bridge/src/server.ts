@@ -2,8 +2,9 @@ import http from "node:http"
 import type { BridgeConfig } from "./config"
 import { oaiMessagesToContext, oaiSseChunk, oaiCompletionResponse } from "./translate"
 import { buildModel, streamCompletion } from "./pi-ai"
+import { authenticate, isModelAllowed, type ApiKeyEntry } from "./auth"
 
-export function createServer(config: BridgeConfig): http.Server {
+export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEntry>): http.Server {
   return http.createServer(async (req, res) => {
     // CORS (in case the web UI needs it)
     res.setHeader("Access-Control-Allow-Origin", "*")
@@ -15,13 +16,13 @@ export function createServer(config: BridgeConfig): http.Server {
       return
     }
 
-    // Auth check
-    if (config.authToken) {
-      const auth = req.headers.authorization
-      const token = auth?.startsWith("Bearer ") ? auth.slice(7) : null
-      if (token !== config.authToken) {
+    // Auth check — if keys are configured, require valid Bearer token
+    let authKey: ApiKeyEntry | null = null
+    if (apiKeys.size > 0) {
+      authKey = authenticate(req.headers.authorization, apiKeys)
+      if (!authKey) {
         res.writeHead(401, { "Content-Type": "application/json" })
-        res.end(JSON.stringify({ error: "Unauthorized" }))
+        res.end(JSON.stringify({ error: { message: "Invalid or missing API key", type: "authentication_error" } }))
         return
       }
     }
@@ -59,6 +60,13 @@ export function createServer(config: BridgeConfig): http.Server {
         if (!modelConfig) {
           res.writeHead(404, { "Content-Type": "application/json" })
           res.end(JSON.stringify({ error: { message: `Model '${modelId}' not found`, type: "invalid_request_error" } }))
+          return
+        }
+
+        // Check model access if auth is enabled
+        if (authKey && !isModelAllowed(authKey, modelId)) {
+          res.writeHead(403, { "Content-Type": "application/json" })
+          res.end(JSON.stringify({ error: { message: `Key is not allowed to access model '${modelId}'`, type: "permission_error" } }))
           return
         }
 
