@@ -1204,323 +1204,7 @@ export function createBridgeServer(): FastifyInstance {
   app.get("/models", getModels);
 
   app.post("/v1/chat/completions", async (req: any, reply: any) => {
-    const startBridge = Date.now();
-    let authVals;
-    try {
-      authVals = await getValidTokenAndProject();
-    } catch (e: any) {
-      console.error("[bridge] Auth failed:", e);
-      return reply.code(500).send({ error: `Auth failed: ${e.message}` });
-    }
-    const tAuth = Date.now() - startBridge;
-
-    const body = req.body || {};
-    const messages = body.messages || [];
-    const model = body.model || "";
-    const thinkingLevel = body.thinking_level || null;
-    const tools = body.tools || null;
-
-    const modelId = mapModelName(model, thinkingLevel);
-
-    const tStartMapping = Date.now();
-    const { contents, systemInstruction } = mapOpenaiMessagesToGemini(messages, state?.thoughtSignatureCache || {});
-    const tMapping = Date.now() - tStartMapping;
-
-    let budget = 0;
-    const modelLower = modelId.toLowerCase();
-    if (modelLower.includes("high") || modelLower.includes("agent")) {
-      budget = 4096;
-    } else if (modelLower.includes("low")) {
-      budget = 2048;
-    }
-
-    const tStartHashing = Date.now();
-    const { prefixHashes, newCacheHashes } = hashMessagesIncrementalCached(messages, state?.hashCache || []);
-
-    let trajId: string | null = null;
-    let sessId: string | null = null;
-
-    if (prefixHashes.length > 0 && state) {
-      for (let i = prefixHashes.length - 2; i >= 0; i--) {
-        const prefixHash = prefixHashes[i];
-        if (state.sessionsCache[prefixHash]) {
-          [trajId, sessId] = state.sessionsCache[prefixHash];
-          break;
-        }
-      }
-    }
-
-    const trajectoryId = trajId || crypto.randomUUID();
-    const sessionId = sessId || Math.floor(Math.random() * Number.MAX_SAFE_INTEGER).toString();
-    const tHashing = Date.now() - tStartHashing;
-
-    const tStartDisk = Date.now();
-    if (state) {
-      state.hashCache.unshift({
-        trajectoryId,
-        hashes: newCacheHashes
-      });
-      state.hashCache = state.hashCache.slice(0, 10);
-
-      const currentHash = prefixHashes[prefixHashes.length - 1];
-      if (currentHash) {
-        state.sessionsCache[currentHash] = [trajectoryId, sessionId];
-        saveSessions(state.sessionsCache); // background async save
-      }
-    }
-    const tDisk = Date.now() - tStartDisk;
-
-    const setupMs = Date.now() - startBridge;
-    console.log(`[bridge] setup finished in ${setupMs}ms (auth: ${tAuth}ms, mapping: ${tMapping}ms, hashing: ${tHashing}ms, disk: ${tDisk}ms)`);
-
-    const payload: any = {
-      project: authVals.project,
-      requestId: `agent/${crypto.randomUUID()}/${Date.now()}/${crypto.randomUUID()}/1`,
-      request: {
-        contents,
-        generationConfig: {
-          maxOutputTokens: 8192,
-          thinkingConfig: {
-            includeThoughts: budget > 0,
-            thinkingBudget: budget
-          }
-        },
-        labels: {
-          last_step_index: "1",
-          model_enum: "MODEL_PLACEHOLDER_M132",
-          trajectory_id: trajectoryId,
-          used_claude: "false",
-          used_claude_conservative: "false"
-        },
-        sessionId
-      },
-      model: modelId,
-      userAgent: "antigravity",
-      requestType: "chat",
-      enabledCreditTypes: ["GOOGLE_ONE_AI"]
-    };
-
-    if (tools) {
-      const mappedTools = mapOpenaiToolsToGemini(tools);
-      if (mappedTools) {
-        payload.request.tools = mappedTools;
-      }
-    }
-
-    if (systemInstruction) {
-      payload.request.systemInstruction = systemInstruction;
-    }
-
-    console.log(`[bridge] Forwarding streamGenerateContent request for model: ${modelId} (thinkingBudget=${budget})...`);
-
-    let response;
-    try {
-      response = await fetch("https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse", {
-        method: "POST",
-        headers: {
-          "Authorization": `Bearer ${authVals.token}`,
-          "Content-Type": "application/json",
-          "User-Agent": "antigravity/cli/1.0.10 linux/amd64",
-          "Accept": "text/event-stream",
-          "Cache-Control": "no-cache"
-        },
-        body: JSON.stringify(payload)
-      });
-    } catch (e: any) {
-      console.error("[bridge] API request failed:", e);
-      return reply.code(500).send({ error: `API request failed: ${e.message}` });
-    }
-
-    if (!response.ok) {
-      const status = response.status;
-      const errText = await response.text();
-      console.error(`[bridge] daily-cloudcode API returned status ${status}: ${errText}`);
-      return reply.code(status).send({ error: `API returned ${status}: ${errText}` });
-    }
-
-    const requestIdHeader = `chatcmpl-${crypto.randomUUID().replace(/-/g, "").substring(0, 12)}`;
-    reply.raw.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      "Connection": "keep-alive",
-      "x-bridge-setup-ms": setupMs.toString()
-    });
-
-    const reader = response.body?.getReader();
-    const textDecoder = new TextDecoder("utf-8");
-    const lineDecoder = new LineDecoder();
-
-    let firstMsgLatency: number | null = null;
-    let traceId: string | null = null;
-    const startTime = Date.now();
-    let toolCallIndex = 0;
-
-    if (reader) {
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = textDecoder.decode(value, { stream: true });
-          const lines = lineDecoder.feed(chunk);
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data: ")) continue;
-            const dataStr = trimmed.substring("data: ".length);
-            if (dataStr === "[DONE]") break;
-
-            try {
-              const chunkVal = JSON.parse(dataStr);
-              if (firstMsgLatency === null) {
-                firstMsgLatency = Date.now() - startTime;
-              }
-              if (chunkVal.traceId) {
-                traceId = chunkVal.traceId;
-              }
-
-              const responsePart = chunkVal.response || {};
-
-              if (responsePart.usageMetadata) {
-                const usageMeta = responsePart.usageMetadata;
-                const out = {
-                  id: requestIdHeader,
-                  object: "chat.completion.chunk",
-                  created: Math.floor(Date.now() / 1000),
-                  model: modelId,
-                  choices: [],
-                  usage: {
-                    prompt_tokens: usageMeta.promptTokenCount || 0,
-                    completion_tokens: usageMeta.candidatesTokenCount || 0,
-                    total_tokens: usageMeta.totalTokenCount || 0,
-                    cached_prompt_tokens: usageMeta.cachedContentTokenCount || 0
-                  }
-                };
-                reply.raw.write(`data: ${JSON.stringify(out)}\n\n`);
-              }
-
-              if (Array.isArray(responsePart.candidates) && responsePart.candidates.length > 0) {
-                const candidate = responsePart.candidates[0];
-                let finishReason: any = null;
-                if (candidate.finishReason) {
-                  const fr = candidate.finishReason;
-                  finishReason = fr === "STOP"
-                    ? (toolCallIndex > 0 ? "tool_calls" : "stop")
-                    : (fr === "MAX_TOKENS" ? "length" : (["SAFETY", "RECITATION"].includes(fr) ? "content_filter" : "stop"));
-                }
-
-                if (Array.isArray(candidate.content?.parts)) {
-                  for (const part of candidate.content.parts) {
-                    const text = part.text || "";
-                    const isThought = !!part.thought;
-                    const func = part.functionCall;
-
-                    if (isThought) {
-                      if (text) {
-                        const out = {
-                          id: requestIdHeader,
-                          object: "chat.completion.chunk",
-                          created: Math.floor(Date.now() / 1000),
-                          model: modelId,
-                          choices: [{
-                            index: 0,
-                            delta: { reasoning_content: text },
-                            finish_reason: null
-                          }]
-                        };
-                        reply.raw.write(`data: ${JSON.stringify(out)}\n\n`);
-                      }
-                    } else if (func && typeof func === "object") {
-                      const name = func.name || "";
-                      const argsVal = func.args;
-                      const argsStr = typeof argsVal === "object" ? JSON.stringify(argsVal) : (argsVal || "{}");
-
-                      const tcId = func.id || `call_${crypto.randomUUID().replace(/-/g, "").substring(0, 12)}`;
-                      const thoughtSig = part.thoughtSignature || part.thought_signature;
-                      if (thoughtSig && state) {
-                        state.thoughtSignatureCache[tcId] = thoughtSig;
-                        saveSignatures(state.thoughtSignatureCache);
-                      }
-
-                      const out = {
-                        id: requestIdHeader,
-                        object: "chat.completion.chunk",
-                        created: Math.floor(Date.now() / 1000),
-                        model: modelId,
-                        choices: [{
-                          index: 0,
-                          delta: {
-                            tool_calls: [{
-                              index: toolCallIndex,
-                              id: tcId,
-                              type: "function",
-                              function: {
-                                name,
-                                arguments: argsStr
-                              }
-                            }]
-                          },
-                          finish_reason: "tool_calls"
-                        }]
-                      };
-                      toolCallIndex++;
-                      reply.raw.write(`data: ${JSON.stringify(out)}\n\n`);
-                    } else {
-                      if (text) {
-                        const out = {
-                          id: requestIdHeader,
-                          object: "chat.completion.chunk",
-                          created: Math.floor(Date.now() / 1000),
-                          model: modelId,
-                          choices: [{
-                            index: 0,
-                            delta: { content: text },
-                            finish_reason: null
-                          }]
-                        };
-                        reply.raw.write(`data: ${JSON.stringify(out)}\n\n`);
-                      }
-                    }
-                  }
-                }
-
-                if (finishReason !== null) {
-                  const out = {
-                    id: requestIdHeader,
-                    object: "chat.completion.chunk",
-                    created: Math.floor(Date.now() / 1000),
-                    model: modelId,
-                    choices: [{
-                      index: 0,
-                      delta: {},
-                      finish_reason: finishReason
-                    }]
-                  };
-                  reply.raw.write(`data: ${JSON.stringify(out)}\n\n`);
-                }
-              }
-            } catch (err) {
-              console.error("[bridge] Failed to parse SSE line JSON:", err);
-            }
-          }
-        }
-      } catch (streamErr) {
-        console.error("[bridge] Stream read error:", streamErr);
-      } finally {
-        reader.releaseLock();
-      }
-    }
-
-    const totalLatency = Date.now() - startTime;
-    void sendTelemetryMetrics(
-      authVals.token,
-      authVals.project,
-      trajectoryId,
-      traceId,
-      firstMsgLatency || totalLatency,
-      totalLatency
-    );
-
-    reply.raw.write("data: [DONE]\n\n");
-    reply.raw.end();
+    await handleAntigravityCompletion(req, reply);
   });
 
   const handleAnthropicMessages = async (req: any, reply: any) => {
@@ -1977,6 +1661,326 @@ export function createBridgeServer(): FastifyInstance {
   app.post("/messages", handleAnthropicMessages);
 
   return app;
+}
+
+export async function handleAntigravityCompletion(req: any, reply: any): Promise<void> {
+    const startBridge = Date.now();
+    let authVals;
+    try {
+      authVals = await getValidTokenAndProject();
+    } catch (e: any) {
+      console.error("[bridge] Auth failed:", e);
+      return reply.code(500).send({ error: `Auth failed: ${e.message}` });
+    }
+    const tAuth = Date.now() - startBridge;
+
+    const body = req.body || {};
+    const messages = body.messages || [];
+    const model = body.model || "";
+    const thinkingLevel = body.thinking_level || null;
+    const tools = body.tools || null;
+
+    const modelId = mapModelName(model, thinkingLevel);
+
+    const tStartMapping = Date.now();
+    const { contents, systemInstruction } = mapOpenaiMessagesToGemini(messages, state?.thoughtSignatureCache || {});
+    const tMapping = Date.now() - tStartMapping;
+
+    let budget = 0;
+    const modelLower = modelId.toLowerCase();
+    if (modelLower.includes("high") || modelLower.includes("agent")) {
+      budget = 4096;
+    } else if (modelLower.includes("low")) {
+      budget = 2048;
+    }
+
+    const tStartHashing = Date.now();
+    const { prefixHashes, newCacheHashes } = hashMessagesIncrementalCached(messages, state?.hashCache || []);
+
+    let trajId: string | null = null;
+    let sessId: string | null = null;
+
+    if (prefixHashes.length > 0 && state) {
+      for (let i = prefixHashes.length - 2; i >= 0; i--) {
+        const prefixHash = prefixHashes[i];
+        if (state.sessionsCache[prefixHash]) {
+          [trajId, sessId] = state.sessionsCache[prefixHash];
+          break;
+        }
+      }
+    }
+
+    const trajectoryId = trajId || crypto.randomUUID();
+    const sessionId = sessId || Math.floor(Math.random() * Number.MAX_SAFE_INTEGER).toString();
+    const tHashing = Date.now() - tStartHashing;
+
+    const tStartDisk = Date.now();
+    if (state) {
+      state.hashCache.unshift({
+        trajectoryId,
+        hashes: newCacheHashes
+      });
+      state.hashCache = state.hashCache.slice(0, 10);
+
+      const currentHash = prefixHashes[prefixHashes.length - 1];
+      if (currentHash) {
+        state.sessionsCache[currentHash] = [trajectoryId, sessionId];
+        saveSessions(state.sessionsCache); // background async save
+      }
+    }
+    const tDisk = Date.now() - tStartDisk;
+
+    const setupMs = Date.now() - startBridge;
+    console.log(`[bridge] setup finished in ${setupMs}ms (auth: ${tAuth}ms, mapping: ${tMapping}ms, hashing: ${tHashing}ms, disk: ${tDisk}ms)`);
+
+    const payload: any = {
+      project: authVals.project,
+      requestId: `agent/${crypto.randomUUID()}/${Date.now()}/${crypto.randomUUID()}/1`,
+      request: {
+        contents,
+        generationConfig: {
+          maxOutputTokens: 8192,
+          thinkingConfig: {
+            includeThoughts: budget > 0,
+            thinkingBudget: budget
+          }
+        },
+        labels: {
+          last_step_index: "1",
+          model_enum: "MODEL_PLACEHOLDER_M132",
+          trajectory_id: trajectoryId,
+          used_claude: "false",
+          used_claude_conservative: "false"
+        },
+        sessionId
+      },
+      model: modelId,
+      userAgent: "antigravity",
+      requestType: "chat",
+      enabledCreditTypes: ["GOOGLE_ONE_AI"]
+    };
+
+    if (tools) {
+      const mappedTools = mapOpenaiToolsToGemini(tools);
+      if (mappedTools) {
+        payload.request.tools = mappedTools;
+      }
+    }
+
+    if (systemInstruction) {
+      payload.request.systemInstruction = systemInstruction;
+    }
+
+    console.log(`[bridge] Forwarding streamGenerateContent request for model: ${modelId} (thinkingBudget=${budget})...`);
+
+    let response;
+    try {
+      response = await fetch("https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${authVals.token}`,
+          "Content-Type": "application/json",
+          "User-Agent": "antigravity/cli/1.0.10 linux/amd64",
+          "Accept": "text/event-stream",
+          "Cache-Control": "no-cache"
+        },
+        body: JSON.stringify(payload)
+      });
+    } catch (e: any) {
+      console.error("[bridge] API request failed:", e);
+      return reply.code(500).send({ error: `API request failed: ${e.message}` });
+    }
+
+    if (!response.ok) {
+      const status = response.status;
+      const errText = await response.text();
+      console.error(`[bridge] daily-cloudcode API returned status ${status}: ${errText}`);
+      return reply.code(status).send({ error: `API returned ${status}: ${errText}` });
+    }
+
+    const requestIdHeader = `chatcmpl-${crypto.randomUUID().replace(/-/g, "").substring(0, 12)}`;
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "x-bridge-setup-ms": setupMs.toString()
+    });
+
+    const reader = response.body?.getReader();
+    const textDecoder = new TextDecoder("utf-8");
+    const lineDecoder = new LineDecoder();
+
+    let firstMsgLatency: number | null = null;
+    let traceId: string | null = null;
+    const startTime = Date.now();
+    let toolCallIndex = 0;
+
+    if (reader) {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = textDecoder.decode(value, { stream: true });
+          const lines = lineDecoder.feed(chunk);
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed.startsWith("data: ")) continue;
+            const dataStr = trimmed.substring("data: ".length);
+            if (dataStr === "[DONE]") break;
+
+            try {
+              const chunkVal = JSON.parse(dataStr);
+              if (firstMsgLatency === null) {
+                firstMsgLatency = Date.now() - startTime;
+              }
+              if (chunkVal.traceId) {
+                traceId = chunkVal.traceId;
+              }
+
+              const responsePart = chunkVal.response || {};
+
+              if (responsePart.usageMetadata) {
+                const usageMeta = responsePart.usageMetadata;
+                const out = {
+                  id: requestIdHeader,
+                  object: "chat.completion.chunk",
+                  created: Math.floor(Date.now() / 1000),
+                  model: modelId,
+                  choices: [],
+                  usage: {
+                    prompt_tokens: usageMeta.promptTokenCount || 0,
+                    completion_tokens: usageMeta.candidatesTokenCount || 0,
+                    total_tokens: usageMeta.totalTokenCount || 0,
+                    cached_prompt_tokens: usageMeta.cachedContentTokenCount || 0
+                  }
+                };
+                reply.raw.write(`data: ${JSON.stringify(out)}\n\n`);
+              }
+
+              if (Array.isArray(responsePart.candidates) && responsePart.candidates.length > 0) {
+                const candidate = responsePart.candidates[0];
+                let finishReason: any = null;
+                if (candidate.finishReason) {
+                  const fr = candidate.finishReason;
+                  finishReason = fr === "STOP"
+                    ? (toolCallIndex > 0 ? "tool_calls" : "stop")
+                    : (fr === "MAX_TOKENS" ? "length" : (["SAFETY", "RECITATION"].includes(fr) ? "content_filter" : "stop"));
+                }
+
+                if (Array.isArray(candidate.content?.parts)) {
+                  for (const part of candidate.content.parts) {
+                    const text = part.text || "";
+                    const isThought = !!part.thought;
+                    const func = part.functionCall;
+
+                    if (isThought) {
+                      if (text) {
+                        const out = {
+                          id: requestIdHeader,
+                          object: "chat.completion.chunk",
+                          created: Math.floor(Date.now() / 1000),
+                          model: modelId,
+                          choices: [{
+                            index: 0,
+                            delta: { reasoning_content: text },
+                            finish_reason: null
+                          }]
+                        };
+                        reply.raw.write(`data: ${JSON.stringify(out)}\n\n`);
+                      }
+                    } else if (func && typeof func === "object") {
+                      const name = func.name || "";
+                      const argsVal = func.args;
+                      const argsStr = typeof argsVal === "object" ? JSON.stringify(argsVal) : (argsVal || "{}");
+
+                      const tcId = func.id || `call_${crypto.randomUUID().replace(/-/g, "").substring(0, 12)}`;
+                      const thoughtSig = part.thoughtSignature || part.thought_signature;
+                      if (thoughtSig && state) {
+                        state.thoughtSignatureCache[tcId] = thoughtSig;
+                        saveSignatures(state.thoughtSignatureCache);
+                      }
+
+                      const out = {
+                        id: requestIdHeader,
+                        object: "chat.completion.chunk",
+                        created: Math.floor(Date.now() / 1000),
+                        model: modelId,
+                        choices: [{
+                          index: 0,
+                          delta: {
+                            tool_calls: [{
+                              index: toolCallIndex,
+                              id: tcId,
+                              type: "function",
+                              function: {
+                                name,
+                                arguments: argsStr
+                              }
+                            }]
+                          },
+                          finish_reason: "tool_calls"
+                        }]
+                      };
+                      toolCallIndex++;
+                      reply.raw.write(`data: ${JSON.stringify(out)}\n\n`);
+                    } else {
+                      if (text) {
+                        const out = {
+                          id: requestIdHeader,
+                          object: "chat.completion.chunk",
+                          created: Math.floor(Date.now() / 1000),
+                          model: modelId,
+                          choices: [{
+                            index: 0,
+                            delta: { content: text },
+                            finish_reason: null
+                          }]
+                        };
+                        reply.raw.write(`data: ${JSON.stringify(out)}\n\n`);
+                      }
+                    }
+                  }
+                }
+
+                if (finishReason !== null) {
+                  const out = {
+                    id: requestIdHeader,
+                    object: "chat.completion.chunk",
+                    created: Math.floor(Date.now() / 1000),
+                    model: modelId,
+                    choices: [{
+                      index: 0,
+                      delta: {},
+                      finish_reason: finishReason
+                    }]
+                  };
+                  reply.raw.write(`data: ${JSON.stringify(out)}\n\n`);
+                }
+              }
+            } catch (err) {
+              console.error("[bridge] Failed to parse SSE line JSON:", err);
+            }
+          }
+        }
+      } catch (streamErr) {
+        console.error("[bridge] Stream read error:", streamErr);
+      } finally {
+        reader.releaseLock();
+      }
+    }
+
+    const totalLatency = Date.now() - startTime;
+    void sendTelemetryMetrics(
+      authVals.token,
+      authVals.project,
+      trajectoryId,
+      traceId,
+      firstMsgLatency || totalLatency,
+      totalLatency
+    );
+
+    reply.raw.write("data: [DONE]\n\n");
+    reply.raw.end();
 }
 
 export async function startAntigravityBridge(): Promise<void> {

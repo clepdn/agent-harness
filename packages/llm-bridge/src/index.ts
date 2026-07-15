@@ -5,8 +5,9 @@
  * the appropriate backend based on model name:
  *
  *   - pi-ai models (umans-*, glm-*, etc.) → pi-ai stream()
- *   - gemini-* / antigravity models     → Antigravity bridge (Fastify)
- *   - gpt-* / o3-* / codex models       → Codex bridge (Fastify)
+ *   - gemini-* / antigravity models     → Antigravity backend
+ *   - gpt-* / o3-* / codex models       → Codex backend
+ *   - claude-* with OAuth               → Direct Anthropic SDK
  *
  * The bridge listens on a single port (default 4040) and exposes
  * OpenAI-compatible endpoints. The harness points model.base_url here.
@@ -15,8 +16,6 @@
 import { loadConfig } from "./config"
 import { createServer } from "./server"
 import { loadApiKeys } from "./auth"
-import { startAntigravityBridge, stopAntigravityBridge } from "./antigravity"
-import { startCodexBridge, stopCodexBridge } from "./codex"
 
 // Parse --keys <path> from argv for the API keys file
 const keysArgIdx = process.argv.indexOf("--keys")
@@ -34,43 +33,18 @@ if (apiKeys.size > 0) {
 
 const config = loadConfig()
 
-// Start sub-brides (antigravity, codex) — they run on their own ports
-// and the main server proxies to them based on model name
-async function startSubBridges() {
-  try {
-    await startAntigravityBridge()
-  } catch (err) {
-    console.error("[bridge] antigravity backend failed to start:", err)
-  }
-  try {
-    await startCodexBridge()
-  } catch (err) {
-    console.error("[bridge] codex backend failed to start:", err)
-  }
-}
+const server = createServer(config, apiKeys)
 
-async function main() {
-  await startSubBridges()
-
-  const server = createServer(config, apiKeys)
-
-  server.listen(config.port, config.host, () => {
-    console.log(`[bridge] listening on http://${config.host}:${config.port}`)
-    console.log(`[bridge] models: ${Object.keys(config.models).join(", ")}`)
-    console.log(`[bridge] default: ${config.defaultModel}`)
-  })
-}
-
-main().catch((err) => {
-  console.error("[bridge] fatal:", err)
-  process.exit(1)
+server.listen({ port: config.port, host: config.host }, () => {
+  console.log(`[bridge] listening on http://${config.host}:${config.port}`)
+  console.log(`[bridge] models: ${Object.keys(config.models).join(", ")}`)
+  console.log(`[bridge] default: ${config.defaultModel}`)
 })
 
 // Graceful shutdown
 async function shutdown() {
   console.log("[bridge] shutting down...")
-  await stopAntigravityBridge()
-  await stopCodexBridge()
+  await server.close()
   process.exit(0)
 }
 
