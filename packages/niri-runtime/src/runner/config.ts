@@ -1,5 +1,4 @@
-import { getModel as piGetModel, getModels as piGetModels } from "@earendil-works/pi-ai"
-import type { KnownProvider, Model } from "@earendil-works/pi-ai"
+import type { Model } from "../llm"
 import { config } from "../config"
 
 // ── Misc thresholds ───────────────────────────────────────────────────────────
@@ -37,8 +36,8 @@ export const isLikelyLocalBase = (baseUrl: string): boolean => {
 }
 
 // ── Primary model ─────────────────────────────────────────────────────────────
-// Preferred: model.provider + model.model (uses pi's registry for base URL,
-// compat, and reasoning flags — unambiguous across providers).
+// model.provider + model.model resolve the endpoint. base_url is required for
+// non-OpenAI providers (OpenRouter, local LLMs, etc.).
 //
 //   [model] provider = "openrouter"  model = "deepseek/deepseek-r1"
 //   [model] provider = "openai"      model = "gpt-4o"
@@ -80,32 +79,16 @@ if (config.summary.title) summaryHeaders["X-Title"] = config.summary.title
 
 // ── Model construction ────────────────────────────────────────────────────────
 
-function lookupRegisteredModel(provider: string, modelId: string): Model<"openai-completions"> | undefined {
-  if (!provider || !modelId) return undefined
-  // @ts-expect-error — runtime lookup; returns undefined for unregistered combinations
-  return piGetModel(provider as KnownProvider, modelId) as Model<"openai-completions"> | undefined
-}
-
-function providerBaseUrl(provider: string): string | undefined {
-  const models = piGetModels(provider as KnownProvider)
-  return models[0]?.baseUrl
-}
-
 export function buildModel(
   provider: string,
   modelId: string,
   baseUrlOverride?: string,
   headers?: Record<string, string>,
   contextWindowOverride?: number,
-): Model<"openai-completions"> | null {
+): Model | null {
   if (!modelId) return null
 
-  const registered = lookupRegisteredModel(provider, modelId)
-  if (registered && !baseUrlOverride) {
-    return headers && Object.keys(headers).length ? { ...registered, headers } : registered
-  }
-
-  const baseUrl = baseUrlOverride || providerBaseUrl(provider) || "https://api.openai.com/v1"
+  const baseUrl = baseUrlOverride || "https://api.openai.com/v1"
   const resolvedProvider = provider || (isLikelyLocalBase(baseUrl) ? "lm-studio" : "openai")
   return {
     id: modelId,
@@ -124,7 +107,7 @@ export function buildModel(
 
 // Backwards-compat exports for code that references these directly
 // Backwards-compat exports for code that references these directly
-export const API_BASE = MODEL_BASE_URL || providerBaseUrl(MODEL_PROVIDER) || "(unknown)"
+export const API_BASE = MODEL_BASE_URL || "(unknown)"
 export const FALLBACK_BASE = FALLBACK_BASE_URL
 export const SUMMARY_BASE = SUMMARY_BASE_URL
 
@@ -139,11 +122,11 @@ if (!USE_FALLBACK && !config.model.api_key) {
   throw new Error("[model].api_key is required. Place it in the secrets file.")
 }
 
-export const primaryModel: Model<"openai-completions"> | null = USE_FALLBACK
+export const primaryModel: Model | null = USE_FALLBACK
   ? null
   : buildModel(MODEL_PROVIDER, MODEL, MODEL_BASE_URL || undefined)!
 
-export const fallbackModel: Model<"openai-completions"> = (
+export const fallbackModel: Model = (
   buildModel(
     FALLBACK_PROVIDER,
     FALLBACK_MODEL,
@@ -164,7 +147,7 @@ export const fallbackModel: Model<"openai-completions"> = (
   }
 )
 
-export const summaryModel: Model<"openai-completions"> | null =
+export const summaryModel: Model | null =
   SUMMARY_MODEL
     ? buildModel(SUMMARY_PROVIDER, SUMMARY_MODEL, SUMMARY_BASE_URL || undefined, Object.keys(summaryHeaders).length ? summaryHeaders : undefined) ?? null
     : null

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import type { AssistantMessage } from "@earendil-works/pi-ai"
+import type { AssistantMessage } from "../llm"
 import { assistantContentText } from "./loop-content"
 import { messageStringContent } from "./messages"
 

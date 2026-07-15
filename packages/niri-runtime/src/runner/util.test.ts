@@ -105,7 +105,7 @@ test("sanitizeMessages rescues tool responses found after intervening messages",
   assert.equal(repaired.length, 4)
   assert.equal(repaired[1]?.role, "toolResult")
   assert.equal(repaired[2]?.role, "toolResult")
-  assert.equal((repaired[2] as import("@earendil-works/pi-ai").ToolResultMessage).toolCallId, "call_2")
+  assert.equal((repaired[2] as import("../llm").ToolResultMessage).toolCallId, "call_2")
 })
 
 // ── scrubImagesFromConversation ───────────────────────────────────────────────

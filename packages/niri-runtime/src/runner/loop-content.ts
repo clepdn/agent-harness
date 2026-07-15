@@ -1,4 +1,4 @@
-import type { AssistantMessage, TextContent, ToolCall } from "@earendil-works/pi-ai"
+import type { AssistantMessage, TextContent, ToolCall } from "../llm"
 import type { LoopState } from "./types"
 
 /**

@@ -1,4 +1,4 @@
-import type { AssistantMessage, ToolCall, Usage } from "@earendil-works/pi-ai"
+import type { AssistantMessage, ToolCall, Usage } from "../llm"
 import type { LoopHooks, LoopState } from "./types"
 
 /** A tool call from the assistant (pi's native ToolCall type). */

@@ -1,4 +1,4 @@
-import type { ToolResultMessage } from "@earendil-works/pi-ai"
+import type { ToolResultMessage } from "../llm"
 import { redactSecrets } from "../config"
 import { logMessage } from "../db"
 import { emit } from "../stream"

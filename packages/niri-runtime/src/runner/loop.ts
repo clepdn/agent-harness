@@ -16,7 +16,7 @@ import {
 } from "./util"
 import { addAssistantMessage, applyUsage, configuredSummaryProvider, emitThinking, fetchCompletion } from "./loop-completion"
 import { assistantContentText, isFunctionToolCall } from "./loop-content"
-import type { AssistantMessage, TextContent, ToolCall } from "@earendil-works/pi-ai"
+import type { AssistantMessage, TextContent, ToolCall } from "../llm"
 import { buildTurnSignature, hasIncomingUserMessage } from "./loop-signatures"
 import { processToolCalls } from "./loop-tools"
 import type { LoopHooks, LoopState } from "./types"

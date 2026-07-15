@@ -1,4 +1,4 @@
-import type { UserMessage as PiUserMessage } from "@earendil-works/pi-ai"
+import type { UserMessage as PiUserMessage } from "../llm"
 import { config } from "../config"
 import { normalizeTimeoutMs } from "../container/config"
 import { editFile, readFile, readImageForModel, runCommand } from "../container/index"

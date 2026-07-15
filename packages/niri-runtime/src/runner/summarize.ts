@@ -1,7 +1,7 @@
 import fs from "fs/promises"
 import path from "path"
-import { complete } from "@earendil-works/pi-ai"
-import type { AssistantMessage, Context, Model, TextContent, ToolCall } from "@earendil-works/pi-ai"
+import { complete } from "../llm"
+import type { AssistantMessage, Context, Model, TextContent, ToolCall } from "../llm"
 import { HOME_DIR } from "../container/config"
 import type { Message } from "../types"
 import {
@@ -284,7 +284,7 @@ function looksLikeMetaReply(text: string): boolean {
 
 export async function summarizeConversationViaLLM(
   messages: Message[],
-  model: Model<"openai-completions">,
+  model: Model,
   apiKey: string | undefined,
   options: {
     recentMinKeep?: number
@@ -336,7 +336,7 @@ export async function summarizeConversationViaLLM(
 
   try {
     const opts = apiKey ? { apiKey } : {}
-    const resp = await complete(model, summaryContext, opts as unknown as import("@earendil-works/pi-ai").ProviderStreamOptions)
+    const resp = await complete(model, summaryContext, opts)
     const summaryText = resp.content
       .filter((p): p is TextContent => p.type === "text")
       .map((p) => p.text)
@@ -378,7 +378,7 @@ const COMPACTED_MARKER = "[compacted]"
 async function summarizeToolResult(
   content: string,
   toolName: string,
-  model: Model<"openai-completions">,
+  model: Model,
   apiKey: string | undefined,
 ): Promise<string | null> {
   const systemPrompt =
@@ -394,7 +394,7 @@ async function summarizeToolResult(
 
   try {
     const opts = apiKey ? { apiKey } : {}
-    const resp = await complete(model, ctx, opts as unknown as import("@earendil-works/pi-ai").ProviderStreamOptions)
+    const resp = await complete(model, ctx, opts)
     const summaryText = resp.content
       .filter((p): p is TextContent => p.type === "text")
       .map((p) => p.text)
@@ -420,7 +420,7 @@ async function summarizeToolResult(
  */
 export async function proactiveCompaction(
   messages: Message[],
-  model: Model<"openai-completions">,
+  model: Model,
   apiKey: string | undefined,
   turnAge: number,
   minChars: number,

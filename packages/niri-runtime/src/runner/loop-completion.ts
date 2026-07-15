@@ -1,6 +1,6 @@
-import { stream } from "@earendil-works/pi-ai"
-import type { AssistantMessage, AssistantMessageEvent, TextContent, ThinkingContent, Usage } from "@earendil-works/pi-ai"
-import type { OpenAICompletionsOptions } from "@earendil-works/pi-ai/openai-completions"
+import { stream } from "../llm"
+import type { AssistantMessage, AssistantMessageEvent, TextContent, ThinkingContent, Usage } from "../llm"
+import type { OpenAICompletionsOptions } from "../llm"
 import { logMessage } from "../db"
 import { buildCompletionMessages, rememberRecalledMemoryChunks } from "../memory"
 import { recordMetric } from "../metrics"
@@ -40,13 +40,13 @@ import {
   summarizeConversationViaLLM,
 } from "./util"
 import type { CompletionTurnResult } from "./loop-shared"
-import type { Model } from "@earendil-works/pi-ai"
+import type { Model } from "../llm"
 
 /**
  * Resolves the configured summary model pair.
  * When respect_cache is true, returns null — no summaries are produced.
  */
-export function configuredSummaryProvider(): { model: Model<"openai-completions"> | null; apiKey: string | undefined } {
+export function configuredSummaryProvider(): { model: Model | null; apiKey: string | undefined } {
   if (RESPECT_CACHE) return { model: null, apiKey: undefined }
   if (summaryModel && SUMMARY_MODEL) return { model: summaryModel, apiKey: SUMMARY_API_KEY }
   return {
@@ -135,10 +135,10 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Streams one completion from a pi-ai model.
+ * Streams one completion from a model.
  */
 async function createStreamedCompletion(
-  model: Model<"openai-completions">,
+  model: Model,
   apiKey: string | undefined,
   toolChoice: "required" | "auto" | "none",
   state: LoopState,
@@ -154,7 +154,7 @@ async function createStreamedCompletion(
   }
 
   const promptMetricId = recordMetric({ type: "prompt", messages: state.conversation as import("../types").Message[] })
-  const eventStream = stream(model, context, options as unknown as import("@earendil-works/pi-ai").ProviderStreamOptions)
+  const eventStream = stream(model, context, options)
 
   let emittedText = false
   let emittedThinking = false

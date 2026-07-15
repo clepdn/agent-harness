@@ -1,4 +1,4 @@
-import type { Message as PiMessage } from "@earendil-works/pi-ai"
+import type { Message as PiMessage } from "./llm"
 
 /**
  * Pi-ai's canonical conversation message type.

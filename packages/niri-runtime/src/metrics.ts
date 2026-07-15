@@ -1,7 +1,7 @@
 import Database from "better-sqlite3"
 import fs from "fs"
 import path from "path"
-import type { AssistantMessage, Usage } from "@earendil-works/pi-ai"
+import type { AssistantMessage, Usage } from "./llm"
 import { config } from "./config"
 import { HOME_DIR } from "./container/config"
 import { getDb } from "./db"
@@ -354,7 +354,7 @@ function parseMetricRow(row: MetricRow): MetricListItem | null {
       lastUserMessage: lastUserMessage(payload.messages),
       responsePreview: preview(messageText(response?.content
         .filter((c) => c.type === "text")
-        .map((c) => (c as import("@earendil-works/pi-ai").TextContent).text)
+        .map((c) => (c as import("./llm").TextContent).text)
         .join(""))),
       toolCallCount: response?.content.filter((c) => c.type === "toolCall").length,
       usage: payload.usage as Usage | undefined,

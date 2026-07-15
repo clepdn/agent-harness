@@ -4,9 +4,9 @@
  * Just: stream → process tools → repeat → return final text.
  */
 
-import { stream } from "@earendil-works/pi-ai"
-import type { AssistantMessage, ToolCall, Context, Model } from "@earendil-works/pi-ai"
-import type { OpenAICompletionsOptions } from "@earendil-works/pi-ai/openai-completions"
+import { stream } from "../llm"
+import type { AssistantMessage, ToolCall, Context, Model } from "../llm"
+import type { OpenAICompletionsOptions } from "../llm"
 import { config, type SubagentConfig } from "../config"
 import { logMessage } from "../db"
 import { emit } from "../stream"
@@ -37,7 +37,7 @@ const SUBAGENT_HOOKS: LoopHooks = {
 }
 
 /** Resolve the model for a subagent, falling back to the primary/fallback. */
-function resolveSubagentModel(subagent: SubagentConfig): { model: Model<"openai-completions">; apiKey: string | undefined; toolChoice: string } {
+function resolveSubagentModel(subagent: SubagentConfig): { model: Model; apiKey: string | undefined; toolChoice: string } {
   if (USE_FALLBACK) {
     return { model: fallbackModel, apiKey: FALLBACK_API_KEY, toolChoice: FALLBACK_TOOL_CHOICE }
   }
@@ -136,7 +136,7 @@ export async function runSubagent(
     }
 
     // Stream the completion
-    const eventStream = stream(model, context, options as unknown as import("@earendil-works/pi-ai").ProviderStreamOptions)
+    const eventStream = stream(model, context, options)
     let errorMessage: string | undefined
 
     for await (const event of eventStream as AsyncIterable<{ type: string; delta?: string; error?: { errorMessage?: string } }>) {

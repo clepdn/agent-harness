@@ -1,4 +1,4 @@
-import type { UserMessage, AssistantMessage, ToolResultMessage } from "@earendil-works/pi-ai"
+import type { UserMessage, AssistantMessage, ToolResultMessage } from "../llm"
 import type { Message } from "../types"
 
 export function makeUserMessage(content: string): UserMessage {

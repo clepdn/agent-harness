@@ -1,11 +1,11 @@
-import type { Context, Tool, TSchema } from "@earendil-works/pi-ai"
+import type { Context, Tool, TSchema } from "../llm"
 import { config } from "../config"
 import { imageRootForModelInput } from "../container/index"
 import type { LoopState } from "./types"
 
 const IMAGE_ROOT_HINT = imageRootForModelInput()
 
-/** Cast a plain JSON Schema object to the TypeBox TSchema type pi expects. */
+/** Cast a plain JSON Schema object to the TSchema type. */
 function s(schema: Record<string, unknown>): TSchema {
   return schema as unknown as TSchema
 }
@@ -291,7 +291,7 @@ export function getSubagentTools(enabledTools: string[], blacklistedTools: strin
 // ── Context builder ──────────────────────────────────────────────────────────
 
 /**
- * Assembles a pi-ai Context from loop state.
+ * Assembles a Context from loop state.
  * The conversation is already in pi's native format; this just wraps it.
  */
 export function buildContext(state: Pick<LoopState, "systemPrompt" | "conversation">): Context {
