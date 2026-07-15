@@ -1,19 +1,10 @@
 import Fastify, { type FastifyInstance } from "fastify"
-import type { BridgeConfig, BridgeModelConfig } from "./config"
-import { oaiMessagesToContext, oaiSseChunk, oaiCompletionResponse } from "./translate"
-import { buildModel, streamCompletion } from "./pi-ai"
-import { streamAnthropicDirect, createAnthropicClient } from "./anthropic-direct"
+import type { BridgeConfig } from "./config"
 import { authenticate, isModelAllowed, type ApiKeyEntry } from "./auth"
-import { AnthropicTokenStore, parseOAuthCredentials } from "./anthropic-oauth"
 import { handleAntigravityCompletion } from "./antigravity"
 import { handleCodexCompletion } from "./codex"
-import type { AssistantMessageEvent } from "@earendil-works/pi-ai"
-
-// Token stores for models with OAuth — keyed by model id
-const tokenStores = new Map<string, AnthropicTokenStore>()
 
 // ── Model routing ─────────────────────────────────────────────────────────────
-// Models are routed to the appropriate backend based on their name.
 
 function isAntigravityModel(modelId: string): boolean {
   const lower = modelId.toLowerCase()
@@ -25,16 +16,24 @@ function isCodexModel(modelId: string): boolean {
   return lower.startsWith("gpt-") || lower.startsWith("o3-") || lower.startsWith("o4-") || lower.startsWith("codex-")
 }
 
-function getApiKey(modelConfig: BridgeModelConfig): Promise<string> {
-  if (modelConfig.oauthRefreshToken) {
-    let store = tokenStores.get(modelConfig.id)
-    if (!store) {
-      store = new AnthropicTokenStore(parseOAuthCredentials(modelConfig.oauthRefreshToken) ?? undefined)
-      tokenStores.set(modelConfig.id, store)
+/**
+ * Fetch available models from the upstream API.
+ */
+export async function fetchUpstreamModels(baseUrl: string, apiKey: string) {
+  try {
+    const resp = await fetch(`${baseUrl}/models`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    })
+    if (!resp.ok) {
+      console.error(`[bridge] failed to fetch models from upstream: ${resp.status}`)
+      return []
     }
-    return store.getAccessToken()
+    const data = await resp.json() as { data?: Array<{ id: string; context_length?: number; owned_by?: string }> }
+    return data.data ?? []
+  } catch (err) {
+    console.error("[bridge] error fetching upstream models:", err)
+    return []
   }
-  return Promise.resolve(modelConfig.apiKey)
 }
 
 export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEntry>): FastifyInstance {
@@ -52,24 +51,26 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
   })
 
   // Health check
-  app.get("/health", async () => {
-    return { ok: true, models: Object.keys(config.models) }
-  })
+  app.get("/health", async () => ({
+    ok: true,
+    upstream: config.upstreamBaseUrl,
+    models: config.models.map((m) => m.id),
+  }))
 
-  // List models
+  // List models — merges upstream models with antigravity/codex
   app.get("/v1/models", async () => {
-    const models = Object.values(config.models).map((m) => ({
+    const upstreamModels = config.models.map((m) => ({
       id: m.id,
       object: "model" as const,
       created: 0,
-      owned_by: m.provider,
+      owned_by: m.owned_by ?? "upstream",
     }))
-    return { object: "list", data: models }
+    return { object: "list", data: upstreamModels }
   })
 
   // Unified chat completions — routes based on model name
   app.post("/v1/chat/completions", async (req: any, reply: any) => {
-    // Auth check — if keys are configured, require valid Bearer token
+    // Auth check
     let authKey: ApiKeyEntry | null = null
     if (apiKeys.size > 0) {
       authKey = authenticate(req.headers.authorization, apiKeys)
@@ -79,7 +80,12 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
     }
 
     const body = req.body || {}
-    const modelId = body.model ?? config.defaultModel
+    const modelId = body.model ?? ""
+
+    // Check model access if auth is enabled
+    if (authKey && !isModelAllowed(authKey, modelId)) {
+      return reply.code(403).send({ error: { message: `Key is not allowed to access model '${modelId}'`, type: "permission_error" } })
+    }
 
     // Route to sub-bridge backends based on model name
     if (isAntigravityModel(modelId)) {
@@ -90,127 +96,51 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
       return reply.code(result.status).headers(result.headers).send(result.body)
     }
 
-    // Pi-ai / Anthropic direct handler
-    const modelConfig = config.models[modelId]
-    if (!modelConfig) {
-      return reply.code(404).send({ error: { message: `Model '${modelId}' not found`, type: "invalid_request_error" } })
+    // Default: transparent proxy to upstream API
+    const upstreamUrl = `${config.upstreamBaseUrl}/chat/completions`
+    const upstreamHeaders: Record<string, string> = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${config.upstreamApiKey}`,
     }
 
-    // Check model access if auth is enabled
-    if (authKey && !isModelAllowed(authKey, modelId)) {
-      return reply.code(403).send({ error: { message: `Key is not allowed to access model '${modelId}'`, type: "permission_error" } })
-    }
-
-    const stream = body.stream ?? false
-    const isOAuth = Boolean(modelConfig.oauthRefreshToken)
-    const resolvedApiKey = await getApiKey(modelConfig)
-
-    // For OAuth (Anthropic subscription), use direct SDK — bypasses pi-ai
-    // For standard API keys, use pi-ai's stream()
-    const eventIterator: AsyncIterable<AssistantMessageEvent> = isOAuth
-      ? streamAnthropicDirect(createAnthropicClient(resolvedApiKey, modelConfig.baseUrl), {
-          model: modelId,
-          messages: body.messages ?? [],
-          tools: body.tools,
-          max_tokens: body.max_tokens ?? modelConfig.maxTokens,
-          temperature: body.temperature,
-        })
-      : (() => {
-          const context = oaiMessagesToContext(body.messages ?? [], body.tools)
-          const piModel = buildModel(modelConfig)
-          const options = {
-            apiKey: resolvedApiKey,
-            temperature: body.temperature,
-            maxTokens: body.max_tokens ?? modelConfig.maxTokens,
-          }
-          return streamCompletion(piModel, context, options)
-        })()
-
-    if (stream) {
-      reply.raw.writeHead(200, {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache",
-        Connection: "keep-alive",
+    try {
+      const upstreamResp = await fetch(upstreamUrl, {
+        method: "POST",
+        headers: upstreamHeaders,
+        body: JSON.stringify(body),
       })
 
-      // Initial role chunk
-      reply.raw.write(oaiSseChunk(modelId, { content: "" }, null))
+      // Forward status code
+      reply.code(upstreamResp.status)
 
-      try {
-        for await (const event of eventIterator) {
-          if (event.type === "text_delta") {
-            reply.raw.write(oaiSseChunk(modelId, { content: event.delta }, null))
-          } else if (event.type === "toolcall_end") {
-            const tc = event.toolCall
-            reply.raw.write(oaiSseChunk(modelId, {
-              tool_calls: [{
-                index: event.contentIndex,
-                id: tc.id,
-                type: "function",
-                function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
-              }],
-            }, null))
-          } else if (event.type === "done") {
-            reply.raw.write(oaiSseChunk(modelId, {}, mapFinishReason(event.reason)))
-          } else if (event.type === "error") {
-            reply.raw.write(oaiSseChunk(modelId, {}, "error"))
+      // Forward relevant headers
+      const contentType = upstreamResp.headers.get("content-type")
+      if (contentType) reply.header("Content-Type", contentType)
+
+      // Stream or buffer the response
+      if (body.stream && upstreamResp.body) {
+        // Stream SSE chunks back
+        const reader = upstreamResp.body.getReader()
+        try {
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            reply.raw.write(value)
           }
+        } finally {
+          reader.releaseLock()
         }
-      } catch (err) {
-        console.error("[bridge] stream error:", err)
-        reply.raw.write(oaiSseChunk(modelId, {}, "error"))
+        reply.raw.end()
+        return
+      } else {
+        const text = await upstreamResp.text()
+        return reply.send(text)
       }
-
-      reply.raw.write("data: [DONE]\n\n")
-      reply.raw.end()
-      return
-    } else {
-      // Non-streaming
-      let text = ""
-      const toolCalls: Array<{ id: string; name: string; arguments: string }> = []
-      let finishReason = "stop"
-      let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
-
-      try {
-        for await (const event of eventIterator) {
-          if (event.type === "text_delta") {
-            text += event.delta
-          } else if (event.type === "toolcall_end") {
-            toolCalls.push({
-              id: event.toolCall.id,
-              name: event.toolCall.name,
-              arguments: JSON.stringify(event.toolCall.arguments),
-            })
-          } else if (event.type === "done") {
-            finishReason = mapFinishReason(event.reason)
-            const u = event.message.usage
-            usage = {
-              prompt_tokens: u.input,
-              completion_tokens: u.output,
-              total_tokens: u.totalTokens,
-            }
-          }
-        }
-      } catch (err) {
-        console.error("[bridge] completion error:", err)
-        return reply.code(500).send({ error: { message: String(err), type: "server_error" } })
-      }
-
-      const response = oaiCompletionResponse(modelId, text, toolCalls, finishReason, usage)
-      return reply.send(response)
+    } catch (err) {
+      console.error("[bridge] upstream proxy error:", err)
+      return reply.code(502).send({ error: { message: `Upstream error: ${err}`, type: "server_error" } })
     }
   })
 
   return app
-}
-
-function mapFinishReason(reason: string): string {
-  switch (reason) {
-    case "stop": return "stop"
-    case "length": return "length"
-    case "toolUse": return "tool_calls"
-    case "error": return "error"
-    case "aborted": return "abort"
-    default: return "stop"
-  }
 }

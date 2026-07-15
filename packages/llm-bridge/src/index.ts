@@ -1,50 +1,51 @@
 /**
  * LLM Bridge — unified inference proxy.
  *
- * All AI requests from the harness go through this bridge. It routes to
- * the appropriate backend based on model name:
+ * Acts as our own OpenRouter. Routes requests to the appropriate backend:
  *
- *   - pi-ai models (umans-*, glm-*, etc.) → pi-ai stream()
- *   - gemini-* / antigravity models     → Antigravity backend
- *   - gpt-* / o3-* / codex models       → Codex backend
- *   - claude-* with OAuth               → Direct Anthropic SDK
+ *   - gemini-* / agy-*     → Antigravity backend
+ *   - gpt-* / o3-* / codex → Codex backend
+ *   - everything else      → transparent proxy to upstream API
  *
- * The bridge listens on a single port (default 4040) and exposes
- * OpenAI-compatible endpoints. The harness points model.base_url here.
+ * Models are auto-discovered from the upstream /v1/models endpoint on startup.
+ * The bridge listens on a single port and exposes OpenAI-compatible endpoints.
  */
 
 import { loadConfig } from "./config"
-import { createServer } from "./server"
+import { createServer, fetchUpstreamModels } from "./server"
 import { loadApiKeys } from "./auth"
 
-// Parse --keys <path> from argv for the API keys file
 const keysArgIdx = process.argv.indexOf("--keys")
 const keysPath = keysArgIdx >= 0 ? process.argv[keysArgIdx + 1] : undefined
 
 const apiKeys = loadApiKeys(keysPath)
 if (apiKeys.size > 0) {
-  console.log(`[bridge] loaded ${apiKeys.size} API key(s) from ${keysPath}`)
-  for (const [, entry] of apiKeys) {
-    console.log(`[bridge]   key: ${entry.name ?? "(unnamed)"} — models: ${entry.allowedModels.join(", ")}`)
-  }
+  console.log(`[bridge] loaded ${apiKeys.size} API key(s)`)
 } else {
   console.log("[bridge] no API keys configured — running open (no auth)")
 }
 
 const config = loadConfig()
 
-const server = createServer(config, apiKeys)
+async function main() {
+  // Discover models from upstream
+  console.log(`[bridge] fetching models from ${config.upstreamBaseUrl}...`)
+  config.models = await fetchUpstreamModels(config.upstreamBaseUrl, config.upstreamApiKey)
+  console.log(`[bridge] discovered ${config.models.length} models: ${config.models.map((m) => m.id).join(", ")}`)
 
-server.listen({ port: config.port, host: config.host }, () => {
+  const server = createServer(config, apiKeys)
+
+  await server.listen({ port: config.port, host: config.host })
   console.log(`[bridge] listening on http://${config.host}:${config.port}`)
-  console.log(`[bridge] models: ${Object.keys(config.models).join(", ")}`)
-  console.log(`[bridge] default: ${config.defaultModel}`)
+}
+
+main().catch((err) => {
+  console.error("[bridge] fatal:", err)
+  process.exit(1)
 })
 
-// Graceful shutdown
 async function shutdown() {
   console.log("[bridge] shutting down...")
-  await server.close()
   process.exit(0)
 }
 
