@@ -158,6 +158,7 @@ export async function buildCompletionMessages(
   const recallMessage: Message = {
     role: "user",
     content: recallContent,
+    timestamp: Date.now(),
   }
 
   return {

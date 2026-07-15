@@ -1,16 +1,28 @@
-import type OpenAI from "openai"
-import type { UserMessage } from "@niri/protocol"
+import type { Message as PiMessage } from "@earendil-works/pi-ai"
 
-export type { TriggerSource, UserMessage } from "@niri/protocol"
+/**
+ * Pi-ai's canonical conversation message type.
+ * UserMessage | AssistantMessage | ToolResultMessage
+ */
+export type Message = PiMessage
 
-export type AssistantMessageWithReasoning = OpenAI.Chat.ChatCompletionAssistantMessageParam & {
-  reasoning_content?: string
+export type TriggerSource = "discord" | "bsky" | "webhook" | "cron" | "chat" | "job" | "boredom"
+
+/**
+ * Trigger event from an external source (Discord, cron, etc.).
+ * Distinct from pi's conversation UserMessage.
+ */
+export interface UserMessage {
+  source: TriggerSource
+  triggeredAt: string
+  content: string
+  clientId?: string
+  raw: unknown
 }
-
-export type Message = OpenAI.Chat.ChatCompletionMessageParam | AssistantMessageWithReasoning
 
 export interface RunnerState {
   running: boolean
+  systemPrompt: string
   conversation: Message[]
   pendingInputs: UserMessage[]
   tokenCount: number

@@ -66,6 +66,7 @@ export function checkGitUpstream(
         state.conversation.push({
           role: "user",
           content: nag,
+          timestamp: Date.now(),
         })
         logMessage(convId, "user", nag)
         console.log(`[git-upstream-nag] upstream changed for ${toplevel}, nagging agent`)

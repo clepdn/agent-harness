@@ -1,7 +1,7 @@
 import fs from "fs/promises"
 import path from "path"
 import type { Message } from "../types"
-import { findSummaryMessageIndex, messageStringContent } from "./util"
+import { findSummaryMessageIndex, messageStringContent } from "./messages"
 
 // Store session data in working directory, not install location (Nix store is read-only)
 const DATA_DIR = process.cwd()

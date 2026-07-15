@@ -1,43 +1,17 @@
-import OpenAI from "openai"
+import type { AssistantMessage, ToolCall, Usage } from "@earendil-works/pi-ai"
 import type { LoopHooks, LoopState } from "./types"
 
-export type FunctionToolCall = OpenAI.Chat.ChatCompletionMessageToolCall & { type: "function" }
+/** A tool call from the assistant (pi's native ToolCall type). */
+export type FunctionToolCall = ToolCall
 
-export type ToolArgs = {
-  command?: string
-  query?: string
-  max_lines?: number
-  timeout_ms?: number
-  path?: string
-  start_line?: number
-  end_line?: number
-  old_text?: string
-  new_text?: string
-  note?: string
-  detail?: string
-  limit?: number
-  offset?: number
-  summary_id?: string
-  id?: string
-  tokenCap?: number
-  status?: string
-  item_id?: string
-  action?: string
-  channel_id?: string
-  channel_ids?: string[]
-  before_message_id?: string
-  content?: string
-  source_item_id?: string
-  reference_message?: string
-  reply_mode?: string
-  [key: string]: unknown
-}
+/** Tool argument map — pi args are already parsed objects. */
+export type ToolArgs = Record<string, unknown>
 
 export type ToolExecutionOutcome = { shouldRest?: boolean; isWait?: boolean }
 
 export type CompletionTurnResult = {
-  message: OpenAI.Chat.ChatCompletionMessage
-  usage?: OpenAI.Completions.CompletionUsage
+  message: AssistantMessage
+  usage: Usage
   emittedText: boolean
   emittedThinking: boolean
   bufferedThinking: string
@@ -47,30 +21,8 @@ export type CompletionTurnResult = {
   tokensPerSecond?: number
 }
 
-export type CompletionRequest = {
-  model: string
-  messages: OpenAI.Chat.ChatCompletionMessageParam[]
-  tools: OpenAI.Chat.ChatCompletionTool[]
-  tool_choice: "required" | "auto" | "none"
-  prompt_cache_key?: string
-  include_reasoning?: boolean
-  reasoning?: { enabled?: boolean; exclude?: boolean; effort?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" }
-  provider?: { require_parameters?: boolean }
-  enable_thinking?: boolean
-  chat_template_kwargs?: { enable_thinking?: boolean }
-}
-
-export type ToolCallAssembly = {
-  id: string
-  type: "function"
-  function: {
-    name: string
-    arguments: string
-  }
-}
-
-export type ToolArgKey = keyof ToolArgs
-export type ArgTuple<K extends readonly ToolArgKey[]> = { [I in keyof K]: ToolArgs[K[I]] }
+export type ToolArgKey = string
+export type ArgTuple<K extends readonly string[]> = { [I in keyof K]: unknown }
 
 export type ToolExecutionContext = {
   convId: number
