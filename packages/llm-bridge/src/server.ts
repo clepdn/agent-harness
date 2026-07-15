@@ -10,6 +10,61 @@ import type { AssistantMessageEvent } from "@earendil-works/pi-ai"
 // Token stores for models with OAuth — keyed by model id
 const tokenStores = new Map<string, AnthropicTokenStore>()
 
+// ── Model routing ─────────────────────────────────────────────────────────────
+// Models are routed to the appropriate backend based on their name.
+// Sub-bridges (antigravity, codex) run on their own ports and the main
+// server proxies to them. Anything not matching a sub-bridge pattern
+// falls through to the pi-ai handler.
+
+const ANTIGRAVITY_PORT = parseInt(process.env.ANTIGRAVITY_BRIDGE_PORT || "8000", 10)
+const CODEX_PORT = parseInt(process.env.CODEX_BRIDGE_PORT || "8001", 10)
+
+function isAntigravityModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase()
+  return lower.startsWith("gemini-") || lower.startsWith("agy-")
+}
+
+function isCodexModel(modelId: string): boolean {
+  const lower = modelId.toLowerCase()
+  return lower.startsWith("gpt-") || lower.startsWith("o3-") || lower.startsWith("o4-") || lower.startsWith("codex-")
+}
+
+/**
+ * Proxy a request to a sub-bridge running on another local port.
+ * Forwards the raw request body and streams the response back.
+ */
+async function proxyToBackend(
+  port: number,
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  body: string,
+): Promise<void> {
+  const proxyReq = http.request(
+    {
+      hostname: "127.0.0.1",
+      port,
+      path: req.url,
+      method: req.method,
+      headers: { ...req.headers, host: `127.0.0.1:${port}` },
+    },
+    (proxyRes) => {
+      res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers)
+      proxyRes.pipe(res)
+    },
+  )
+
+  proxyReq.on("error", (err) => {
+    console.error(`[bridge] proxy to :${port} failed:`, err.message)
+    if (!res.headersSent) {
+      res.writeHead(502, { "Content-Type": "application/json" })
+      res.end(JSON.stringify({ error: { message: `Backend on port ${port} unavailable: ${err.message}`, type: "server_error" } }))
+    }
+  })
+
+  proxyReq.write(body)
+  proxyReq.end()
+}
+
 function getApiKey(modelConfig: BridgeModelConfig): Promise<string> {
   if (modelConfig.oauthRefreshToken) {
     let store = tokenStores.get(modelConfig.id)
@@ -74,6 +129,17 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
         const request = JSON.parse(body)
 
         const modelId = request.model ?? config.defaultModel
+
+        // Route to sub-bridges based on model name
+        if (isAntigravityModel(modelId)) {
+          await proxyToBackend(ANTIGRAVITY_PORT, req, res, body)
+          return
+        }
+        if (isCodexModel(modelId)) {
+          await proxyToBackend(CODEX_PORT, req, res, body)
+          return
+        }
+
         const modelConfig = config.models[modelId]
         if (!modelConfig) {
           res.writeHead(404, { "Content-Type": "application/json" })

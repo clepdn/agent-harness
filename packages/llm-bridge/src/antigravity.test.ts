@@ -6,7 +6,7 @@ import {
   mapOpenaiMessagesToGemini,
   mapAnthropicMessagesToGemini,
   createBridgeServer
-} from "./antigravity-bridge";
+} from "./antigravity";
 
 test("mapModelName maps correctly", () => {
   assert.equal(mapModelName("gemini-3.5-flash-medium"), "gemini-3.5-flash-low");

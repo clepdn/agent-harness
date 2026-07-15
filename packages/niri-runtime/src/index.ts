@@ -8,8 +8,6 @@ import { startDiscordGateway } from "./discord/gateway"
 import { startDiscordEmbeddingBackfill } from "./discord/search"
 import { setDiscordToolsAvailable } from "./discord/availability"
 import { ensureSoulFilePlacement } from "./bootstrap"
-import { startAntigravityBridge, stopAntigravityBridge } from "./antigravity-bridge"
-import { startCodexBridge, stopCodexBridge } from "./codex-bridge"
 import { startLlmBridge, stopLlmBridge } from "./llm-bridge"
 import { clientTools } from "./client"
 
@@ -41,8 +39,6 @@ async function main() {
   initDb()
   initMetricsDb()
   try {
-    await startAntigravityBridge()
-    await startCodexBridge()
     await startLlmBridge()
   } catch (err) {
     console.error("[bridge] failed to start:", err)
@@ -101,8 +97,6 @@ async function main() {
       setDiscordToolsAvailable(false)
       await server.close()
       await clientTools.stop()
-      await stopAntigravityBridge()
-      await stopCodexBridge()
       await stopLlmBridge()
     }
     const cleanupTimeout = new Promise<void>((resolve) =>

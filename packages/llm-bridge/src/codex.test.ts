@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import fs from "node:fs"
 import test from "node:test"
-import { createCodexBridgeServer, __codexBridgeTest } from "./codex-bridge"
+import { createCodexBridgeServer, __codexBridgeTest } from "./codex"
 
 test("maps OpenAI chat history and tools to Codex Responses input", () => {
   const mapped = __codexBridgeTest.mapMessages([
