@@ -1,5 +1,4 @@
-import type { ToolResultMessage } from "@earendil-works/pi-ai"
-import { redactSecrets } from "../config"
+import OpenAI from "openai"
 import { logMessage } from "../db"
 import { emit } from "../stream"
 import { latestAssistantContent } from "./loop-content"
@@ -13,6 +12,7 @@ import type {
   ToolHandler,
 } from "./loop-shared"
 import type { LoopHooks, LoopState } from "./types"
+import { parseToolArguments } from "./util"
 
 type StandardToolSpec<
   RunKeys extends readonly ToolArgKey[],
@@ -30,33 +30,42 @@ type StandardToolSpec<
 
 /**
  * Appends a tool-role message to conversation state and persistence logs.
- * Tool output is filtered through `redactSecrets` first so credentials that
- * leak via command output (curl -v, env, sloppy logging) never reach the
- * model, the db, or stream subscribers.
+ *
+ * @param convId - Active conversation id.
+ * @param state - Mutable loop state.
+ * @param call - Tool call being satisfied.
+ * @param content - Tool result content.
+ * @returns Persisted tool content.
  */
 export function pushToolMessage(convId: number, state: LoopState, call: FunctionToolCall, content: string): string {
-  const safe = redactSecrets(content)
-  const toolMsg: ToolResultMessage = {
-    role: "toolResult",
-    toolCallId: call.id,
-    toolName: call.name,
-    content: [{ type: "text", text: safe }],
-    isError: safe.startsWith("error:"),
-    timestamp: Date.now(),
+  const toolMsg = {
+    role: "tool" as const,
+    tool_call_id: call.id,
+    content,
   }
   state.conversation.push(toolMsg)
-  logMessage(convId, "toolResult", safe, undefined, call.id)
-  return safe
+  logMessage(convId, "tool", toolMsg.content, undefined, call.id)
+  return toolMsg.content
 }
 
 function hasToolResponse(state: LoopState, call: FunctionToolCall): boolean {
   return state.conversation.some(
-    (message) => message.role === "toolResult" && message.toolCallId === call.id,
+    (message) =>
+      message.role === "tool" &&
+      (message as OpenAI.Chat.ChatCompletionToolMessageParam).tool_call_id === call.id,
   )
 }
 
 /**
  * Records a tool result and emits it to stream subscribers.
+ *
+ * @param convId - Active conversation id.
+ * @param state - Mutable loop state.
+ * @param call - Tool call being satisfied.
+ * @param name - Tool name.
+ * @param args - Tool args payload.
+ * @param content - Tool result content.
+ * @returns Persisted tool content.
  */
 export function recordToolResult(
   convId: number,
@@ -73,6 +82,9 @@ export function recordToolResult(
 
 /**
  * Normalizes thrown values into tool-friendly error text.
+ *
+ * @param err - Unknown thrown value.
+ * @returns Error string prefixed with `error:`.
  */
 export function toolError(err: unknown): string {
   return `error: ${err instanceof Error ? err.message : String(err)}`
@@ -82,12 +94,16 @@ function argsByKeys<K extends readonly ToolArgKey[]>(args: ToolArgs, keys: K): A
   return keys.map((key) => args[key]) as ArgTuple<K>
 }
 
-function pickArgsByKeys<K extends readonly ToolArgKey[]>(args: ToolArgs, keys: K): Record<string, unknown> {
-  return Object.fromEntries(keys.map((key) => [key, args[key]]))
+function pickArgsByKeys<K extends readonly ToolArgKey[]>(args: ToolArgs, keys: K): Record<K[number], ToolArgs[K[number]]> {
+  return Object.fromEntries(keys.map((key) => [key, args[key]])) as Record<K[number], ToolArgs[K[number]]>
 }
 
 /**
  * Executes a standard "run command then record result" tool pattern.
+ *
+ * @param ctx - Tool execution context.
+ * @param spec - Declarative tool behavior and argument mapping.
+ * @returns Empty outcome object for continued loop flow.
  */
 export async function runStandardTool<
   RunKeys extends readonly ToolArgKey[],
@@ -110,6 +126,13 @@ export async function runStandardTool<
 
 /**
  * Executes one function tool call end-to-end.
+ *
+ * @param convId - Active conversation id.
+ * @param state - Mutable loop state.
+ * @param hooks - Loop hooks for side effects and event flow.
+ * @param handlers - Tool handler map.
+ * @param call - Function tool call to execute.
+ * @returns Tool execution outcome for loop control flow.
  */
 export async function executeToolCall(
   convId: number,
@@ -118,32 +141,36 @@ export async function executeToolCall(
   handlers: Record<string, ToolHandler>,
   call: FunctionToolCall,
 ): Promise<ToolExecutionOutcome> {
-  // Pi args are already a parsed object — no JSON parsing needed.
-  const args: ToolArgs = call.arguments as ToolArgs
+  const parsed = parseToolArguments(call.function.arguments)
+  if (!parsed.ok) {
+    const errorText = `error: invalid arguments for ${call.function.name}: ${parsed.error}`
+    recordToolResult(convId, state, call, call.function.name, { _parse_error: parsed.error }, errorText)
+    return {}
+  }
 
-  if ((call.name === "wait" || call.name === "rest") && latestAssistantContent(state).length === 0) {
+  if ((call.function.name === "wait" || call.function.name === "rest") && latestAssistantContent(state).length === 0) {
     console.warn(
-      `[runner] ${call.name} called with empty assistant content; allowing tool-only turn (provider emitted no text).`,
+      `[runner] ${call.function.name} called with empty assistant content; allowing tool-only turn (provider emitted no text).`,
     )
   }
 
-  const isWaitTool = call.name === "wait" || call.name === "wait_then_continue"
+  const isWaitTool = call.function.name === "wait" || call.function.name === "wait_then_continue"
   if (!isWaitTool) state.toolInFlight = true
 
   try {
-    const handler = handlers[call.name]
+    const handler = handlers[call.function.name]
     if (!handler) {
-      const errorText = `error: unknown tool ${call.name}`
-      recordToolResult(convId, state, call, call.name, { _unknown_tool: call.name }, errorText)
+      const errorText = `error: unknown tool ${call.function.name}`
+      recordToolResult(convId, state, call, call.function.name, { _unknown_tool: call.function.name }, errorText)
       return {}
     }
-    return await handler({ convId, state, hooks, call, args })
+    return await handler({ convId, state, hooks, call, args: parsed.args })
   } catch (err) {
     const errorText = toolError(err)
     if (!hasToolResponse(state, call)) {
-      recordToolResult(convId, state, call, call.name, { _handler_error: true }, errorText)
+      recordToolResult(convId, state, call, call.function.name, { _handler_error: true }, errorText)
     } else {
-      console.warn(`[runner] ${call.name} failed after recording tool response: ${errorText}`)
+      console.warn(`[runner] ${call.function.name} failed after recording tool response: ${errorText}`)
     }
     return {}
   } finally {

@@ -1,22 +1,17 @@
-import { config } from "../config"
 import { recordMetric } from "../metrics"
 import { emit } from "../stream"
 import type { Message } from "../types"
 import {
-  COMPACTION_MIN_CHARS,
-  COMPACTION_TURN_AGE,
   CONTEXT_COMPACT_TRIGGER_TOKENS,
   ENABLE_THINKING,
-  RESPECT_CACHE,
   estimatePromptTokens,
   findSummaryMessageIndex,
   loadAgentSummaryContext,
-  proactiveCompaction,
-  summarizeConversationViaLLM,
+  summarizeConversationViaLLMWithProvenance,
 } from "./util"
+import { attachContextSummaryId, recordContextCompaction } from "./context-store"
 import { addAssistantMessage, applyUsage, configuredSummaryProvider, emitThinking, fetchCompletion } from "./loop-completion"
 import { assistantContentText, isFunctionToolCall } from "./loop-content"
-import type { AssistantMessage, TextContent, ToolCall } from "@earendil-works/pi-ai"
 import { buildTurnSignature, hasIncomingUserMessage } from "./loop-signatures"
 import { processToolCalls } from "./loop-tools"
 import type { LoopHooks, LoopState } from "./types"
@@ -24,8 +19,14 @@ import type { LoopHooks, LoopState } from "./types"
 const LLM_RECENT_MIN_KEEP = 6
 const LLM_RECENT_MAX_KEEP = 40
 const LLM_TAIL_CHAR_BUDGET = 60_000
-const RUNNER_MAX_TURNS = Math.max(1, config.runner.max_turns)
-const RUNNER_MAX_IDENTICAL_TOOL_TURNS = Math.max(1, config.runner.max_identical_tool_turns)
+const RUNNER_MAX_TURNS = parsePositiveIntEnv(process.env.RUNNER_MAX_TURNS, 120)
+const RUNNER_MAX_IDENTICAL_TOOL_TURNS = parsePositiveIntEnv(process.env.RUNNER_MAX_IDENTICAL_TOOL_TURNS, 10)
+
+function parsePositiveIntEnv(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10)
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback
+  return parsed
+}
 
 enum CycleOutcome {
   NoTools = "no_tools",
@@ -35,27 +36,28 @@ enum CycleOutcome {
 
 export type RunLoopExit = "rest"
 
-async function waitForNextEvent(convId: number, hooks: LoopHooks): Promise<void> {
+async function waitForNextEvent(convId: number, hooks: LoopHooks): Promise<boolean> {
   const incoming = await hooks.waitForEvent()
-  if (!incoming) { throw new Error("waitForEvent returned null") }
+  if (!incoming) return false
   hooks.injectIncomingEvent(convId, incoming)
+  return true
 }
 
-async function applyLoopGuardNudge(state: LoopState, _hooks: LoopHooks, reason: string): Promise<void> {
+async function applyLoopGuardNudge(state: LoopState, hooks: LoopHooks, reason: string): Promise<void> {
   const guardMessage =
     `[system] hey, you've been going for a while (${reason}). this is just a heads-up in case you're stuck and need help — most likely you're fine and don't need to do anything different, especially if you're actively doing something, in conversation with people, or things are happening RIGHT NOW. just keep going. resting is only a suggestion for if nothing's actually happening and you're genuinely done; if you do rest, remember to tell your important people first.`
   console.warn(`[runner] ${reason}`)
   state.conversation.push({
     role: "user",
     content: guardMessage,
-    timestamp: Date.now(),
   })
   emit({ type: "text", text: guardMessage })
+  await hooks.saveSession()
 }
 
 async function processAssistantTurn(convId: number, state: LoopState, hooks: LoopHooks): Promise<CycleOutcome> {
   state.memoryRecallTurn += 1
-  const response = await fetchCompletion(state)
+  const response = await fetchCompletion(state, undefined, hooks.getTools())
   // Recall (if any) has been applied for this turn; don't re-recall on the
   // follow-up iterations that work through the same incoming event.
   state.memoryRecallPending = false
@@ -68,6 +70,8 @@ async function processAssistantTurn(convId: number, state: LoopState, hooks: Loo
   addAssistantMessage(convId, state, msg)
 
   if (ENABLE_THINKING) {
+    // Thinking is now streamed live during completion, but handle edge cases
+    // where reasoning exists without live emission (e.g. tag-parsed thinking).
     if (!response.emittedThinking && response.bufferedThinking) {
       emit({ type: "thinking", text: response.bufferedThinking })
     } else if (!response.emittedThinking) {
@@ -75,14 +79,11 @@ async function processAssistantTurn(convId: number, state: LoopState, hooks: Loo
     }
   }
 
-  const toolCalls = msg.content.filter(isFunctionToolCall) as ToolCall[]
-  if (!response.emittedText) {
-    const text = msg.content.filter((c): c is TextContent => c.type === "text").map((c) => c.text).join("")
-    if (text) emit({ type: "text", text })
-  }
-  if (toolCalls.length === 0) return CycleOutcome.NoTools
+  const functionCalls = (msg.tool_calls ?? []).filter(isFunctionToolCall)
+  if (!response.emittedText && msg.content) emit({ type: "text", text: msg.content })
+  if (functionCalls.length === 0) return CycleOutcome.NoTools
 
-  const shouldRest = await processToolCalls(convId, state, hooks, toolCalls)
+  const shouldRest = await processToolCalls(convId, state, hooks, functionCalls)
   return shouldRest ? CycleOutcome.Rest : CycleOutcome.ToolsDone
 }
 
@@ -95,102 +96,64 @@ function isDiscordInputMessage(message: Message): boolean {
   return message.role === "user" && typeof message.content === "string" && /\[discord(?:\/(?:dm|channel)| batch)\]/i.test(message.content)
 }
 
-function hasDiscordInputForTurn(
-  conversation: Message[],
-  turnMessages: Message[],
-  turnStart: number,
-): boolean {
-  if (turnMessages.some(isDiscordInputMessage)) return true
-
-  // After a harness restart, the triggering Discord event is appended before
-  // the first post-restart assistant turn. Look backward to the latest
-  // assistant boundary and treat intervening user messages as active context.
-  for (let i = turnStart - 1; i >= 0; i--) {
-    const message = conversation[i]
-    if (!message) continue
-    if (message.role === "assistant") break
-    if (isDiscordInputMessage(message)) return true
+function activeUserTurnMessages(conversation: Message[], turnMessages: Message[]): Message[] {
+  // Prefer a user event injected during this model/tool step. Otherwise walk
+  // back to the latest user message in the full conversation. This keeps the
+  // original input active across preliminary assistant/tool steps such as
+  // memory_read on a fresh wake.
+  for (let i = turnMessages.length - 1; i >= 0; i--) {
+    if (turnMessages[i]?.role === "user") return turnMessages.slice(i)
   }
+  for (let i = conversation.length - 1; i >= 0; i--) {
+    if (conversation[i]?.role === "user") return conversation.slice(i)
+  }
+  return turnMessages
+}
 
-  return false
+function hasDiscordInputForTurn(conversation: Message[], turnMessages: Message[]): boolean {
+  return activeUserTurnMessages(conversation, turnMessages).some(isDiscordInputMessage)
 }
 
 function applyDiscordSendNudge(
   state: LoopState,
   turnMessages: Message[],
-  turnStart = state.conversation.length,
 ): boolean {
-  // Check if the assistant is responding to active Discord input, including
-  // the post-restart case where the triggering user message is already in the
-  // conversation before the turn begins.
-  const hasDiscordInput = hasDiscordInputForTurn(state.conversation, turnMessages, turnStart)
+  // Check the whole active user turn, including preliminary tool calls made
+  // after a fresh wake and before the assistant writes its reply.
+  const activeTurnMessages = activeUserTurnMessages(state.conversation, turnMessages)
+  const hasDiscordInput = activeTurnMessages.some(isDiscordInputMessage)
   if (!hasDiscordInput) return false
 
-  // Check if the assistant called discord_send in this turn
-  const hasDiscordSend = turnMessages.some(
+  // A discord_send from an earlier assistant/tool step in the same user turn
+  // means the reply was already delivered.
+  const hasDiscordSend = activeTurnMessages.some(
     (m) =>
       m.role === "assistant" &&
-      (m as AssistantMessage).content.some((c) => c.type === "toolCall" && (c as ToolCall).name === "discord_send"),
+      "tool_calls" in m &&
+      Array.isArray(m.tool_calls) &&
+      m.tool_calls.some((tc) => tc.type === "function" && tc.function.name === "discord_send"),
   )
   if (hasDiscordSend) return false
 
-  // Also check if a tool result from discord_send exists
-  const hasDiscordSendResult = turnMessages.some(
+  // Also check if a tool result from discord_send exists (edge case: tool result is separate message)
+  const hasDiscordSendResult = activeTurnMessages.some(
     (m) =>
-      m.role === "toolResult" &&
-      m.toolName === "discord_send" &&
-      m.content.some((c) => c.type === "text" && (c as TextContent).text.includes('"ok":true')),
+      m.role === "tool" &&
+      typeof m.content === "string" &&
+      m.content.includes('"ok":true') &&
+      m.content.includes("discord_send"),
   )
   if (hasDiscordSendResult) return false
 
   // Find the assistant's text content in this turn
-  const assistantText = turnMessages.find((m) => m.role === "assistant" && assistantContentText((m as AssistantMessage).content).length > 0)
+  const assistantText = turnMessages.find((m) => m.role === "assistant" && assistantContentText(m.content).length > 0)
   if (!assistantText) return false
 
   // The assistant wrote something in response to a Discord message but
   // never actually sent it. Nudge.
   const nudge = `[system] you wrote a response to a Discord message but did not call discord_send. your message was not delivered. call discord_send now or explicitly decide not to reply.`
   console.warn("[runner] discord_send nudge: assistant responded to Discord input without calling discord_send")
-  state.conversation.push({ role: "user", content: nudge, timestamp: Date.now() })
-  return true
-}
-/**
- * Proactively summarizes old, large tool results using the compaction model.
- * Only runs when respect_cache is false. Targets tool results that are
- * ≥ compaction_turn_age turns old and ≥ compaction_min_chars in size.
- */
-async function applyProactiveCompaction(state: LoopState): Promise<boolean> {
-  if (RESPECT_CACHE) return false
-
-  const provider = configuredSummaryProvider()
-  if (!provider.model) return false
-
-  const { messages, compacted } = await proactiveCompaction(
-    state.conversation,
-    provider.model,
-    provider.apiKey,
-    COMPACTION_TURN_AGE,
-    COMPACTION_MIN_CHARS,
-  )
-
-  if (compacted === 0) return false
-
-  const beforeEstimate = state.contextSize
-  state.conversation = messages
-  state.contextSize = estimatePromptTokens(state.conversation)
-
-  console.log(
-    `[context] proactive: compacted ${compacted} tool result(s) (${beforeEstimate} -> ${state.contextSize} tokens)`,
-  )
-
-  recordMetric({
-    type: "compaction",
-    before: beforeEstimate,
-    after: state.contextSize,
-    method: "proactive",
-    summary: undefined,
-  })
-
+  state.conversation.push({ role: "user", content: nudge })
   return true
 }
 
@@ -201,18 +164,18 @@ async function applyLLMCompaction(state: LoopState, phase: "pre-turn" | "post-tu
   if (state.contextSize < CONTEXT_COMPACT_TRIGGER_TOKENS) return false
   const beforeEstimate = estimatePromptTokens(state.conversation)
 
-  const summaryProvider = configuredSummaryProvider()
-  if (!summaryProvider.model) {
-    console.warn(`[context] ${phase}: no summary model available; skipping llm compaction`)
+  const summaryProvider = await configuredSummaryProvider()
+  if (!summaryProvider.client || !summaryProvider.model) {
+    console.warn(`[context] ${phase}: no summary client available; skipping llm compaction`)
     return false
   }
 
   const beforeCount = state.conversation.length
   const agentContext = await loadAgentSummaryContext()
-  const summarized = await summarizeConversationViaLLM(
+  const compaction = await summarizeConversationViaLLMWithProvenance(
     state.conversation,
+    summaryProvider.client,
     summaryProvider.model,
-    summaryProvider.apiKey,
     {
       recentMinKeep: LLM_RECENT_MIN_KEEP,
       recentMaxKeep: LLM_RECENT_MAX_KEEP,
@@ -220,32 +183,37 @@ async function applyLLMCompaction(state: LoopState, phase: "pre-turn" | "post-tu
       agentContext,
     },
   )
-  if (!summarized) {
+  if (!compaction) {
     console.warn(`[context] ${phase}: llm summary unavailable; keeping raw conversation`)
     return false
   }
 
-  const afterEstimate = estimatePromptTokens(summarized)
+  const afterEstimate = estimatePromptTokens(compaction.messages)
   if (afterEstimate >= beforeEstimate) {
     console.warn(`[context] ${phase}: llm summary not smaller (${beforeEstimate} -> ${afterEstimate}); keeping raw conversation`)
     return false
   }
 
-  state.conversation = summarized
-  state.contextSize = afterEstimate
+  const summaryId = recordContextCompaction({
+    summaryText: compaction.summaryText,
+    compactedMessages: compaction.compactedMessages,
+    priorSummaryContent: compaction.priorSummaryContent,
+    method: `${phase}-llm`,
+  })
+  state.conversation = attachContextSummaryId(compaction.messages, summaryId)
+  state.contextSize = estimatePromptTokens(state.conversation)
 
   const summaryIdx = findSummaryMessageIndex(state.conversation)
-  const summaryMsg = summaryIdx >= 0 ? state.conversation[summaryIdx] : undefined
-  const summary = summaryMsg?.role === "user" && typeof summaryMsg.content === "string" ? summaryMsg.content : undefined
+  const summary = summaryIdx >= 0 ? (state.conversation[summaryIdx]?.content as string) : undefined
 
   console.log(
-    `[context] ${phase}: llm-summarized conversation via ${summaryProvider.model} (${beforeCount} -> ${summarized.length} msgs, ${beforeEstimate} -> ${afterEstimate} tokens)`,
+    `[context] ${phase}: llm-summarized conversation via ${summaryProvider.model} (${beforeCount} -> ${state.conversation.length} msgs, ${beforeEstimate} -> ${state.contextSize} tokens, ${summaryId})`,
   )
 
   recordMetric({
     type: "compaction",
     before: beforeEstimate,
-    after: afterEstimate,
+    after: state.contextSize,
     method: `${phase}-llm`,
     summary,
   })
@@ -258,11 +226,17 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
   let consecutiveIdenticalToolTurns = 0
 
   while (true) {
-    await applyProactiveCompaction(state)
-    await applyLLMCompaction(state, "pre-turn")
+    const preCompacted = await applyLLMCompaction(state, "pre-turn")
+    if (preCompacted) await hooks.saveSession()
 
     const turnStart = state.conversation.length
-    const outcome = await processAssistantTurn(convId, state, hooks)
+    state.turnInFlight = true
+    let outcome: CycleOutcome
+    try {
+      outcome = await processAssistantTurn(convId, state, hooks)
+    } finally {
+      state.turnInFlight = false
+    }
     turnCount += 1
 
     const turnMessages = state.conversation.slice(turnStart)
@@ -275,7 +249,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     // then calls wait/rest, leaving the Discord user in silence.
     let discordSendNudged = false
     if (outcome !== CycleOutcome.Rest) {
-      discordSendNudged = applyDiscordSendNudge(state, turnMessages, turnStart)
+      discordSendNudged = applyDiscordSendNudge(state, turnMessages)
     }
 
     if (interruptedByUserEvent || !turnSignature) {
@@ -289,9 +263,20 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     }
 
     if (outcome === CycleOutcome.Rest) return "rest"
+    if (hooks.shouldShutdown()) {
+      await hooks.saveShutdownSnapshot()
+      hooks.resolveShutdown()
+      return "rest"
+    }
     if (outcome === CycleOutcome.NoTools) {
       if (discordSendNudged) continue
-      await waitForNextEvent(convId, hooks)
+      await hooks.saveSession()
+      const hasNextEvent = await waitForNextEvent(convId, hooks)
+      if (!hasNextEvent && hooks.shouldShutdown()) {
+        await hooks.saveShutdownSnapshot()
+        hooks.resolveShutdown()
+        return "rest"
+      }
       continue
     }
 
@@ -315,6 +300,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     }
 
     await applyLLMCompaction(state, "post-turn")
+    await hooks.saveSession()
   }
 }
 

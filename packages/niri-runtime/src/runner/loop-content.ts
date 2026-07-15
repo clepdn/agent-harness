@@ -1,18 +1,37 @@
-import type { AssistantMessage, TextContent, ToolCall } from "@earendil-works/pi-ai"
+import OpenAI from "openai"
 import type { LoopState } from "./types"
+import type { FunctionToolCall } from "./loop-shared"
 
 /**
- * Extracts plain text from an assistant message's content array.
+ * Normalizes assistant/tool message content into plain text.
  *
- * @param content - Pi assistant message content array.
- * @returns Trimmed concatenated text.
+ * @param content - Raw OpenAI-compatible message content.
+ * @returns Trimmed text representation.
  */
-export function assistantContentText(content: AssistantMessage["content"]): string {
-  return content
-    .filter((p): p is TextContent => p.type === "text")
-    .map((p) => p.text)
-    .join("")
-    .trim()
+export function assistantContentText(content: unknown): string {
+  if (typeof content === "string") return content.trim()
+  if (!Array.isArray(content)) return ""
+
+  let combined = ""
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue
+    const record = part as Record<string, unknown>
+
+    if (typeof record.text === "string") {
+      combined += record.text
+      continue
+    }
+    if (
+      record.text &&
+      typeof record.text === "object" &&
+      "value" in record.text &&
+      typeof (record.text as { value?: unknown }).value === "string"
+    ) {
+      combined += (record.text as { value: string }).value
+    }
+  }
+
+  return combined.trim()
 }
 
 /**
@@ -31,11 +50,11 @@ export function latestAssistantContent(state: LoopState): string {
 }
 
 /**
- * Type guard that confirms a content part is a tool call.
+ * Type guard that narrows a tool call to function-call shape.
  *
- * @param part - Content part from an assistant message.
- * @returns `true` when the part is a ToolCall.
+ * @param call - Raw tool call from the assistant response.
+ * @returns `true` when the call is a function tool call.
  */
-export function isFunctionToolCall(part: AssistantMessage["content"][number]): part is ToolCall {
-  return part.type === "toolCall"
+export function isFunctionToolCall(call: OpenAI.Chat.ChatCompletionMessageToolCall): call is FunctionToolCall {
+  return call.type === "function"
 }

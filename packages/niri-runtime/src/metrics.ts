@@ -1,9 +1,9 @@
 import Database from "better-sqlite3"
 import fs from "fs"
 import path from "path"
-import type { AssistantMessage, Usage } from "@earendil-works/pi-ai"
-import { config } from "./config"
-import { HOME_DIR } from "./container/config"
+import type OpenAI from "openai"
+import { publishWorkerEvent } from "./awp/outbox"
+import { NIRI_HOME as HOME_DIR } from "./agent-config"
 import { getDb } from "./db"
 import type { Message } from "./types"
 import type { MemorySearchResult } from "./memory/index"
@@ -23,8 +23,8 @@ export interface PromptResponseMetric extends BaseMetricEvent {
   model: string
   toolChoice?: string
   messages: Message[]
-  response: AssistantMessage
-  usage?: Usage
+  response: OpenAI.Chat.ChatCompletionMessage
+  usage?: OpenAI.Completions.CompletionUsage
 }
 
 export interface MemoryMetric extends BaseMetricEvent {
@@ -43,7 +43,7 @@ export interface CompactionMetric extends BaseMetricEvent {
 
 export interface UsageMetric extends BaseMetricEvent {
   type: "usage"
-  usage: Usage
+  usage: OpenAI.Completions.CompletionUsage
 }
 
 export type MetricEvent = PromptMetric | PromptResponseMetric | MemoryMetric | CompactionMetric | UsageMetric
@@ -61,7 +61,7 @@ export type MetricListItem =
       lastUserMessage?: string
       responsePreview?: string
       toolCallCount?: number
-      usage?: Usage
+      usage?: OpenAI.Completions.CompletionUsage
     })
   | (BaseMetricListItem & {
       type: "summarization"
@@ -84,7 +84,7 @@ export type MetricListItem =
     })
   | (BaseMetricListItem & {
       type: "usage"
-      usage?: Usage
+      usage?: OpenAI.Completions.CompletionUsage
     })
 
 export interface BaseMetricListItem extends BaseMetricEvent {
@@ -164,7 +164,7 @@ const METRICS_PRUNE_INTERVAL_MS = 60 * 60_000
 let pruneTimer: ReturnType<typeof setInterval> | null = null
 
 function metricsRetentionDays(): number {
-  const parsed = config.metrics.retention_days
+  const parsed = Number(process.env.METRICS_RETENTION_DAYS ?? DEFAULT_METRICS_RETENTION_DAYS)
   if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_METRICS_RETENTION_DAYS
   return parsed
 }
@@ -193,7 +193,7 @@ function pruneOldMetrics(days = metricsRetentionDays()): number {
 
 export function initMetricsDb(): void {
   try {
-    fs.mkdirSync(HOME_DIR, { recursive: true })
+    fs.mkdirSync(HOME_DIR, { recursive: true, mode: 0o700 })
     fs.accessSync(HOME_DIR, fs.constants.W_OK)
   } catch (err: any) {
     let owner = "unknown"
@@ -222,6 +222,7 @@ export function initMetricsDb(): void {
   }
 
   db = new Database(DB_PATH)
+  fs.chmodSync(DB_PATH, 0o600)
   db.pragma("journal_mode = WAL")
   db.exec(`
     create table if not exists metrics (
@@ -257,6 +258,7 @@ export function recordMetric(event: MetricEventInput): number | null {
       if (events.length > MAX_IN_MEMORY) {
         events.shift()
       }
+      publishWorkerEvent("metric.recorded", fullEvent)
       return fullEvent.id
     } catch (err) {
       console.error("[metrics] failed to record to db:", err)
@@ -289,7 +291,7 @@ function clampLimit(limit: number | undefined): number {
   return Math.max(1, Math.min(MAX_METRIC_LIMIT, Math.floor(limit)))
 }
 
-function normalizeListTypes(type: MetricListType[] | undefined, _includeRaw: boolean = false): MetricListType[] {
+function normalizeListTypes(type: MetricListType[] | undefined): MetricListType[] {
   const allowed = new Set<MetricListType>(DEFAULT_LIST_TYPES)
   if (!type || type.length === 0) return [...DEFAULT_LIST_TYPES]
 
@@ -343,7 +345,7 @@ function parseMetricRow(row: MetricRow): MetricListItem | null {
   }
 
   if (row.type === "prompt_response") {
-    const response = payload.response as AssistantMessage | undefined
+    const response = payload.response as OpenAI.Chat.ChatCompletionMessage | undefined
     return {
       ...base,
       type: "response",
@@ -352,12 +354,9 @@ function parseMetricRow(row: MetricRow): MetricListItem | null {
       toolChoice: typeof payload.toolChoice === "string" ? payload.toolChoice : undefined,
       messageCount: Array.isArray(payload.messages) ? payload.messages.length : undefined,
       lastUserMessage: lastUserMessage(payload.messages),
-      responsePreview: preview(messageText(response?.content
-        .filter((c) => c.type === "text")
-        .map((c) => (c as import("@earendil-works/pi-ai").TextContent).text)
-        .join(""))),
-      toolCallCount: response?.content.filter((c) => c.type === "toolCall").length,
-      usage: payload.usage as Usage | undefined,
+      responsePreview: preview(messageText(response?.content)),
+      toolCallCount: Array.isArray(response?.tool_calls) ? response.tool_calls.length : undefined,
+      usage: payload.usage as OpenAI.Completions.CompletionUsage | undefined,
     }
   }
 
@@ -399,7 +398,7 @@ function parseMetricRow(row: MetricRow): MetricListItem | null {
     return {
       ...base,
       type: "usage",
-      usage: payload.usage as Usage | undefined,
+      usage: payload.usage as OpenAI.Completions.CompletionUsage | undefined,
     }
   }
 
@@ -553,7 +552,7 @@ function queryDiscordBucket(
 export function getMetrics(query: MetricsQuery = {}): MetricsPage {
   const limit = clampLimit(query.limit)
   const includeRaw = query.includeRaw === true
-  const types = normalizeListTypes(query.type, includeRaw)
+  const types = normalizeListTypes(query.type)
   const selectedBuckets = new Set(types.map((type) => METRIC_TYPE_TO_BUCKET[type]))
   const nextCursor: Partial<Record<MetricBucketName, string | number>> = {}
   const hasMore: Partial<Record<MetricBucketName, boolean>> = {}

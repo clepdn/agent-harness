@@ -28,7 +28,6 @@ function currentToolCatalog() {
 const state: RunnerStateInternal = {
   contextSize: 0,
   running: false,
-  systemPrompt: "",
   conversation: [],
   pendingInputs: [],
   tokenCount: 0,
@@ -303,9 +302,7 @@ export async function wake(event: UserMessage): Promise<void> {
     } as Message)
   } else {
     autoSeeDiscordEvent(event)
-    const restSnapshot = await loadRestSnapshot()
-    const priorRest = restSnapshot ? { restedAt: restSnapshot.restedAt, note: restSnapshot.note, forest: restSnapshot.summary } : null
-    state.conversation = await buildBootstrap(event, priorRest, {
+    state.conversation = await buildBootstrap(event, await loadRestSnapshot(), {
       clientCapabilities: clientTools.getCapabilities(),
       workspace: clientTools.getWorkspace(),
       discord: areDiscordToolsAvailable(),

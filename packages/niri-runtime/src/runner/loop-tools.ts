@@ -14,7 +14,7 @@ function skipRemainingToolCalls(
   calls.slice(startIndex).forEach((pendingCall) => {
     const skippedContent = `skipped: interrupted by incoming ${source} event.`
     const result = pushToolMessage(convId, state, pendingCall, skippedContent)
-    emit({ type: "tool", name: pendingCall.name, args: { _skipped: true }, result })
+    emit({ type: "tool", name: pendingCall.function.name, args: { _skipped: true }, result })
   })
 }
 
@@ -33,21 +33,22 @@ function maybeInterruptAfterTool(
   return true
 }
 
-/**
- * Processes all function tool calls requested in one assistant turn.
- *
- * @returns `true` when a `rest` tool call ended the loop, otherwise `false`.
- */
 export async function processToolCalls(
   convId: number,
   state: LoopState,
   hooks: LoopHooks,
   calls: readonly FunctionToolCall[],
 ): Promise<boolean> {
-  const handlers = buildToolHandlers()
+  const handlers = buildToolHandlers(hooks)
+  const allowedTools = new Set(hooks.getTools().map((tool) => tool.function.name))
 
   for (let i = 0; i < calls.length; i++) {
     const call = calls[i]!
+    if (!allowedTools.has(call.function.name)) {
+      const result = pushToolMessage(convId, state, call, `error: ${call.function.name} is not available for this agent right now`)
+      emit({ type: "tool", name: call.function.name, args: { _unavailable: true }, result })
+      continue
+    }
     const outcome = await executeToolCall(convId, state, hooks, handlers, call)
 
     if (outcome.shouldRest) return true
