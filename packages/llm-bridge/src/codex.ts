@@ -67,9 +67,9 @@ async function loadCodexAuth(authPath: string, fetchImpl: typeof fetch): Promise
   return { token, accountId: auth.tokens?.account_id || accountIdFromToken(token) }
 }
 
-function mapModel(model: unknown): string {
+function mapModel(model: unknown, defaultModel?: string): string {
   const value = typeof model === "string" ? model.trim().toLowerCase() : ""
-  if (!value || value === "codex" || value === "openai-codex" || value === "codex-latest") return DEFAULT_MODEL
+  if (!value || value === "codex" || value === "openai-codex" || value === "codex-latest") return defaultModel || DEFAULT_MODEL
   return String(model)
 }
 
@@ -190,10 +190,13 @@ export interface CodexHandlerResult {
  */
 export async function handleCodexCompletion(
   requestBody: any,
+  provider?: { model?: string; reasoning_effort?: string; auth_path?: string },
   options: BridgeOptions = {},
 ): Promise<CodexHandlerResult> {
-  const authPath = options.authPath || process.env.CODEX_AUTH_PATH?.trim() || path.join(os.homedir(), ".codex", "auth.json")
+  const authPath = options.authPath || provider?.auth_path || process.env.CODEX_AUTH_PATH?.trim() || path.join(os.homedir(), ".codex", "auth.json")
   const fetchImpl = options.fetchImpl || fetch
+  const defaultModel = provider?.model || process.env.CODEX_BRIDGE_MODEL?.trim() || DEFAULT_MODEL
+  const defaultReasoning = provider?.reasoning_effort || process.env.CODEX_BRIDGE_REASONING_EFFORT?.trim() || DEFAULT_REASONING_EFFORT
 
   const { token, accountId } = await loadCodexAuth(authPath, fetchImpl)
   const mapped = mapMessages(requestBody.messages || [])
@@ -213,14 +216,14 @@ export async function handleCodexCompletion(
     turn_started_at_unix_ms: Date.now(),
   })
   const upstreamBody: any = {
-    model: mapModel(requestBody.model),
+    model: mapModel(requestBody.model, defaultModel),
     input: mapped.input,
     instructions: mapped.instructions,
     tools: mapTools(requestBody.tools),
     tool_choice: requestBody.tool_choice,
     stream: true,
     store: false,
-    reasoning: { effort: requestBody.reasoning_effort || DEFAULT_REASONING_EFFORT },
+    reasoning: { effort: requestBody.reasoning_effort || defaultReasoning },
     text: { verbosity: requestBody.verbosity || "low" },
     parallel_tool_calls: requestBody.parallel_tool_calls ?? true,
     include: ["reasoning.encrypted_content"],
@@ -260,11 +263,11 @@ export async function handleCodexCompletion(
   const finishReason = result.toolCalls.length ? "tool_calls" : "stop"
   if (requestBody.stream) {
     const chunks: string[] = []
-    if (result.content) chunks.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: mapModel(requestBody.model), choices: [{ index: 0, delta: { role: "assistant", content: result.content }, finish_reason: null }] })}\n\n`)
-    if (result.toolCalls.length) chunks.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: mapModel(requestBody.model), choices: [{ index: 0, delta: { tool_calls: result.toolCalls.map((call, index) => ({ index, ...call })) }, finish_reason: null }] })}\n\n`)
-    chunks.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: mapModel(requestBody.model), choices: [{ index: 0, delta: {}, finish_reason: finishReason }] })}\n\n`)
+    if (result.content) chunks.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: mapModel(requestBody.model, defaultModel), choices: [{ index: 0, delta: { role: "assistant", content: result.content }, finish_reason: null }] })}\n\n`)
+    if (result.toolCalls.length) chunks.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: mapModel(requestBody.model, defaultModel), choices: [{ index: 0, delta: { tool_calls: result.toolCalls.map((call, index) => ({ index, ...call })) }, finish_reason: null }] })}\n\n`)
+    chunks.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: mapModel(requestBody.model, defaultModel), choices: [{ index: 0, delta: {}, finish_reason: finishReason }] })}\n\n`)
     if (requestBody.stream_options?.include_usage && usage) {
-      chunks.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: mapModel(requestBody.model), choices: [], usage })}\n\n`)
+      chunks.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: mapModel(requestBody.model, defaultModel), choices: [], usage })}\n\n`)
     }
     chunks.push("data: [DONE]\n\n")
     return { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" }, body: chunks.join("") }
@@ -273,7 +276,7 @@ export async function handleCodexCompletion(
     status: 200,
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
-      id, object: "chat.completion", created, model: mapModel(requestBody.model),
+      id, object: "chat.completion", created, model: mapModel(requestBody.model, defaultModel),
       choices: [{ index: 0, message: { role: "assistant", content: result.content || null, ...(result.toolCalls.length ? { tool_calls: result.toolCalls } : {}) }, finish_reason: finishReason }],
       usage,
     }),

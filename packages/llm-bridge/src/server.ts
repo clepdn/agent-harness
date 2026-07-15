@@ -163,10 +163,20 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
 
     // Route to custom backends based on model name
     if (isAntigravityModel(modelId)) {
+      // Set env vars from provider config (antigravity reads these at runtime)
+      const agProvider = config.providers.find((p) => p.name === "antigravity")
+      if (agProvider) {
+        if (agProvider.client_id) process.env.ANTIGRAVITY_CLIENT_ID = agProvider.client_id
+        if (agProvider.client_secret) process.env.ANTIGRAVITY_CLIENT_SECRET = agProvider.client_secret
+        if (agProvider.refresh_token) process.env.ANTIGRAVITY_REFRESH_TOKEN = agProvider.refresh_token
+        if (agProvider.project_id) process.env.ANTIGRAVITY_PROJECT_ID = agProvider.project_id
+        if (agProvider.binary_path) process.env.ANTIGRAVITY_BINARY_PATH = agProvider.binary_path
+      }
       return handleAntigravityCompletion(req, reply)
     }
     if (isCodexModel(modelId)) {
-      const result = await handleCodexCompletion(body)
+      const codexProvider = config.providers.find((p) => p.name === "codex")
+      const result = await handleCodexCompletion(body, codexProvider)
       return reply.code(result.status).headers(result.headers).send(result.body)
     }
 

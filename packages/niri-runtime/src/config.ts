@@ -425,6 +425,16 @@ export const config = {
           api_key: str(entry.api_key, "").trim(),
           base_url: str(entry.base_url, "").trim(),
           oauth_refresh_token: str(entry.oauth_refresh_token, "").trim(),
+          // codex
+          model: str(entry.model, "").trim(),
+          reasoning_effort: str(entry.reasoning_effort, "").trim(),
+          auth_path: str(entry.auth_path, "").trim(),
+          // antigravity
+          client_id: str(entry.client_id, "").trim(),
+          client_secret: str(entry.client_secret, "").trim(),
+          refresh_token: str(entry.refresh_token, "").trim(),
+          project_id: str(entry.project_id, "").trim(),
+          binary_path: str(entry.binary_path, "").trim(),
         }))
         .filter((p) => p.name.length > 0)
     })(),
