@@ -4,9 +4,13 @@
     inputs = {
 	nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 	flake-utils.url = "github:numtide/flake-utils";
+	pi = {
+	    url = "git+https://codeberg.org/cowie/tau";
+	    flake = false;
+	};
     };
 
-    outputs = { self, nixpkgs, flake-utils }:
+    outputs = { self, nixpkgs, flake-utils, pi }:
     let
 	systemOutputs = flake-utils.lib.eachDefaultSystem (system:
 	    let pkgs = nixpkgs.legacyPackages.${system};
@@ -18,6 +22,18 @@
 
 		    nodejs = pkgs.nodejs_22;
 		    npmDepsHash = "sha256-V6h7nU6mcSDkW3DbsOeiL/P0/9e36pLpux8c6kbXJNQ=";
+
+		    postPatch = ''
+			rm -rf pi
+			cp -r ${pi} pi
+			chmod -R u+w pi
+
+			# Patch pi-ai to use src instead of dist (tsx handles TS)
+			substituteInPlace pi/packages/ai/package.json \
+			    --replace-fail './dist/index.js' './src/index.ts' \
+			    --replace-fail './dist/index.d.ts' './src/index.ts' \
+			    --replace-fail './dist/' './src/'
+		    '';
 
 		    nativeBuildInputs = with pkgs; [
 			python3      # node-gyp (better-sqlite3, node-pty)
@@ -41,7 +57,7 @@
 			runHook preInstall
 
 			mkdir -p $out/lib/coral
-			cp -r packages apps node_modules package.json tsconfig.json tsconfig.base.json \
+			cp -r packages pi apps node_modules package.json tsconfig.json tsconfig.base.json \
 			    $out/lib/coral/
 
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/coral \
