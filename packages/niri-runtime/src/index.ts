@@ -10,6 +10,7 @@ import { setDiscordToolsAvailable } from "./discord/availability"
 import { ensureSoulFilePlacement } from "./bootstrap"
 import { startAntigravityBridge, stopAntigravityBridge } from "./antigravity-bridge"
 import { startCodexBridge, stopCodexBridge } from "./codex-bridge"
+import { startLlmBridge, stopLlmBridge } from "./llm-bridge"
 import { clientTools } from "./client"
 
 const PORT = Number.parseInt(process.env.PORT ?? "3000", 10)
@@ -42,6 +43,7 @@ async function main() {
   try {
     await startAntigravityBridge()
     await startCodexBridge()
+    await startLlmBridge()
   } catch (err) {
     console.error("[bridge] failed to start:", err)
   }
@@ -101,6 +103,7 @@ async function main() {
       await clientTools.stop()
       await stopAntigravityBridge()
       await stopCodexBridge()
+      await stopLlmBridge()
     }
     const cleanupTimeout = new Promise<void>((resolve) =>
       setTimeout(() => { console.log("[niri] cleanup timed out, exiting anyway"); resolve() }, 10_000)
