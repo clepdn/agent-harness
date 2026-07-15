@@ -273,6 +273,7 @@ const imageToolT = table(merged.image_tool)
 const discordT = table(merged.discord)
 const metricsT = table(merged.metrics)
 const toolsT = table(merged.tools)
+const llmBridgeT = table(merged.llm_bridge)
 
 // ── Subagent configs (array of tables) ────────────────────────────────────────
 
@@ -409,6 +410,16 @@ export const config = {
   tools: {
     enabled_tools: strArray(toolsT.enabled_tools),
     blacklisted_tools: strArray(toolsT.blacklisted_tools),
+  },
+  llm_bridge: {
+    enabled: bool(llmBridgeT.enabled, false),
+    host: str(llmBridgeT.host, "127.0.0.1").trim(),
+    port: int(llmBridgeT.port, 4040),
+    provider: str(llmBridgeT.provider, "").trim(),
+    model: str(llmBridgeT.model, "").trim(),
+    api_key: str(llmBridgeT.api_key, "").trim(),
+    base_url: str(llmBridgeT.base_url, "").trim(),
+    oauth_refresh_token: str(llmBridgeT.oauth_refresh_token, "").trim(),
   },
   subagents: subagentConfigs,
 }
