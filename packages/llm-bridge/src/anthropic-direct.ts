@@ -144,7 +144,6 @@ function oaiToAnthropicMessages(messages: OaiMessage[]): {
   // Prepend billing + Claude Code identity for OAuth
   const system: Anthropic.TextBlockParam[] = [
     { type: "text", text: `x-anthropic-billing-header: cc_version=${CLAUDE_CODE_VERSION}; cc_entrypoint=cli; cch=00000;` },
-    { type: "text", text: "You are Claude Code, Anthropic's official CLI for Claude." },
     ...systemBlocks,
   ]
 
