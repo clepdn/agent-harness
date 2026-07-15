@@ -2,8 +2,10 @@ import http from "node:http"
 import type { BridgeConfig, BridgeModelConfig } from "./config"
 import { oaiMessagesToContext, oaiSseChunk, oaiCompletionResponse } from "./translate"
 import { buildModel, streamCompletion } from "./pi-ai"
+import { streamAnthropicDirect, createAnthropicClient } from "./anthropic-direct"
 import { authenticate, isModelAllowed, type ApiKeyEntry } from "./auth"
 import { AnthropicTokenStore, parseOAuthCredentials } from "./anthropic-oauth"
+import type { AssistantMessageEvent } from "@earendil-works/pi-ai"
 
 // Token stores for models with OAuth — keyed by model id
 const tokenStores = new Map<string, AnthropicTokenStore>()
@@ -87,14 +89,29 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
         }
 
         const stream = request.stream ?? false
-        const context = oaiMessagesToContext(request.messages ?? [], request.tools)
-        const piModel = buildModel(modelConfig)
+        const isOAuth = Boolean(modelConfig.oauthRefreshToken)
         const resolvedApiKey = await getApiKey(modelConfig)
-        const options = {
-          apiKey: resolvedApiKey,
-          temperature: request.temperature,
-          maxTokens: request.max_tokens ?? modelConfig.maxTokens,
-        }
+
+        // For OAuth (Anthropic subscription), use direct SDK — bypasses pi-ai
+        // For standard API keys, use pi-ai's stream()
+        const eventIterator: AsyncIterable<AssistantMessageEvent> = isOAuth
+          ? streamAnthropicDirect(createAnthropicClient(resolvedApiKey, modelConfig.baseUrl), {
+              model: modelId,
+              messages: request.messages ?? [],
+              tools: request.tools,
+              max_tokens: request.max_tokens ?? modelConfig.maxTokens,
+              temperature: request.temperature,
+            })
+          : (() => {
+              const context = oaiMessagesToContext(request.messages ?? [], request.tools)
+              const piModel = buildModel(modelConfig)
+              const options = {
+                apiKey: resolvedApiKey,
+                temperature: request.temperature,
+                maxTokens: request.max_tokens ?? modelConfig.maxTokens,
+              }
+              return streamCompletion(piModel, context, options)
+            })()
 
         if (stream) {
           res.writeHead(200, {
@@ -107,7 +124,7 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
           res.write(oaiSseChunk(modelId, { content: "" }, null))
 
           try {
-            for await (const event of streamCompletion(piModel, context, options)) {
+            for await (const event of eventIterator) {
               if (event.type === "text_delta") {
                 res.write(oaiSseChunk(modelId, { content: event.delta }, null))
               } else if (event.type === "toolcall_end") {
@@ -141,7 +158,7 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
           let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
 
           try {
-            for await (const event of streamCompletion(piModel, context, options)) {
+            for await (const event of eventIterator) {
               if (event.type === "text_delta") {
                 text += event.delta
               } else if (event.type === "toolcall_end") {
