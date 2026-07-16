@@ -11,7 +11,7 @@ import type {
 
 interface OaiMessage {
   role: string
-  content?: string | null
+  content?: string | OaiContentPart[] | null
   tool_calls?: Array<{
     id: string
     type: string
@@ -19,6 +19,34 @@ interface OaiMessage {
   }>
   tool_call_id?: string
   name?: string
+}
+
+/** An OpenAI content part, e.g. `{ type: "text", text }` or `{ type: "image_url", ... }`. */
+export interface OaiContentPart {
+  type?: string
+  text?: string
+  image_url?: string | { url?: string; detail?: string }
+  [key: string]: unknown
+}
+
+/**
+ * Extract text from an OpenAI `content` field, which may be a plain string or
+ * an array of content parts (`[{ type: "text", text }]`). Clients like pi send
+ * the array form, so reading only strings drops the entire message — which
+ * makes the upstream reject the request with "at least one message is required".
+ */
+export function oaiContentToText(content: unknown): string {
+  if (typeof content === "string") return content
+  if (Array.isArray(content)) {
+    return content
+      .map((p) =>
+        p && typeof p === "object" && typeof (p as OaiContentPart).text === "string"
+          ? (p as OaiContentPart).text
+          : "",
+      )
+      .join("")
+  }
+  return ""
 }
 
 interface OaiTool {
@@ -41,14 +69,13 @@ export function oaiMessagesToContext(
     switch (msg.role) {
       case "system":
       case "developer":
-        systemPrompt = typeof msg.content === "string" ? msg.content : undefined
+        systemPrompt = oaiContentToText(msg.content) || undefined
         break
 
       case "user": {
-        const content = typeof msg.content === "string" ? msg.content : ""
         piMessages.push({
           role: "user",
-          content,
+          content: oaiContentToText(msg.content),
           timestamp: Date.now(),
         } as UserMessage)
         break
@@ -58,8 +85,9 @@ export function oaiMessagesToContext(
         const content: AssistantMessage["content"] = []
 
         // Text content
-        if (msg.content) {
-          content.push({ type: "text", text: msg.content })
+        const assistantText = oaiContentToText(msg.content)
+        if (assistantText) {
+          content.push({ type: "text", text: assistantText })
         }
 
         // Tool calls
@@ -94,7 +122,7 @@ export function oaiMessagesToContext(
       }
 
       case "tool": {
-        const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content)
+        const content = oaiContentToText(msg.content) || JSON.stringify(msg.content ?? "")
         piMessages.push({
           role: "toolResult",
           toolCallId: msg.tool_call_id ?? "",
