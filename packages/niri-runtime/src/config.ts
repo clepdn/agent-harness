@@ -274,6 +274,7 @@ const discordT = table(merged.discord)
 const metricsT = table(merged.metrics)
 const toolsT = table(merged.tools)
 const llmBridgeT = table(merged.llm_bridge)
+const computerUseT = table(merged.computer_use)
 
 // ── Subagent configs (array of tables) ────────────────────────────────────────
 
@@ -442,6 +443,10 @@ export const config = {
     })(),
   },
   subagents: subagentConfigs,
+  computer_use: {
+    enabled: bool(computerUseT.enabled, false),
+    display: str(computerUseT.display, "").trim(),
+  },
 }
 
 /**

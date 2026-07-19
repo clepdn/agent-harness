@@ -257,6 +257,39 @@ export const TOOLS: Tool[] = [
       required: ["name", "task"],
     }),
   },
+  {
+    name: "computer",
+    description:
+      "Computer use tool — interact with a graphical desktop via xdotool and ImageMagick. Takes a single action. Actions: screenshot (capture screen as image), click (left/right/middle at x,y), double_click, scroll (at x,y with scroll_y amount), type (text string), keypress (array of key names like CTRL+c), drag (path of [x,y] points), move (mouse to x,y), wait (duration ms). Requires [computer_use] enabled = true and a running X display.",
+    parameters: s({
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["screenshot", "click", "double_click", "scroll", "type", "keypress", "drag", "move", "wait"],
+          description: "The computer use action to perform.",
+        },
+        x: { type: "integer", description: "X coordinate (for click, double_click, scroll, move)." },
+        y: { type: "integer", description: "Y coordinate (for click, double_click, scroll, move)." },
+        button: { type: "string", enum: ["left", "right", "middle"], description: "Mouse button (default: left)." },
+        text: { type: "string", description: "Text to type (for type action)." },
+        keys: {
+          type: "array",
+          items: { type: "string" },
+          description: "Key combination to press (for keypress action). e.g. [\"CTRL\", \"c\"], [\"ENTER\"], [\"SHIFT\", \"ARROWLEFT\"].",
+        },
+        scroll_x: { type: "integer", description: "Horizontal scroll amount (for scroll action)." },
+        scroll_y: { type: "integer", description: "Vertical scroll amount (for scroll action). Positive = down, negative = up." },
+        path: {
+          type: "array",
+          items: { type: "array", items: { type: "integer" } },
+          description: "Drag path as array of [x, y] points (for drag action). First point is start, last is end.",
+        },
+        duration: { type: "integer", description: "Wait duration in milliseconds (for wait action, default 1000)." },
+      },
+      required: ["action"],
+    }),
+  },
 ]
 
 // ── Tool filtering ────────────────────────────────────────────────────────────
@@ -272,6 +305,7 @@ export const ALL_TOOL_NAMES = TOOLS.map((t) => t.name)
 export function isToolEnabled(name: string): boolean {
   const { enabled_tools, blacklisted_tools } = config.tools
   if (name === "image_tool" && !config.model.vision) return false
+  if (name === "computer" && !config.computer_use.enabled) return false
   const enabled = enabled_tools.length === 0 || enabled_tools.includes(name)
   return enabled && !blacklisted_tools.includes(name)
 }

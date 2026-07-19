@@ -25,6 +25,7 @@ import { pushToolMessage, recordToolResult, runStandardTool, toolError } from ".
 import { findSubagent, runSubagent } from "./subagent"
 import { startJob } from "./jobs"
 import { saveRestSnapshot } from "./util"
+import { executeAction } from "./computer-use"
 
 const DEFAULT_WAIT_THEN_CONTINUE_MS = 10_000
 
@@ -414,5 +415,58 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       }
       return {}
     },
+
+    computer: async ({ convId, state, call, args }) => {
+      if (!config.computer_use.enabled) {
+        recordToolResult(convId, state, call, "computer", { action: args.action }, "error: computer_use is not enabled. set [computer_use] enabled = true in config.")
+        return {}
+      }
+
+      console.log("[computer]", JSON.stringify(args))
+      let result: string
+
+      try {
+        const res = await executeAction({
+          action: String(args.action ?? ""),
+          x: args.x as number | undefined,
+          y: args.y as number | undefined,
+          button: args.button as string | undefined,
+          text: args.text as string | undefined,
+          keys: args.keys as string[] | undefined,
+          scroll_x: args.scroll_x as number | undefined,
+          scroll_y: args.scroll_y as number | undefined,
+          path: args.path as Array<[number, number]> | undefined,
+          duration: args.duration as number | undefined,
+        })
+
+        result = pushToolMessage(convId, state, call, res.output)
+
+        // If the action returned an image (screenshot), push it as a multimodal message
+        if (res.image) {
+          const commaIdx = res.image.dataUrl.indexOf(",")
+          const mimeMatch = res.image.dataUrl.match(/data:([^;]+)/)
+          const mimeType = mimeMatch?.[1] ?? res.image.mime
+          const data = commaIdx >= 0 ? res.image.dataUrl.slice(commaIdx + 1) : res.image.dataUrl
+
+          const imageMessage: PiUserMessage = {
+            role: "user",
+            content: [
+              { type: "text", text: `[screenshot] ${res.image.path}` },
+              { type: "image", data, mimeType },
+            ],
+            timestamp: Date.now(),
+          }
+          state.conversation.push(imageMessage)
+          logMessage(convId, "user", `[computer] screenshot\npath=${res.image.path}`)
+        }
+      } catch (err) {
+        result = recordToolResult(convId, state, call, "computer", { action: args.action }, toolError(err))
+        return {}
+      }
+
+      emit({ type: "tool", name: "computer", args: { action: args.action }, result })
+      return {}
+    },
   }
 }
+
