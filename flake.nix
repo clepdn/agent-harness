@@ -62,8 +62,7 @@
 
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/coral \
 			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
-			    --add-flags "$out/lib/coral/packages/niri-runtime/src/index.ts" \
-			    --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.xdotool pkgs.imagemagick ]}
+			    --add-flags "$out/lib/coral/packages/niri-runtime/src/index.ts"
 
 			runHook postInstall
 		    '';
