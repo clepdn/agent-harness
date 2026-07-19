@@ -334,6 +334,7 @@ export const config = {
     tool_choice: pickEnum(modelT.tool_choice, toolChoices, "required"),
     enable_thinking: bool(modelT.enable_thinking, true),
     thinking_effort: pickEnum(modelT.thinking_effort, thinkingEfforts, "low"),
+    vision: bool(modelT.vision, false),
   },
   fallback: {
     provider: str(fallbackT.provider, "").trim(),

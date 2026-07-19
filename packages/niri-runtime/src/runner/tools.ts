@@ -271,6 +271,7 @@ export const ALL_TOOL_NAMES = TOOLS.map((t) => t.name)
  */
 export function isToolEnabled(name: string): boolean {
   const { enabled_tools, blacklisted_tools } = config.tools
+  if (name === "image_tool" && !config.model.vision) return false
   const enabled = enabled_tools.length === 0 || enabled_tools.includes(name)
   return enabled && !blacklisted_tools.includes(name)
 }

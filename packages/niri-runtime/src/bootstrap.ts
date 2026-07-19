@@ -2,6 +2,7 @@ import fs from "fs/promises"
 import path from "path"
 import type { UserMessage, Message } from "./types"
 import { NIRI_HOME } from "./agent-config"
+import { config } from "./config"
 import type { ToolCapability, WorkspaceDescriptor } from "@mira/harness-protocol"
 
 const HOME_DIR = NIRI_HOME
@@ -60,7 +61,7 @@ function buildEnvironmentSection(options: BootstrapCapabilities = {}): string {
     capabilities.has("shell") ? "- `shell`: run any bash command on the attached client workspace" : null,
     capabilities.has("read_file") ? "- `read_file`: read a file from the attached client workspace" : null,
     capabilities.has("edit_file") ? "- `edit_file`: edit a file on the attached client workspace by replacing exact text" : null,
-    capabilities.has("image_tool") ? `- \`image_tool\`: attach an image from \`${workspace?.imageRoot ?? workspace?.root ?? "the attached client workspace"}\` for the next server-side vision turn` : null,
+    capabilities.has("image_tool") && config.model.vision ? `- \`image_tool\`: attach an image from \`${workspace?.imageRoot ?? workspace?.root ?? "the attached client workspace"}\` for the next server-side vision turn` : null,
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n")

@@ -407,7 +407,9 @@ export function buildDiscordBatchDigest(params?: {
     `[discord batch] ${formatBatchTimestamp(from)} -> ${formatBatchTimestamp(nowIso)}`,
     "channel messages are context, not direct requests. replying is optional; use judgment.",
     ...(hasImages
-      ? ["image attachments appear as [images: <discord cdn urls>]; download with shell, then inspect with image_tool if useful."]
+      ? config.model.vision
+        ? ["image attachments appear as [images: <discord cdn urls>]; download with shell, then inspect with image_tool if useful."]
+        : ["image attachments appear as [images: <discord cdn urls>]; download with shell if needed."]
       : []),
     "",
     "recent messages:",
