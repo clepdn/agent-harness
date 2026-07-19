@@ -10,6 +10,7 @@ import {
 import { config, setDiscordBotUserId } from "../config"
 import { handleDiscordIngress } from "./pipeline"
 import { subscribeRunnerPresence, type RunnerPresence } from "../runner/presence"
+import { startStatusUpdater, stopStatusUpdater } from "./status-updater"
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value.trim() : ""
@@ -166,6 +167,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
       `[discord gateway] connected as ${ready.user?.tag ?? ready.user?.id ?? "unknown"} (id=${ready.user?.id ?? "unknown"})`,
     )
     void setDiscordPresence(client, latestPresence)
+    startStatusUpdater(client)
   })
 
   unsubscribePresence = subscribeRunnerPresence((presence) => {
@@ -243,6 +245,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
   return {
     stop: async () => {
       unsubscribePresence?.()
+      stopStatusUpdater()
       await client.destroy()
       console.log("[discord gateway] disconnected")
     },

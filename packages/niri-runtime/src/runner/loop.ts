@@ -1,6 +1,7 @@
 import { config } from "../config"
 import { recordMetric } from "../metrics"
 import { emit } from "../stream"
+import { setContextSize } from "../discord/status-updater"
 import type { Message } from "../types"
 import {
   COMPACTION_MIN_CHARS,
@@ -178,6 +179,7 @@ async function applyProactiveCompaction(state: LoopState): Promise<boolean> {
   const beforeEstimate = state.contextSize
   state.conversation = messages
   state.contextSize = estimatePromptTokens(state.conversation)
+  setContextSize(state.contextSize)
 
   console.log(
     `[context] proactive: compacted ${compacted} tool result(s) (${beforeEstimate} -> ${state.contextSize} tokens)`,
