@@ -16,6 +16,7 @@ import {
   uploadDiscordFile,
 } from "../discord/state"
 import { listAliases, removeAlias, searchMemories, setAlias } from "../memory"
+import { setCustomStatus } from "../discord/status-updater"
 import { emit } from "../stream"
 import type { ToolHandler } from "./loop-shared"
 import { checkGitUpstream } from "./git-upstream-check"
@@ -357,6 +358,20 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         runArgKeys: ["channel_id", "note"] as const,
         run: async (channel_id, note) =>
           JSON.stringify(setDiscordChannelNote(channel_id as string, (note as string | undefined) ?? ""), null, 2),
+      }),
+
+    set_status: (ctx) =>
+      runStandardTool(ctx, {
+        name: "set_status",
+        logArgKeys: ["text"] as const,
+        runArgKeys: ["text"] as const,
+        run: async (text) => {
+          const customText = text ? String(text) : null
+          setCustomStatus(customText)
+          return customText
+            ? `Custom status set: "${customText}". Auto info will be appended.`
+            : "Custom status cleared. Showing auto info only."
+        },
       }),
 
     subagent: async ({ convId, state, call, args }) => {

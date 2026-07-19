@@ -25,8 +25,24 @@ let maxContextTokens: number | null = null
 
 let currentContextSize = 0
 
+let customStatusText: string | null = null
+
+let updateFn: (() => Promise<void>) | null = null
+
 export function setContextSize(tokens: number): void {
   currentContextSize = tokens
+}
+
+/**
+ * Set a custom status prefix. When set, the status format becomes
+ * "{custom} | {auto_info}" instead of just "{auto_info}".
+ * Pass null or empty string to clear.
+ * Triggers an immediate status update.
+ */
+export function setCustomStatus(text: string | null): void {
+  customStatusText = text && text.trim() ? text.trim() : null
+  console.log(`[status] custom status ${customStatusText ? `set: "${customStatusText}"` : "cleared"}`)
+  void updateFn?.()
 }
 
 async function fetchModelContextLength(apiKey: string, baseUrl: string, modelId: string): Promise<void> {
@@ -89,7 +105,9 @@ export function startStatusUpdater(client: Client): void {
       lastRequests = usage.usage.requests_in_window
     }
 
-    const status = `${formatContext()} [${lastRequests}/400]`
+    const status = customStatusText
+      ? `${customStatusText} | ${formatContext()} [${lastRequests}/400]`
+      : `${formatContext()} [${lastRequests}/400]`
 
     try {
       await client.user.setActivity({
@@ -101,6 +119,7 @@ export function startStatusUpdater(client: Client): void {
   }
 
   void update()
+  updateFn = update
   intervalHandle = setInterval(() => void update(), STATUS_INTERVAL_MS)
 }
 
@@ -109,4 +128,5 @@ export function stopStatusUpdater(): void {
     clearInterval(intervalHandle)
     intervalHandle = null
   }
+  updateFn = null
 }
