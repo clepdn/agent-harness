@@ -2,10 +2,8 @@
  * Discord status updater — periodically sets the bot's custom activity
  * to show context usage and Umans API request count.
  *
- * Format: "x% [y/400]"
- *   x = context tokens used (as % of model's context_length)
- *   y = Umans API requests in current window
- *   400 = Umans hard cap (not the soft limit of 200)
+ * Format (model info available):  "x% [y/400]"
+ * Format (model info unavailable): "205K [y/400]"
  */
 
 import type { Client } from "discord.js"
@@ -14,14 +12,8 @@ import { config } from "../config"
 const STATUS_INTERVAL_MS = 60_000
 
 interface UmansUsage {
-  usage: {
-    requests_in_window: number
-  }
-  limits: {
-    requests: {
-      hard_cap: number
-    }
-  }
+  usage: { requests_in_window: number }
+  limits: { requests: { hard_cap: number } }
 }
 
 interface UmansModel {
@@ -29,9 +21,8 @@ interface UmansModel {
   context_length?: number
 }
 
-let maxContextTokens = 400_000 // fallback, overwritten on first fetch
+let maxContextTokens: number | null = null
 
-/** Current context size — updated by the loop via setContextSize() */
 let currentContextSize = 0
 
 export function setContextSize(tokens: number): void {
@@ -65,6 +56,16 @@ async function fetchUmansUsage(apiKey: string): Promise<UmansUsage | null> {
   }
 }
 
+function formatContext(): string {
+  if (maxContextTokens) {
+    const pct = Math.round((currentContextSize / maxContextTokens) * 100)
+    return `${pct}%`
+  }
+  // Fallback: show raw token count (e.g. "205K")
+  const k = Math.round(currentContextSize / 1000)
+  return `${k}K`
+}
+
 let intervalHandle: ReturnType<typeof setInterval> | null = null
 let lastRequests = 0
 let modelInfoFetched = false
@@ -78,30 +79,25 @@ export function startStatusUpdater(client: Client): void {
     const apiKey = config.model.api_key
     if (!apiKey) return
 
-    // Fetch model context_length once on first run
     if (!modelInfoFetched && config.model.base_url && config.model.model) {
       await fetchModelContextLength(apiKey, config.model.base_url, config.model.model)
       modelInfoFetched = true
     }
 
-    // Fetch Umans usage
     const usage = await fetchUmansUsage(apiKey)
     if (usage) {
       lastRequests = usage.usage.requests_in_window
     }
 
-    const contextPct = Math.round((currentContextSize / maxContextTokens) * 100)
-    const status = `${contextPct}% [${lastRequests}/400]`
+    const status = `${formatContext()} [${lastRequests}/400]`
 
     try {
       await client.user.setActivity({
         name: status,
         state: status,
-        type: 4, // ActivityType.Custom
+        type: 4,
       })
-    } catch {
-      // Discord rate limits presence updates
-    }
+    } catch {}
   }
 
   void update()
