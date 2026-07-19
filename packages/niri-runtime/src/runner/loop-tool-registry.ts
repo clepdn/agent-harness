@@ -2,6 +2,8 @@ import type { UserMessage as PiUserMessage } from "../llm"
 import { config } from "../config"
 import { normalizeTimeoutMs } from "../container/config"
 import { editFile, readFile, readImageForModel, runCommand } from "../container/index"
+import { hashlineRead } from "../hashline/read"
+import { hashlineEdit } from "../hashline/edit"
 import { logMessage } from "../db"
 import {
   listDiscordBackread,
@@ -77,6 +79,22 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       }),
 
     read_file: async (ctx) => {
+      if (config.tools.hashline) {
+        const result = await runStandardTool(ctx, {
+          name: "read_file",
+          logArgKeys: ["path", "start_line", "end_line", "timeout_ms"] as const,
+          runArgKeys: ["path", "start_line", "end_line", "timeout_ms"] as const,
+          run: (path, start_line, end_line) => {
+            const r = hashlineRead(path as string, (start_line as number) || 1, end_line as number | undefined)
+            return Promise.resolve(`[${r.startLine}-${r.endLine} of ${r.totalLines}]\n${r.content}`)
+          },
+          emptyFallback: "(empty file)",
+        })
+        if (GIT_UPSTREAM_NAG) {
+          checkGitUpstream(ctx.args.path as string, ctx.convId, ctx.state)
+        }
+        return result
+      }
       const result = await runStandardTool(ctx, {
         name: "read_file",
         logArgKeys: ["path", "start_line", "end_line", "timeout_ms"] as const,
@@ -92,6 +110,23 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
     },
 
     edit_file: async (ctx) => {
+      if (config.tools.hashline && Array.isArray(ctx.args.edits)) {
+        const result = await runStandardTool(ctx, {
+          name: "edit_file",
+          logArgKeys: ["path", "timeout_ms"] as const,
+          runArgKeys: ["path", "edits", "timeout_ms"] as const,
+          run: async (path, edits) => {
+            const r = await hashlineEdit(path as string, edits as any[])
+            return r.success ? `${r.message}\n${r.preview ?? ""}` : `error: ${r.message}`
+          },
+          emitArgKeys: ["path"] as const,
+          previewChars: 0,
+        })
+        if (GIT_UPSTREAM_NAG) {
+          checkGitUpstream(ctx.args.path as string, ctx.convId, ctx.state)
+        }
+        return result
+      }
       const result = await runStandardTool(ctx, {
         name: "edit_file",
         logArgKeys: ["path", "timeout_ms"] as const,

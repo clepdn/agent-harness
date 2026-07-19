@@ -165,3 +165,6 @@ console.log(`[config] env=${config.agent.env} use_fallback=${USE_FALLBACK}`)
 console.log(`[config] thinking=${ENABLE_THINKING}`)
 if (IDLE_COMPACTION_TIMEOUT_MS > 0) console.log(`[config] idle_compaction=${IDLE_COMPACTION_TIMEOUT_MS / 60_000}min`)
 console.log(`[config] respect_cache=${RESPECT_CACHE} compaction_turn_age=${COMPACTION_TURN_AGE} compaction_min_chars=${COMPACTION_MIN_CHARS}`)
+
+// Hashline toggle
+export const HASHLINE_ENABLED = config.tools.hashline
