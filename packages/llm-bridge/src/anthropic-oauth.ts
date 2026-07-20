@@ -1,124 +1,131 @@
-// Anthropic subscription OAuth — extracted from pi-ai's source.
-// Manages token refresh for Claude Pro/Max subscription auth.
+// Anthropic subscription OAuth (Claude Pro/Max).
+//
+// Credentials live in an on-disk auth file using pi-ai's auth.json shape —
+// a map keyed by provider id, each value a type-tagged credential:
+//
+//   {
+//     "anthropic": {
+//       "type": "oauth",
+//       "refresh": "...",
+//       "access":  "...",
+//       "expires": 1712345678901
+//     }
+//   }
+//
+// This is the same format pi-ai (and the coding-agent's AuthStorage) persists,
+// so rotated refresh/access/expiry survive restarts and stay in sync with any
+// other tool sharing the file. Token refresh itself is delegated to pi-ai's
+// implementation — we do NOT re-derive the client id or token endpoint here.
+//
+// The file-backed store mirrors how the codex bridge treats ~/.codex/auth.json:
+// read → refresh-if-expired → atomic write-back (tmp + rename, mode 0600).
 
-const CLIENT_ID = atob("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl")
-const TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+import { readFileSync, writeFileSync, renameSync, existsSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
+import { refreshAnthropicToken } from "@earendil-works/pi-ai/oauth"
+import type { OAuthCredentials } from "@earendil-works/pi-ai"
 
-export interface OAuthCredentials {
-  refresh: string
-  access: string
-  expires: number // Unix timestamp in ms
+const DEFAULT_PROVIDER_ID = "anthropic"
+
+/** pi-ai's type-tagged OAuth credential — the shape stored per provider. */
+export interface OAuthCredential extends OAuthCredentials {
+  type: "oauth"
 }
 
-/** Check if an API key is an OAuth token (Claude subscription). */
-export function isOAuthToken(apiKey: string): boolean {
-  return apiKey.includes("sk-ant-oat")
+/** The on-disk auth.json shape: one type-tagged credential per provider id. */
+type AuthFile = Record<string, ({ type: string } & Record<string, unknown>) | undefined>
+
+/** pi bakes a 5-minute buffer into `expires`; treat as expired at/after it. */
+function isExpired(creds: OAuthCredentials): boolean {
+  return Date.now() >= (creds.expires ?? 0)
 }
 
-/** Check if credentials are expired or about to expire (5 min buffer). */
-export function isExpired(creds: OAuthCredentials): boolean {
-  return Date.now() >= creds.expires
+/** Default auth file location (shared with pi): ~/.pi/auth.json. */
+export function defaultAnthropicAuthPath(): string {
+  return process.env.ANTHROPIC_AUTH_PATH?.trim() || join(homedir(), ".pi", "auth.json")
 }
 
-/**
- * Refresh an Anthropic OAuth token using the refresh token.
- * Returns updated credentials with a new access token.
- */
-export async function refreshAnthropicToken(refreshToken: string): Promise<OAuthCredentials> {
-  const body = new URLSearchParams({
-    grant_type: "refresh_token",
-    client_id: CLIENT_ID,
-    refresh_token: refreshToken,
-  })
-
-  const resp = await fetch(TOKEN_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  })
-
-  if (!resp.ok) {
-    const text = await resp.text().catch(() => "")
-    throw new Error(`Anthropic token refresh failed (${resp.status}): ${text}`)
-  }
-
-  const data = await resp.json() as {
-    access_token: string
-    refresh_token: string
-    expires_in: number
-    scope?: string
-  }
-
-  return {
-    refresh: data.refresh_token,
-    access: data.access_token,
-    // 5 minute buffer before actual expiry
-    expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
-  }
+export interface TokenStore {
+  getAccessToken(): Promise<string>
+  hasCredentials(): boolean
 }
 
 /**
- * Token store — holds OAuth credentials in memory.
- * Automatically refreshes when the access token is expired.
+ * File-backed store. Reads pi's auth.json, refreshes on expiry, and writes the
+ * rotated credential back atomically so refresh/access/expiry rotate in place.
+ * Refreshes are serialized so concurrent requests can't double-refresh a
+ * just-rotated token.
  */
-export class AnthropicTokenStore {
-  private creds: OAuthCredentials | null = null
+export class FileTokenStore implements TokenStore {
+  private chain: Promise<unknown> = Promise.resolve()
 
-  constructor(credentials?: OAuthCredentials) {
-    if (credentials) this.creds = credentials
-  }
+  constructor(
+    private readonly authPath: string,
+    private readonly providerId: string = DEFAULT_PROVIDER_ID,
+  ) {}
 
-  /** Set initial credentials (e.g. from config). */
-  setCredentials(creds: OAuthCredentials): void {
-    this.creds = creds
-  }
-
-  /**
-   * Get a valid access token, refreshing if necessary.
-   * Returns the access token string suitable for use as an API key.
-   */
-  async getAccessToken(): Promise<string> {
-    if (!this.creds) {
-      throw new Error("[bridge] no Anthropic OAuth credentials configured")
+  private readCred(): OAuthCredential | null {
+    if (!existsSync(this.authPath)) return null
+    const file = JSON.parse(readFileSync(this.authPath, "utf-8")) as AuthFile
+    const entry = file?.[this.providerId]
+    if (entry && entry.type === "oauth" && typeof (entry as Record<string, unknown>).refresh === "string") {
+      return entry as unknown as OAuthCredential
     }
-
-    if (isExpired(this.creds)) {
-      console.log("[bridge] refreshing Anthropic OAuth token...")
-      this.creds = await refreshAnthropicToken(this.creds.refresh)
-      console.log("[bridge] token refreshed, expires at", new Date(this.creds.expires).toISOString())
-    }
-
-    return this.creds.access
+    return null
   }
 
-  /** Check if the store has credentials. */
-  hasCredentials(): boolean {
-    return this.creds !== null
-  }
-}
-
-/**
- * Parse OAuth credentials from a config value.
- * Accepts either:
- * - A refresh token string (will refresh on first use)
- * - A JSON object { refresh, access, expires }
- */
-export function parseOAuthCredentials(input: unknown): OAuthCredentials | null {
-  if (typeof input === "string") {
-    // Just a refresh token — access will be empty, will refresh on first use
-    return { refresh: input, access: "", expires: 0 }
-  }
-
-  if (typeof input === "object" && input !== null) {
-    const obj = input as Record<string, unknown>
-    if (typeof obj.refresh === "string") {
-      return {
-        refresh: obj.refresh,
-        access: typeof obj.access === "string" ? obj.access : "",
-        expires: typeof obj.expires === "number" ? obj.expires : 0,
+  private writeCred(cred: OAuthCredential): void {
+    let file: AuthFile = {}
+    if (existsSync(this.authPath)) {
+      try {
+        file = JSON.parse(readFileSync(this.authPath, "utf-8")) as AuthFile
+      } catch {
+        file = {}
       }
     }
+    file[this.providerId] = cred
+    const tmp = `${this.authPath}.${process.pid}.tmp`
+    writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 })
+    renameSync(tmp, this.authPath)
   }
 
-  return null
+  hasCredentials(): boolean {
+    try {
+      return this.readCred() !== null
+    } catch {
+      return false
+    }
+  }
+
+  getAccessToken(): Promise<string> {
+    const next = this.chain.then(async () => {
+      const cred = this.readCred()
+      if (!cred) {
+        throw new Error(`[bridge] no Anthropic OAuth credential for "${this.providerId}" in ${this.authPath}`)
+      }
+      if (!isExpired(cred)) return cred.access
+
+      console.log(`[bridge] refreshing Anthropic OAuth token (${this.providerId})...`)
+      const refreshed = await refreshAnthropicToken(cred.refresh)
+      const rotated: OAuthCredential = { ...refreshed, type: "oauth" }
+      this.writeCred(rotated)
+      console.log(`[bridge] token refreshed, expires ${new Date(rotated.expires).toISOString()}`)
+      return rotated.access
+    })
+    // Keep the chain alive even if this refresh rejects.
+    this.chain = next.catch(() => {})
+    return next
+  }
+}
+
+/** Build a file-backed store for an anthropic-oauth provider's `auth_path`. */
+export function createAnthropicStore(opts: {
+  authPath?: string
+  providerId?: string
+}): TokenStore {
+  if (!opts.authPath) {
+    throw new Error("[bridge] anthropic-oauth provider requires auth_path")
+  }
+  return new FileTokenStore(opts.authPath, opts.providerId)
 }

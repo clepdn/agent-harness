@@ -8,6 +8,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai"
+import { oaiContentToText, type OaiContentPart } from "./translate"
 
 const CLAUDE_CODE_VERSION = "2.1.92"
 
@@ -16,9 +17,15 @@ const OAUTH_BETAS = [
   "oauth-2025-04-20",
   "context-management-2025-06-27",
   "prompt-caching-scope-2026-01-05",
+  "extended-cache-ttl-2025-04-11",
   "advanced-tool-use-2025-11-20",
   "effort-2025-11-24",
 ]
+
+// ── Prompt caching ──────────────────────────────────────────────────────────
+// Anthropic's only cache type is "ephemeral"; the knob is TTL (5m default / 1h).
+type CacheControl = { type: "ephemeral"; ttl: "5m" | "1h" }
+const CACHE_1H: CacheControl = { type: "ephemeral", ttl: "1h" }
 
 // ── Device ID ─────────────────────────────────────────────────────────────────
 
@@ -61,20 +68,64 @@ export function createAnthropicClient(accessToken: string, baseUrl?: string): An
 
 interface OaiMessage {
   role: string
-  content?: string | null
+  content?: string | OaiContentPart[] | null
   tool_calls?: Array<{ id: string; function: { name: string; arguments: string } }>
   tool_call_id?: string
   name?: string
+}
+
+/** Convert an OpenAI image data/URL string to an Anthropic image block. */
+function imageUrlToBlock(url: string): Anthropic.ImageBlockParam | null {
+  const dataUrl = /^data:([^;,]+);base64,(.*)$/s.exec(url)
+  if (dataUrl) {
+    return {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: dataUrl[1] as Anthropic.Base64ImageSource["media_type"],
+        data: dataUrl[2]!,
+      },
+    }
+  }
+  if (/^https?:\/\//.test(url)) {
+    return { type: "image", source: { type: "url", url } }
+  }
+  return null
+}
+
+/**
+ * Convert OpenAI user content (a plain string or an array of content parts)
+ * into Anthropic content blocks, preserving text and images. Array-form
+ * content is what clients like pi send; dropping it yields an empty request.
+ */
+function oaiContentToBlocks(content: unknown): Anthropic.ContentBlockParam[] {
+  if (typeof content === "string") {
+    return content ? [{ type: "text", text: content }] : []
+  }
+  if (!Array.isArray(content)) return []
+  const blocks: Anthropic.ContentBlockParam[] = []
+  for (const part of content as OaiContentPart[]) {
+    if (!part || typeof part !== "object") continue
+    if (typeof part.text === "string") {
+      if (part.text) blocks.push({ type: "text", text: part.text })
+    } else if (part.type === "image_url" && part.image_url) {
+      const url = typeof part.image_url === "string" ? part.image_url : part.image_url.url
+      const block = url ? imageUrlToBlock(url) : null
+      if (block) blocks.push(block)
+    }
+  }
+  return blocks
 }
 
 interface AnthropicTool {
   name: string
   description: string
   input_schema: Record<string, unknown>
+  cache_control?: CacheControl
 }
 
 function oaiToAnthropicMessages(messages: OaiMessage[]): {
-  system: Anthropic.MessageCreateParams["system"]
+  system: Anthropic.TextBlockParam[]
   messages: Anthropic.MessageParam[]
 } {
   const systemBlocks: Anthropic.TextBlockParam[] = []
@@ -92,21 +143,20 @@ function oaiToAnthropicMessages(messages: OaiMessage[]): {
     switch (msg.role) {
       case "system":
       case "developer": {
-        if (msg.content) {
-          systemBlocks.push({ type: "text", text: msg.content })
-        }
+        const text = oaiContentToText(msg.content)
+        if (text) systemBlocks.push({ type: "text", text })
         break
       }
       case "user": {
-        const text = typeof msg.content === "string" ? msg.content : ""
-        if (text) userBlocks.push({ type: "text", text })
+        userBlocks.push(...oaiContentToBlocks(msg.content))
         break
       }
       case "assistant": {
         flushUserBlocks()
         const blocks: Anthropic.ContentBlockParam[] = []
-        if (msg.content) {
-          blocks.push({ type: "text", text: msg.content })
+        const text = oaiContentToText(msg.content)
+        if (text) {
+          blocks.push({ type: "text", text })
         }
         if (msg.tool_calls) {
           for (const tc of msg.tool_calls) {
@@ -132,7 +182,7 @@ function oaiToAnthropicMessages(messages: OaiMessage[]): {
           content: [{
             type: "tool_result",
             tool_use_id: msg.tool_call_id ?? "",
-            content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content),
+            content: oaiContentToText(msg.content) || JSON.stringify(msg.content ?? ""),
           }],
         })
         break
@@ -159,6 +209,43 @@ function oaiToolsToAnthropic(tools?: Array<{ function: { name: string; descripti
   }))
 }
 
+function markCache(block: unknown, cc: CacheControl): void {
+  if (block && typeof block === "object") {
+    ;(block as { cache_control?: CacheControl }).cache_control = cc
+  }
+}
+
+/**
+ * Inject Anthropic prompt-cache breakpoints, all at 1h TTL:
+ *   - the last tool + the last system block (the stable prefix), and
+ *   - the final block of the last two messages (rolling).
+ *
+ * A breakpoint caches everything before it, so the rolling message breakpoint
+ * covers the ENTIRE history — giving a 1h cache for the whole conversation, not
+ * just system/tools. At most 4 breakpoints; a uniform TTL trivially satisfies
+ * Anthropic's longer-before-shorter ordering rule. Turn N's rolling breakpoint
+ * becomes turn N+1's cache read, and reads refresh the TTL — so an active session
+ * stays cached and a gap of up to an hour still resumes from cache.
+ *
+ * These markers live here — NOT in oaiToAnthropicMessages — on purpose, so the
+ * translated content prefix stays byte-identical turn-to-turn (the thing prefix
+ * caching actually keys on). See translate.test.ts.
+ */
+function applyCacheBreakpoints(
+  system: Anthropic.TextBlockParam[],
+  messages: Anthropic.MessageParam[],
+  tools?: AnthropicTool[],
+): void {
+  if (tools && tools.length > 0) markCache(tools[tools.length - 1], CACHE_1H)
+  if (system.length > 0) markCache(system[system.length - 1], CACHE_1H)
+  for (const msg of messages.slice(-2)) {
+    const content = msg.content
+    if (Array.isArray(content) && content.length > 0) {
+      markCache(content[content.length - 1], CACHE_1H)
+    }
+  }
+}
+
 // ── Streaming ─────────────────────────────────────────────────────────────────
 
 export async function* streamAnthropicDirect(
@@ -173,6 +260,7 @@ export async function* streamAnthropicDirect(
 ): AsyncIterable<AssistantMessageEvent> {
   const { system, messages } = oaiToAnthropicMessages(request.messages)
   const tools = oaiToolsToAnthropic(request.tools)
+  applyCacheBreakpoints(system, messages, tools)
   const deviceId = getOrCreateDeviceId()
 
   const params = {
@@ -195,13 +283,19 @@ export async function* streamAnthropicDirect(
   let toolUseIndex = -1
   let inputTokens = 0
   let outputTokens = 0
+  let cacheReadTokens = 0
+  let cacheWriteTokens = 0
 
   for await (const event of stream) {
     switch (event.type) {
-      case "message_start":
-        inputTokens = event.message.usage?.input_tokens ?? 0
+      case "message_start": {
+        const u = event.message.usage
+        inputTokens = u?.input_tokens ?? 0
+        cacheReadTokens = u?.cache_read_input_tokens ?? 0
+        cacheWriteTokens = u?.cache_creation_input_tokens ?? 0
         yield { type: "start", partial: createPartial() }
         break
+      }
 
       case "content_block_start":
         if (event.content_block.type === "text") {
@@ -254,7 +348,7 @@ export async function* streamAnthropicDirect(
         yield {
           type: "done",
           reason: stopReason === "tool_use" ? "toolUse" : stopReason === "max_tokens" ? "length" : "stop",
-          message: createDoneMessage(inputTokens, outputTokens),
+          message: createDoneMessage(inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens),
         }
         break
     }
@@ -276,7 +370,12 @@ function createPartial(): any {
   }
 }
 
-function createDoneMessage(inputTokens: number, outputTokens: number): any {
+function createDoneMessage(
+  inputTokens: number,
+  outputTokens: number,
+  cacheReadTokens = 0,
+  cacheWriteTokens = 0,
+): any {
   return {
     role: "assistant",
     content: [],
@@ -286,12 +385,15 @@ function createDoneMessage(inputTokens: number, outputTokens: number): any {
     usage: {
       input: inputTokens,
       output: outputTokens,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: inputTokens + outputTokens,
+      cacheRead: cacheReadTokens,
+      cacheWrite: cacheWriteTokens,
+      totalTokens: inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens,
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
     },
     stopReason: "stop",
     timestamp: Date.now(),
   }
 }
+
+// Test-only exports.
+export const __anthropicDirectTest = { oaiToAnthropicMessages, oaiContentToBlocks, applyCacheBreakpoints }

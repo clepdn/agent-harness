@@ -44,7 +44,7 @@
   "license": "ISC",
   "dependencies": {
     "@niri/chat-client": "*",
-    "@earendil-works/pi-ai": "file:./pi/packages/ai",
+    "@earendil-works/pi-ai": "^0.80.7",
     "openai": "^6.33.0",
     "@anthropic-ai/sdk": "^0.100.1",
     "xxhashjs": "^0.2.2",

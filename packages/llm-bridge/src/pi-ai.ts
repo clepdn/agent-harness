@@ -1,4 +1,4 @@
-import { stream, getModels, getModel } from "@earendil-works/pi-ai"
+import { stream, getModels, getModel } from "@earendil-works/pi-ai/compat"
 import type { Context, Model, ProviderStreamOptions, AssistantMessageEvent, Api } from "@earendil-works/pi-ai"
 import type { BridgeModelConfig } from "./config"
 
@@ -16,7 +16,7 @@ type AnyModel = Model<Api>
 export function buildModel(config: BridgeModelConfig): AnyModel {
   // Determine the API to use
   // OAuth tokens (sk-ant-oat) require the anthropic-messages provider
-  const isAnthropicOAuth = Boolean(config.oauthRefreshToken)
+  const isAnthropicOAuth = Boolean(config.authPath)
 
   const api: Api = isAnthropicOAuth ? "anthropic-messages" : "openai-completions"
   const provider = isAnthropicOAuth ? "anthropic" : config.provider

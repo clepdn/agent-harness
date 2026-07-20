@@ -7,11 +7,11 @@ export interface CustomProvider {
   //通用 (umans, etc.)
   api_key?: string
   base_url?: string
-  oauth_refresh_token?: string
+  // Path to the provider's auth.json (codex + anthropic-oauth).
+  auth_path?: string
   // codex
   model?: string
   reasoning_effort?: string
-  auth_path?: string
   // antigravity
   client_id?: string
   client_secret?: string
@@ -29,7 +29,9 @@ export interface BridgeModelConfig {
   contextWindow?: number
   maxTokens?: number
   reasoning?: boolean
-  oauthRefreshToken?: string
+  // Path to a pi-ai auth.json file holding the Anthropic OAuth credential.
+  // When set, tokens are read/refreshed/rotated in-place on disk.
+  authPath?: string
 }
 
 export interface BridgeConfig {

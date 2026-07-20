@@ -4,14 +4,15 @@ import { oaiMessagesToContext, oaiSseChunk, oaiCompletionResponse } from "./tran
 import { buildModel, streamCompletion } from "./pi-ai"
 import { streamAnthropicDirect, createAnthropicClient } from "./anthropic-direct"
 import { authenticate, isModelAllowed, type ApiKeyEntry } from "./auth"
-import { AnthropicTokenStore, parseOAuthCredentials } from "./anthropic-oauth"
+import { createAnthropicStore, type TokenStore } from "./anthropic-oauth"
 import { handleAntigravityCompletion } from "./antigravity"
 import { handleCodexCompletion } from "./codex"
-import { getProviders, getModels } from "@earendil-works/pi-ai"
+import { getProviders, getModels } from "@earendil-works/pi-ai/compat"
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai"
 
-// Token stores for models with OAuth — keyed by model id
-const tokenStores = new Map<string, AnthropicTokenStore>()
+// OAuth token stores, keyed by auth file path so every model backed by the same
+// credential file shares one store (and one refresh).
+const tokenStores = new Map<string, TokenStore>()
 
 // ── Model routing ─────────────────────────────────────────────────────────────
 
@@ -26,15 +27,65 @@ function isCodexModel(modelId: string): boolean {
 }
 
 function getApiKey(modelConfig: BridgeModelConfig): Promise<string> {
-  if (modelConfig.oauthRefreshToken) {
-    let store = tokenStores.get(modelConfig.id)
+  if (modelConfig.authPath) {
+    let store = tokenStores.get(modelConfig.authPath)
     if (!store) {
-      store = new AnthropicTokenStore(parseOAuthCredentials(modelConfig.oauthRefreshToken) ?? undefined)
-      tokenStores.set(modelConfig.id, store)
+      store = createAnthropicStore({ authPath: modelConfig.authPath })
+      tokenStores.set(modelConfig.authPath, store)
     }
     return store.getAccessToken()
   }
   return Promise.resolve(modelConfig.apiKey)
+}
+
+// ── Anthropic model discovery ───────────────────────────────────────────────────
+
+const ANTHROPIC_VERSION = "2023-06-01"
+const ANTHROPIC_OAUTH_BETA = "oauth-2025-04-20"
+
+/**
+ * Fetch the list of available models from Anthropic's API using an OAuth access
+ * token. Paginates via `after_id`. No hardcoded model list — whatever the
+ * account can see is what gets registered.
+ */
+async function fetchAnthropicModels(
+  accessToken: string,
+  baseUrl?: string,
+): Promise<Array<{ id: string; name: string }>> {
+  const base = baseUrl && baseUrl.trim() ? baseUrl.replace(/\/+$/, "") : "https://api.anthropic.com"
+  const out: Array<{ id: string; name: string }> = []
+  let afterId: string | undefined
+
+  for (let page = 0; page < 20; page++) {
+    const url = new URL(`${base}/v1/models`)
+    url.searchParams.set("limit", "1000")
+    if (afterId) url.searchParams.set("after_id", afterId)
+
+    const resp = await fetch(url, {
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "anthropic-version": ANTHROPIC_VERSION,
+        "anthropic-beta": ANTHROPIC_OAUTH_BETA,
+        "user-agent": "niri-llm-bridge",
+      },
+    })
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => "")
+      throw new Error(`Anthropic /v1/models failed (${resp.status}): ${body.slice(0, 200)}`)
+    }
+
+    const data = (await resp.json()) as {
+      data?: Array<{ id: string; display_name?: string }>
+      has_more?: boolean
+      last_id?: string
+    }
+    for (const m of data.data ?? []) out.push({ id: m.id, name: m.display_name ?? m.id })
+
+    if (!data.has_more || !data.last_id) break
+    afterId = data.last_id
+  }
+
+  return out
 }
 
 /**
@@ -87,24 +138,30 @@ export async function discoverModels(config: BridgeConfig): Promise<void> {
       }
     }
 
-    // 3. Add OAuth providers (Anthropic subscription)
-    if (provider.oauth_refresh_token) {
-      // Claude models via OAuth — these use the direct Anthropic SDK
-      const claudeModels = [
-        "claude-sonnet-4-5-20250514",
-        "claude-opus-4-20250515",
-        "claude-haiku-4-20250414",
-      ]
-      for (const id of claudeModels) {
-        config.models[id] = {
-          id,
-          name: id,
-          provider: "anthropic-oauth",
-          apiKey: "",
-          oauthRefreshToken: provider.oauth_refresh_token,
+    // 3. Anthropic subscription (OAuth) — discover models from Anthropic's API
+    //    instead of hardcoding them. Credentials come from the provider's
+    //    auth.json (auth_path); tokens refresh + rotate in place.
+    if (provider.auth_path) {
+      try {
+        const store = createAnthropicStore({ authPath: provider.auth_path })
+        const token = await store.getAccessToken()
+        const models = await fetchAnthropicModels(token, provider.base_url)
+        for (const m of models) {
+          config.models[m.id] = {
+            id: m.id,
+            name: m.name,
+            provider: "anthropic-oauth",
+            apiKey: "",
+            authPath: provider.auth_path,
+          }
         }
+        console.log(`[bridge] discovered ${models.length} Anthropic OAuth models from ${provider.name}`)
+      } catch (err) {
+        console.error(
+          `[bridge] failed to discover Anthropic models from ${provider.name}:`,
+          err instanceof Error ? err.message : err,
+        )
       }
-      console.log(`[bridge] added ${claudeModels.length} Anthropic OAuth models from ${provider.name}`)
     }
   }
 
@@ -187,7 +244,7 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
     }
 
     const stream = body.stream ?? false
-    const isOAuth = Boolean(modelConfig.oauthRefreshToken)
+    const isOAuth = Boolean(modelConfig.authPath)
     const resolvedApiKey = await getApiKey(modelConfig)
 
     // For OAuth (Anthropic subscription), use direct SDK — bypasses pi-ai
@@ -253,7 +310,12 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
       let text = ""
       const toolCalls: Array<{ id: string; name: string; arguments: string }> = []
       let finishReason = "stop"
-      let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
+      let usage: {
+        prompt_tokens: number
+        completion_tokens: number
+        total_tokens: number
+        prompt_tokens_details?: { cached_tokens: number }
+      } = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
 
       try {
         for await (const event of eventIterator) {
@@ -268,10 +330,15 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
           } else if (event.type === "done") {
             finishReason = mapFinishReason(event.reason)
             const u = event.message.usage
+            const cacheRead = u.cacheRead ?? 0
+            const cacheWrite = u.cacheWrite ?? 0
+            const promptTokens = u.input + cacheRead + cacheWrite
             usage = {
-              prompt_tokens: u.input,
+              prompt_tokens: promptTokens,
               completion_tokens: u.output,
-              total_tokens: u.totalTokens,
+              total_tokens: promptTokens + u.output,
+              // Cached-token breakdown (Anthropic prompt caching); 0 for providers without it.
+              ...(cacheRead > 0 ? { prompt_tokens_details: { cached_tokens: cacheRead } } : {}),
             }
           }
         }

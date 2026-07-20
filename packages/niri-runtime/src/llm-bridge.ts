@@ -19,7 +19,13 @@
  *
  *   [[llm_bridge.providers]]
  *   name = "anthropic-oauth"
- *   oauth_refresh_token = "..."
+ *   # Path to a pi-ai auth.json holding the Claude Pro/Max OAuth credential.
+ *   # Tokens are read, refreshed on expiry, and rotated back in place — the
+ *   # same file/format pi uses.
+ *   auth_path = "~/.pi/agent/auth.json"
+ *
+ * Claude models are discovered dynamically from Anthropic's /v1/models — none
+ * are hardcoded.
  */
 
 import { spawn, type ChildProcess } from "node:child_process"

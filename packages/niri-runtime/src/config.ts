@@ -464,11 +464,11 @@ export const config = {
           name: str(entry.name, "").trim(),
           api_key: str(entry.api_key, "").trim(),
           base_url: str(entry.base_url, "").trim(),
-          oauth_refresh_token: str(entry.oauth_refresh_token, "").trim(),
+          // codex + anthropic-oauth
+          auth_path: str(entry.auth_path, "").trim(),
           // codex
           model: str(entry.model, "").trim(),
           reasoning_effort: str(entry.reasoning_effort, "").trim(),
-          auth_path: str(entry.auth_path, "").trim(),
           // antigravity
           client_id: str(entry.client_id, "").trim(),
           client_secret: str(entry.client_secret, "").trim(),
