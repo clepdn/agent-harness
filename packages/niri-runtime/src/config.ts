@@ -227,12 +227,17 @@ function resolvePreset(section: TomlValue | undefined, presets: TomlTable): Toml
   delete resolved.preset
 
   // If bridge = true on the preset, route through the llm_bridge_url
-  // as a standard OpenAI-compatible endpoint.
+  // as a standard OpenAI-compatible endpoint, using llm_bridge_api_key
+  // for authentication (unless the preset specifies its own api_key).
   if (resolved.bridge === true) {
     const bridgeUrl = str(merged.llm_bridge_url, "").trim()
     if (bridgeUrl) {
       resolved.provider = "openai"
       resolved.base_url = bridgeUrl
+    }
+    const bridgeKey = str(merged.llm_bridge_api_key, "").trim()
+    if (bridgeKey && !str(resolved.api_key, "").trim()) {
+      resolved.api_key = bridgeKey
     }
   }
   delete resolved.bridge
@@ -340,6 +345,7 @@ export type ThinkingEffort = (typeof thinkingEfforts)[number]
 
 export const config = {
   llm_bridge_url: str(merged.llm_bridge_url, "").trim(),
+  llm_bridge_api_key: str(merged.llm_bridge_api_key, "").trim(),
   server: {
     port: int(serverT.port, 3000),
   },
