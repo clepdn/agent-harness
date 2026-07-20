@@ -4,18 +4,27 @@ node_modules/
 dist/
 apps/*/dist/
 
-# environment
+# private agent definitions
 .env
+agents/*.yaml
+agents/*.yml
+!agents/*.example.yaml
+!agents/*.example.yml
 secrets.toml.env
 config.toml
 
 # runtime state
 session.json
+primary-failover.json
+rest-snapshot.json
+.niri-client/
+/data/
+niri.db
 
 # agent home — ignore everything except the example file
 home/*
 !home/soul.example.md
 
-.codex
-
+.codex-tmp-baal-sync
+.codex-tmp*
 result

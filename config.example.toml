@@ -38,6 +38,26 @@ dimensions = 3072
 referer = ""
 title = ""
 
+# ── LLM bridge (our own OpenRouter) ──────────────────────────────────────────
+# Optional unified inference proxy. Accepts OpenAI-format requests and routes to
+# the best provider (pi-ai registry + custom providers below). Claude models are
+# discovered dynamically from Anthropic's /v1/models — nothing is hardcoded.
+# [llm_bridge]
+# enabled = true
+# host = "127.0.0.1"
+# port = 4040
+#
+# [[llm_bridge.providers]]
+# name = "umans"
+# api_key = "sk-..."                 # or deep-merged from secrets.toml.env
+# base_url = "https://api.code.umans.ai/v1"
+#
+# [[llm_bridge.providers]]
+# name = "anthropic-oauth"
+# # pi-ai auth.json: { "anthropic": { "type": "oauth", "refresh", "access", "expires" } }
+# # Tokens refresh + rotate back in place, just like codex's ~/.codex/auth.json.
+# auth_path = "~/.pi/auth.json"
+
 [server]
 port = 3000
 

@@ -1,0 +1,215 @@
+import assert from "node:assert/strict"
+import test from "node:test"
+import { __loopTest } from "./loop"
+import type { Message } from "../types"
+import type { LoopState } from "./types"
+import { makeUserMessage, makeAssistantMessage, makeToolResultMessage } from "./test-helpers"
+
+const testClientTools = {
+  getCapabilities: () => [],
+  getWorkspace: () => null,
+  execute: async () => {
+    throw new Error("unexpected client tool execution")
+  },
+}
+
+function makeState(): LoopState {
+  return {
+    systemPrompt: "",
+    conversation: [],
+    pendingInputs: [],
+    tokenCount: 0,
+    contextSize: 0,
+    toolInFlight: false,
+    memoryRecallCooldowns: {},
+    memoryRecallTurn: 0,
+    memoryRecallPending: false,
+    shutdownRequested: false,
+    turnInFlight: false,
+  }
+}
+
+test("applyDiscordSendNudge appends a follow-up user nudge for unsent Discord replies", () => {
+  const state = makeState()
+  const turnMessages: Message[] = [
+    makeUserMessage("[user/discord] [discord/dm] hey are you there"),
+    makeAssistantMessage("yeah, i'm here"),
+  ]
+
+  const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
+
+  assert.equal(nudged, true)
+  assert.equal(state.conversation.length, 1)
+  assert.match(String(state.conversation[0]?.content), /did not call discord_send/i)
+})
+
+test("applyDiscordSendNudge fires for [discord batch] envelopes (space, not slash)", () => {
+  const state = makeState()
+  const turnMessages: Message[] = [
+    makeUserMessage("[user/discord] [discord batch] 2026-05-01T03:10:50.162Z -> 2026-05-01T03:11:22.198Z\n@meowskullz: hi\n@meowskullz: u there"),
+    makeAssistantMessage("yeah hi"),
+  ]
+
+  const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
+
+  assert.equal(nudged, true)
+  assert.equal(state.conversation.length, 1)
+  assert.match(String(state.conversation[0]?.content), /did not call discord_send/i)
+})
+
+test("applyDiscordSendNudge fires after a harness restart when the discord event is pre-turn context", () => {
+  const state = makeState()
+  state.conversation.push(
+    makeUserMessage("[harness restarted — discord @ 2026-05-01T04:30:00.000Z]\n\n[discord/dm] hi starfish"),
+    makeAssistantMessage("i keep getting bounced by harness restarts sorry ^^ still here though! what's up?"),
+  )
+
+  const turnMessages: Message[] = [state.conversation[1]!]
+
+  const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
+
+  assert.equal(nudged, true)
+  assert.equal(state.conversation.length, 3)
+  assert.match(String(state.conversation[2]?.content), /did not call discord_send/i)
+})
+
+test("applyDiscordSendNudge does not fire when discord_send was already called", () => {
+  const state = makeState()
+  const turnMessages: Message[] = [
+    makeUserMessage("[user/discord] [discord/channel] can you reply"),
+    {
+      role: "assistant",
+      content: "sending now",
+      tool_calls: [
+        {
+          id: "call_123",
+          type: "function",
+          function: {
+            name: "discord_send",
+            arguments: "{\"channel_id\":\"1\",\"content\":\"sending now\"}",
+          },
+        },
+      ],
+    } as unknown as Message,
+  ]
+
+  const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
+
+  assert.equal(nudged, false)
+  assert.equal(state.conversation.length, 0)
+})
+
+test("applyDiscordSendNudge keeps a wake DM active across a preliminary tool step", () => {
+  const state = makeState()
+  state.conversation.push(
+    makeUserMessage("[wake] 7/14/2026, 3:22:59 AM — triggered by discord\n\n[discord/dm] @meowskullz\n\nboop"),
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "call_memory",
+          type: "function",
+          function: { name: "memory_read", arguments: '{"path":"wake.md"}' },
+        },
+      ],
+    } as unknown as Message,
+    makeToolResultMessage("call_memory", "test", "wake notes"),
+    makeAssistantMessage("hey you ^.^"),
+  )
+
+  const nudged = __loopTest.applyDiscordSendNudge(state, [state.conversation[3]!])
+
+  assert.equal(nudged, true)
+  assert.match(String(state.conversation[4]?.content), /did not call discord_send/i)
+})
+
+test("applyDiscordSendNudge sees discord_send from an earlier tool step in the active user turn", () => {
+  const state = makeState()
+  state.conversation.push(
+    makeUserMessage("[wake] 7/14/2026, 3:22:59 AM — triggered by discord\n\n[discord/dm] @meowskullz\n\nboop"),
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: [
+        {
+          id: "call_send",
+          type: "function",
+          function: { name: "discord_send", arguments: '{"source_item_id":"1","content":"boop"}' },
+        },
+      ],
+    } as unknown as Message,
+    makeToolResultMessage("call_send", "test", "sent!"),
+    makeAssistantMessage("okay, delivered"),
+  )
+
+  const nudged = __loopTest.applyDiscordSendNudge(state, [state.conversation[3]!])
+
+  assert.equal(nudged, false)
+  assert.equal(state.conversation.length, 4)
+})
+
+test("applyLoopGuardNudge appends an in-band user nudge and saves", async () => {
+  const state = makeState()
+  let saved = false
+
+  await __loopTest.applyLoopGuardNudge(
+    state,
+    {
+      clientTools: testClientTools,
+      getTools: () => [],
+      waitForEvent: async () => {
+        throw new Error("unexpected wait")
+      },
+      waitForEventWithTimeout: async () => null,
+      injectIncomingEvent: () => {},
+      flushDeferredEvents: () => {},
+      clearSession: async () => {},
+      saveSession: async () => {
+        saved = true
+      },
+      saveShutdownSnapshot: async () => {},
+      shouldShutdown: () => false,
+      resolveShutdown: () => {},
+    },
+    "loop guard tripped after 120 turns",
+  )
+
+  assert.equal(saved, true)
+  assert.equal(state.conversation.length, 1)
+  assert.equal(state.conversation[0]?.role, "user")
+  assert.match(String(state.conversation[0]?.content), /loop guard tripped after 120 turns/i)
+})
+
+test("waitForNextEvent waits for and injects the next external event", async () => {
+  const calls: string[] = []
+  const event = {
+    source: "chat" as const,
+    triggeredAt: "2026-05-01T04:40:00.000Z",
+    content: "still here",
+    raw: {},
+  }
+
+  await __loopTest.waitForNextEvent(42, {
+    clientTools: testClientTools,
+    getTools: () => [],
+    waitForEvent: async () => {
+      calls.push("wait")
+      return event
+    },
+    waitForEventWithTimeout: async () => null,
+    injectIncomingEvent: (_convId, incoming) => {
+      calls.push(`inject:${incoming.content}`)
+      assert.equal(_convId, 42)
+      assert.equal(incoming, event)
+    },
+    flushDeferredEvents: () => {},
+    clearSession: async () => {},
+    saveSession: async () => {},
+    saveShutdownSnapshot: async () => {},
+    shouldShutdown: () => false,
+    resolveShutdown: () => {},
+  })
+
+  assert.deepEqual(calls, ["wait", "inject:still here"])
+})

@@ -1,0 +1,17 @@
+{
+  "name": "@niri/llm-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "^0.80.7",
+    "fastify": "^5.0.0"
+  }
+}
