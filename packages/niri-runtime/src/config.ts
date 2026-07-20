@@ -225,6 +225,18 @@ function resolvePreset(section: TomlValue | undefined, presets: TomlTable): Toml
   }
   const resolved = deepMerge(preset, t)
   delete resolved.preset
+
+  // If bridge = true on the preset, route through the llm_bridge_url
+  // as a standard OpenAI-compatible endpoint.
+  if (resolved.bridge === true) {
+    const bridgeUrl = str(merged.llm_bridge_url, "").trim()
+    if (bridgeUrl) {
+      resolved.provider = "openai"
+      resolved.base_url = bridgeUrl
+    }
+  }
+  delete resolved.bridge
+
   return resolved
 }
 
@@ -327,6 +339,7 @@ export type ToolChoice = (typeof toolChoices)[number]
 export type ThinkingEffort = (typeof thinkingEfforts)[number]
 
 export const config = {
+  llm_bridge_url: str(merged.llm_bridge_url, "").trim(),
   server: {
     port: int(serverT.port, 3000),
   },
