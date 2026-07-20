@@ -1,7 +1,7 @@
 import { config } from "../config"
 import { recordMetric } from "../metrics"
 import { emit } from "../stream"
-import { setContextSize } from "../discord/status-updater"
+import { setContextSize, setWorking } from "../discord/status-updater"
 import type { Message } from "../types"
 import {
   COMPACTION_MIN_CHARS,
@@ -264,6 +264,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     await applyLLMCompaction(state, "pre-turn")
 
     const turnStart = state.conversation.length
+    setWorking(true)
     const outcome = await processAssistantTurn(convId, state, hooks)
     turnCount += 1
 
@@ -290,9 +291,13 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       consecutiveIdenticalToolTurns = 1
     }
 
-    if (outcome === CycleOutcome.Rest) return "rest"
+    if (outcome === CycleOutcome.Rest) {
+      setWorking(false)
+      return "rest"
+    }
     if (outcome === CycleOutcome.NoTools) {
       if (discordSendNudged) continue
+      setWorking(false)
       await waitForNextEvent(convId, hooks)
       continue
     }

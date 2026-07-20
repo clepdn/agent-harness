@@ -27,6 +27,8 @@ let currentContextSize = 0
 
 let customStatusText: string | null = null
 
+let working = false
+
 let updateFn: (() => Promise<void>) | null = null
 
 export function setContextSize(tokens: number): void {
@@ -42,6 +44,17 @@ export function setContextSize(tokens: number): void {
 export function setCustomStatus(text: string | null): void {
   customStatusText = text && text.trim() ? text.trim() : null
   console.log(`[status] custom status ${customStatusText ? `set: "${customStatusText}"` : "cleared"}`)
+  void updateFn?.()
+}
+
+/**
+ * Set the "working" flag. When true, the status shows "working" as part
+ * of the auto-generated info (e.g. "working 5% [10/400]").
+ * Triggers an immediate status update so the change is visible right away.
+ */
+export function setWorking(active: boolean): void {
+  if (working === active) return
+  working = active
   void updateFn?.()
 }
 
@@ -105,9 +118,11 @@ export function startStatusUpdater(client: Client): void {
       lastRequests = usage.usage.requests_in_window
     }
 
+    const autoInfo = `${working ? "working " : ""}${formatContext()} [${lastRequests}/400]`
+
     const status = customStatusText
-      ? `${customStatusText} | ${formatContext()} [${lastRequests}/400]`
-      : `${formatContext()} [${lastRequests}/400]`
+      ? `${customStatusText} | ${autoInfo}`
+      : autoInfo
 
     try {
       await client.user.setActivity({
