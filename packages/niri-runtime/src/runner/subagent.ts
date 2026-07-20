@@ -15,7 +15,8 @@ import { executeToolCall } from "./loop-tool-runtime"
 import { buildToolHandlers } from "./loop-tool-registry"
 import { assistantContentText, isFunctionToolCall } from "./loop-content"
 import { getSubagentTools } from "./tools"
-import { buildModel, primaryModel, fallbackModel, USE_FALLBACK, PRIMARY_API_KEY, FALLBACK_API_KEY, MODEL_PROVIDER, MODEL_BASE_URL, ENABLE_THINKING, THINKING_EFFORT, PRIMARY_TOOL_CHOICE, FALLBACK_TOOL_CHOICE } from "./config"
+import { buildModel, MODEL_PROVIDER, MODEL_BASE_URL } from "./config"
+import { modelState } from "./model-state"
 import type { LoopHooks, LoopState } from "./types"
 import type { FunctionToolCall, ToolHandler } from "./loop-shared"
 
@@ -38,22 +39,22 @@ const SUBAGENT_HOOKS: LoopHooks = {
 
 /** Resolve the model for a subagent, falling back to the primary/fallback. */
 function resolveSubagentModel(subagent: SubagentConfig): { model: Model; apiKey: string | undefined; toolChoice: string } {
-  if (USE_FALLBACK) {
-    return { model: fallbackModel, apiKey: FALLBACK_API_KEY, toolChoice: FALLBACK_TOOL_CHOICE }
+  if (modelState.useFallback) {
+    return { model: modelState.fallbackModel, apiKey: modelState.fallbackApiKey, toolChoice: modelState.fallbackToolChoice }
   }
 
   if (subagent.model) {
     const built = buildModel(MODEL_PROVIDER, subagent.model, MODEL_BASE_URL || undefined)
     if (built) {
-      return { model: built, apiKey: PRIMARY_API_KEY, toolChoice: PRIMARY_TOOL_CHOICE }
+      return { model: built, apiKey: modelState.primaryApiKey, toolChoice: modelState.primaryToolChoice }
     }
   }
 
-  if (primaryModel) {
-    return { model: primaryModel, apiKey: PRIMARY_API_KEY, toolChoice: PRIMARY_TOOL_CHOICE }
+  if (modelState.primaryModel) {
+    return { model: modelState.primaryModel, apiKey: modelState.primaryApiKey, toolChoice: modelState.primaryToolChoice }
   }
 
-  return { model: fallbackModel, apiKey: FALLBACK_API_KEY, toolChoice: FALLBACK_TOOL_CHOICE }
+  return { model: modelState.fallbackModel, apiKey: modelState.fallbackApiKey, toolChoice: modelState.fallbackToolChoice }
 }
 
 /** Find a subagent config by name. Returns undefined if not found. */
@@ -101,6 +102,8 @@ export async function runSubagent(
     memoryRecallPending: false,
     shutdownRequested: false,
     turnInFlight: false,
+    restRequested: false,
+    restReason: "",
   }
 
   const allHandlers = buildToolHandlers()
@@ -128,11 +131,11 @@ export async function runSubagent(
       tools,
     }
 
-    const resolvedToolChoice = ENABLE_THINKING && toolChoice === "required" ? "auto" : toolChoice
+    const resolvedToolChoice = modelState.enableThinking && toolChoice === "required" ? "auto" : toolChoice
     const options: OpenAICompletionsOptions = {
       ...(apiKey ? { apiKey } : {}),
       toolChoice: resolvedToolChoice as "required" | "auto" | "none",
-      ...(ENABLE_THINKING ? { reasoningEffort: THINKING_EFFORT } : {}),
+      ...(modelState.enableThinking ? { reasoningEffort: modelState.thinkingEffort } : {}),
     }
 
     // Stream the completion

@@ -8,37 +8,21 @@ import { recordMetric } from "../metrics"
 import { recordLlmRequest } from "../prometheus"
 import { emit } from "../stream"
 import type { LoopState } from "./types"
+import { modelState } from "./model-state"
 import {
-  API_BASE,
-  ENABLE_THINKING,
-  FALLBACK_API_KEY,
-  FALLBACK_BASE,
-  FALLBACK_MODEL,
-  FALLBACK_TOOL_CHOICE,
-  MODEL,
-  PRIMARY_API_KEY,
-  PRIMARY_TOOL_CHOICE,
-  RESPECT_CACHE,
-  SUMMARY_API_KEY,
-  SUMMARY_MODEL,
-  THINKING_EFFORT,
-  USE_FALLBACK,
   buildContext,
   errorSummary,
   estimatePromptTokens,
   fallbackContextWindow,
-  fallbackModel,
   findSummaryMessageIndex,
   isContentFilterError,
   isImageParseError,
   isPromptTooLargeError,
   loadAgentSummaryContext,
-  primaryModel,
   retryDelayMs,
   sanitizeMessages,
   scrubImagesFromConversation,
   shouldFallback,
-  summaryModel,
   summarizeConversationViaLLM,
 } from "./util"
 import type { CompletionTurnResult } from "./loop-shared"
@@ -49,11 +33,11 @@ import type { Model } from "../llm"
  * When respect_cache is true, returns null — no summaries are produced.
  */
 export function configuredSummaryProvider(): { model: Model | null; apiKey: string | undefined } {
-  if (RESPECT_CACHE) return { model: null, apiKey: undefined }
-  if (summaryModel && SUMMARY_MODEL) return { model: summaryModel, apiKey: SUMMARY_API_KEY }
+  if (modelState.respectCache) return { model: null, apiKey: undefined }
+  if (modelState.summaryModel) return { model: modelState.summaryModel, apiKey: modelState.summaryApiKey }
   return {
-    model: USE_FALLBACK ? fallbackModel : primaryModel,
-    apiKey: USE_FALLBACK ? FALLBACK_API_KEY : PRIMARY_API_KEY,
+    model: modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel,
+    apiKey: modelState.useFallback ? modelState.fallbackApiKey : modelState.primaryApiKey,
   }
 }
 
@@ -151,11 +135,11 @@ async function createStreamedCompletion(
   const startedAt = Date.now()
   const context = buildContext(state)
 
-  const resolvedToolChoice = ENABLE_THINKING && toolChoice === "required" ? "auto" : toolChoice
+  const resolvedToolChoice = modelState.enableThinking && toolChoice === "required" ? "auto" : toolChoice
   const options: OpenAICompletionsOptions = {
     ...(apiKey ? { apiKey } : {}),
     toolChoice: resolvedToolChoice,
-    ...(ENABLE_THINKING ? { reasoningEffort: THINKING_EFFORT } : {}),
+    ...(modelState.enableThinking ? { reasoningEffort: modelState.thinkingEffort } : {}),
   }
 
   const promptMetricId = recordMetric({ type: "prompt", messages: state.conversation as import("../types").Message[] })
@@ -173,9 +157,9 @@ async function createStreamedCompletion(
     } else if (event.type === "thinking_start") {
       bufferedThinking = ""
     } else if (event.type === "thinking_delta") {
-      if (ENABLE_THINKING) bufferedThinking += event.delta
+      if (modelState.enableThinking) bufferedThinking += event.delta
     } else if (event.type === "thinking_end") {
-      if (ENABLE_THINKING && bufferedThinking) {
+      if (modelState.enableThinking && bufferedThinking) {
         emit({ type: "thinking", text: bufferedThinking })
         emittedThinking = true
       }
@@ -202,11 +186,11 @@ async function createStreamedCompletion(
 }
 
 async function createFallbackCompletion(state: LoopState): Promise<CompletionTurnResult> {
-  return createStreamedCompletion(fallbackModel, FALLBACK_API_KEY, FALLBACK_TOOL_CHOICE, state)
+  return createStreamedCompletion(modelState.fallbackModel, modelState.fallbackApiKey, modelState.fallbackToolChoice, state)
 }
 
 async function createPrimaryCompletion(state: LoopState): Promise<CompletionTurnResult> {
-  return createStreamedCompletion(primaryModel!, PRIMARY_API_KEY, PRIMARY_TOOL_CHOICE, state)
+  return createStreamedCompletion(modelState.primaryModel!, modelState.primaryApiKey, modelState.primaryToolChoice, state)
 }
 
 function logPromptSizeDebug(state: LoopState, errMsg: string, label: string): void {
@@ -296,10 +280,10 @@ export async function fetchCompletion(
 
     const recalledChunkIds = (requestState as typeof requestState & { _recalledChunkIds: number[] })._recalledChunkIds
 
-    if (USE_FALLBACK) {
+    if (modelState.useFallback) {
       const fallbackWindow = fallbackContextWindow(requestState.conversation)
       if (fallbackWindow.nearLimit) {
-        console.warn(`[fallback] prompt estimate ${fallbackWindow.estimate} nearing fallback limit ${fallbackWindow.softLimit} (${FALLBACK_MODEL})`)
+        console.warn(`[fallback] prompt estimate ${fallbackWindow.estimate} nearing fallback limit ${fallbackWindow.softLimit} (${modelState.fallbackModel.id})`)
       }
 
       try {
@@ -321,8 +305,8 @@ export async function fetchCompletion(
           await sleep(retryDelayMs)
           continue
         }
-        console.error(`[api] fallback error: ${errMsg} model=${FALLBACK_MODEL} api=${FALLBACK_BASE}`)
-        recordLlmRequest(FALLBACK_MODEL, "error", null)
+        console.error(`[api] fallback error: ${errMsg} model=${modelState.fallbackModel.id} api=${modelState.fallbackModel.baseUrl}`)
+        recordLlmRequest(modelState.fallbackModel.id, "error", null)
         throw fallbackErr
       }
     }
@@ -345,8 +329,10 @@ export async function fetchCompletion(
       if (recoverByScrubbingImages(errMsg, "primary")) continue
 
       if (!shouldFallback(errMsg)) {
-        console.error(`[api] primary error: ${errMsg} model=${MODEL} api=${API_BASE}`)
-        recordLlmRequest(MODEL, "error", null)
+        const primaryId = modelState.primaryModel?.id ?? "(unknown)"
+        const primaryBase = modelState.primaryModel?.baseUrl ?? "(unknown)"
+        console.error(`[api] primary error: ${errMsg} model=${primaryId} api=${primaryBase}`)
+        recordLlmRequest(primaryId, "error", null)
         throw primaryErr
       }
 
@@ -358,7 +344,7 @@ export async function fetchCompletion(
       }
 
       if (fallbackWindow.nearLimit) {
-        console.warn(`[fallback] prompt estimate ${fallbackWindow.estimate} nearing fallback limit ${fallbackWindow.softLimit} (${FALLBACK_MODEL})`)
+        console.warn(`[fallback] prompt estimate ${fallbackWindow.estimate} nearing fallback limit ${fallbackWindow.softLimit} (${modelState.fallbackModel.id})`)
       }
 
       console.warn(`[api] primary down (${errMsg}) - switching to fallback`)

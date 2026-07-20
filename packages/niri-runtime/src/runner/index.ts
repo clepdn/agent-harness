@@ -39,6 +39,8 @@ const state: RunnerStateInternal = {
   shutdownRequested: false,
   turnInFlight: false,
   deferredEvents: [],
+  restRequested: false,
+  restReason: "",
 }
 
 /**
@@ -53,6 +55,21 @@ export function isRunning(): boolean {
 /** Returns whether the runner is currently blocked in wait or wait_then_continue. */
 export function isWaitingForEvent(): boolean {
   return eventResolvers.length > 0
+}
+
+/**
+ * Requests a programmatic rest at the next turn boundary.
+ * The loop will save a rest snapshot with the given reason and exit.
+ * If the runner is idle (waiting for events), this also interrupts the wait
+ * so the rest takes effect immediately.
+ */
+export function requestRest(reason: string): boolean {
+  if (!state.running) return false
+  state.restRequested = true
+  state.restReason = reason
+  // Interrupt any pending event wait so the loop checks the flag immediately
+  interruptEventWaiters()
+  return true
 }
 
 export function getRunnerStatus(): {
@@ -189,7 +206,7 @@ async function saveRuntimeSnapshot(): Promise<void> {
 
 /** Wait until the next event arrives (or return immediately if one is pending). */
 function waitForEvent(): Promise<UserMessage | null> {
-  if (state.shutdownRequested) return Promise.resolve(null)
+  if (state.shutdownRequested || state.restRequested) return Promise.resolve(null)
   if (state.pendingInputs.length > 0) {
     return Promise.resolve(state.pendingInputs.shift()!)
   }
@@ -200,7 +217,7 @@ function waitForEvent(): Promise<UserMessage | null> {
 
 /** Wait up to timeoutMs for the next event; resolves null if the timer fires first. */
 function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null> {
-  if (state.shutdownRequested) return Promise.resolve(null)
+  if (state.shutdownRequested || state.restRequested) return Promise.resolve(null)
   if (state.pendingInputs.length > 0) {
     return Promise.resolve(state.pendingInputs.shift()!)
   }
@@ -291,6 +308,8 @@ export async function wake(event: UserMessage): Promise<void> {
   state.memoryRecallTurn = 0
   // The wake event is the first turn — recall once for it.
   state.memoryRecallPending = true
+  state.restRequested = false
+  state.restReason = ""
 
   const saved = await loadSession()
   if (saved) {
@@ -357,6 +376,8 @@ export async function wake(event: UserMessage): Promise<void> {
     state.memoryRecallPending = false
     state.shutdownRequested = false
     state.turnInFlight = false
+    state.restRequested = false
+    state.restReason = ""
     if (!wasShutdownRequested) flushDeferredEvents()
     state.deferredEvents = []
     eventResolvers = []

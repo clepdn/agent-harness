@@ -4,16 +4,16 @@ import { emit } from "../stream"
 import { setContextSize, setWorking } from "../discord/status-updater"
 import { setPromWorking } from "../prometheus"
 import type { Message } from "../types"
+import { modelState } from "./model-state"
 import {
   COMPACTION_MIN_CHARS,
   COMPACTION_TURN_AGE,
   CONTEXT_COMPACT_TRIGGER_TOKENS,
-  ENABLE_THINKING,
-  RESPECT_CACHE,
   estimatePromptTokens,
   findSummaryMessageIndex,
   loadAgentSummaryContext,
   proactiveCompaction,
+  saveRestSnapshot,
   summarizeConversationViaLLM,
 } from "./util"
 import { addAssistantMessage, applyUsage, configuredSummaryProvider, emitThinking, fetchCompletion } from "./loop-completion"
@@ -39,7 +39,7 @@ export type RunLoopExit = "rest"
 
 async function waitForNextEvent(convId: number, hooks: LoopHooks): Promise<void> {
   const incoming = await hooks.waitForEvent()
-  if (!incoming) { throw new Error("waitForEvent returned null") }
+  if (!incoming) return
   hooks.injectIncomingEvent(convId, incoming)
 }
 
@@ -69,7 +69,7 @@ async function processAssistantTurn(convId: number, state: LoopState, hooks: Loo
   const msg = response.message
   addAssistantMessage(convId, state, msg)
 
-  if (ENABLE_THINKING) {
+  if (modelState.enableThinking) {
     if (!response.emittedThinking && response.bufferedThinking) {
       emit({ type: "thinking", text: response.bufferedThinking })
     } else if (!response.emittedThinking) {
@@ -162,7 +162,7 @@ function applyDiscordSendNudge(
  * ≥ compaction_turn_age turns old and ≥ compaction_min_chars in size.
  */
 async function applyProactiveCompaction(state: LoopState): Promise<boolean> {
-  if (RESPECT_CACHE) return false
+  if (modelState.respectCache) return false
 
   const provider = configuredSummaryProvider()
   if (!provider.model) return false
@@ -261,6 +261,17 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
   let consecutiveIdenticalToolTurns = 0
 
   while (true) {
+    // Check for programmatic rest at the top of each iteration.
+    // This catches rest requested during event wait (waitForNextEvent returns
+    // null, loop continues here) and during tool processing.
+    if (state.restRequested) {
+      console.log(`[runner] programmatic rest requested: ${state.restReason}`)
+      await saveRestSnapshot(state.conversation, state.restReason)
+      setWorking(false)
+      setPromWorking(false)
+      return "rest"
+    }
+
     await applyProactiveCompaction(state)
     await applyLLMCompaction(state, "pre-turn")
 
@@ -298,6 +309,16 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       setPromWorking(false)
       return "rest"
     }
+
+    // Programmatic rest (e.g. model swap that requires fresh context)
+    if (state.restRequested) {
+      console.log(`[runner] programmatic rest requested: ${state.restReason}`)
+      await saveRestSnapshot(state.conversation, state.restReason)
+      setWorking(false)
+      setPromWorking(false)
+      return "rest"
+    }
+
     if (outcome === CycleOutcome.NoTools) {
       if (discordSendNudged) continue
       setWorking(false)

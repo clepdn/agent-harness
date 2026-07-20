@@ -21,6 +21,10 @@ export interface LoopState {
   memoryRecallPending: boolean
   shutdownRequested: boolean
   turnInFlight: boolean
+  /** When true, the loop exits with "rest" at the next turn boundary. */
+  restRequested: boolean
+  /** Reason for the programmatic rest (e.g. model swap). */
+  restReason: string
 }
 
 /** Lifecycle hooks injected by the runner orchestrator into the loop. */
@@ -48,4 +52,6 @@ export interface RunnerStateInternal extends RunnerState {
   shutdownRequested: boolean
   turnInFlight: boolean
   deferredEvents: Array<{ event: UserMessage; priority: boolean }>
+  restRequested: boolean
+  restReason: string
 }

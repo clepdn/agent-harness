@@ -26,6 +26,8 @@ function makeState(): LoopState {
     memoryRecallPending: false,
     shutdownRequested: false,
     turnInFlight: false,
+    restRequested: false,
+    restReason: "",
   }
 }
 

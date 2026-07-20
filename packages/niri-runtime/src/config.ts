@@ -228,6 +228,15 @@ function resolvePreset(section: TomlValue | undefined, presets: TomlTable): Toml
   return resolved
 }
 
+/**
+ * Looks up a named model preset from [models.<name>] after config+secrets merge.
+ * Returns the resolved TOML table (with secrets merged in) or null if not found.
+ */
+export function getModelPreset(name: string): Record<string, unknown> | null {
+  const preset = modelsT[name.trim()]
+  return isTable(preset) ? preset : null
+}
+
 // ── Typed accessors ───────────────────────────────────────────────────────────
 
 function table(value: TomlValue | undefined): TomlTable {

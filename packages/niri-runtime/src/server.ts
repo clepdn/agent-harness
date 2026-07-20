@@ -3,7 +3,8 @@ import { AGENT_ID } from "./agent-config"
 import { clientTools } from "./client"
 import { listWorkerEvents, publishWorkerEvent, subscribeWorkerEvents } from "./awp/outbox"
 import type { ControlCommand } from "./awp/types"
-import { wake, isRunning, isWaitingForEvent, enqueueEvent, getRunnerStatus } from "./runner/index"
+import { wake, isRunning, isWaitingForEvent, enqueueEvent, getRunnerStatus, requestRest } from "./runner/index"
+import { modelState, evaluateModelSwap, applyModelSwap } from "./runner/model-state"
 import { buildDiscordBatchDigest, scanDiscordChannels } from "./discord/state"
 import { handleDiscordIngress } from "./discord/pipeline"
 import { fromBsky } from "./triggers/bsky"
@@ -325,6 +326,66 @@ export function createServer(options: { requestRestart?: (reason?: string) => vo
     const reason = typeof body.reason === "string" ? body.reason : "webhook restart"
     options.requestRestart(reason)
     return reply.send({ ok: true, restarting: true })
+  })
+
+  // ── Model swap ──────────────────────────────────────────────────────────────
+  // Swaps the primary model to a named preset defined under [models.<name>].
+  // If the current session respects cache or the new model's context window is
+  // smaller than the current context size, triggers a programmatic rest so the
+  // next session starts fresh with the new model. Otherwise swaps in place.
+
+  app.get("/awp/model", async () => ({
+    primary: modelState.primaryModel
+      ? { id: modelState.primaryModel.id, provider: modelState.primaryModel.provider, baseUrl: modelState.primaryModel.baseUrl }
+      : null,
+    fallback: { id: modelState.fallbackModel.id, provider: modelState.fallbackModel.provider, baseUrl: modelState.fallbackModel.baseUrl },
+    respectCache: modelState.respectCache,
+    useFallback: modelState.useFallback,
+    enableThinking: modelState.enableThinking,
+    thinkingEffort: modelState.thinkingEffort,
+  }))
+
+  app.post("/awp/swap-model", async (req, reply) => {
+    const body = req.body && typeof req.body === "object" ? (req.body as { preset?: unknown }) : {}
+    const presetName = typeof body.preset === "string" ? body.preset.trim() : ""
+
+    if (!presetName) {
+      return reply.code(400).send({ error: "preset is required" })
+    }
+
+    const currentContextSize = getRunnerStatus().contextSize
+
+    let decision
+    try {
+      decision = evaluateModelSwap(presetName, currentContextSize)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      return reply.code(400).send({ error: msg })
+    }
+
+    if (decision.action === "swap") {
+      applyModelSwap(decision)
+      return reply.send({
+        ok: true,
+        action: "swapped",
+        preset: decision.preset,
+        model: decision.model.id,
+        contextSize: currentContextSize,
+      })
+    }
+
+    // action === "rest" — trigger programmatic rest
+    const restReason = `model swap to "${presetName}" requires rest: ${decision.reason}`
+    const restAccepted = requestRest(restReason)
+
+    return reply.send({
+      ok: true,
+      action: "rest",
+      preset: presetName,
+      reason: decision.reason,
+      restRequested: restAccepted,
+      contextSize: currentContextSize,
+    })
   })
 
   app.post("/trigger/cron", async (_req, reply) => {
