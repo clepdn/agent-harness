@@ -10,6 +10,7 @@ import { SlashCommandBuilder } from "discord.js"
 import { config, listModelPresets } from "../config"
 import { getRunnerStatus, isRunning, isWaitingForEvent, requestRest } from "../runner/index"
 import { modelState, evaluateModelSwap, applyModelSwap } from "../runner/model-state"
+import { startActivityTrace, getRecentActivity, formatActivityTrace } from "./activity-trace"
 
 // ── Mutable callbacks set by index.ts after server starts ─────────────────────
 
@@ -30,6 +31,18 @@ const commands = [
   new SlashCommandBuilder()
     .setName("status")
     .setDescription("Show the agent's current runtime status")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("trace")
+    .setDescription("Show recent agent activity (thinking, tool calls, text)")
+    .addIntegerOption((opt) =>
+      opt
+        .setName("count")
+        .setDescription("Number of recent events to show (default 15)")
+        .setMinValue(5)
+        .setMaxValue(50)
+        .setRequired(false),
+    )
     .toJSON(),
   new SlashCommandBuilder()
     .setName("restart")
@@ -87,6 +100,9 @@ export async function handleInteraction(
     case "status":
       await handleStatus(interaction)
       break
+    case "trace":
+      await handleTrace(interaction)
+      break
     case "restart":
       await handleRestart(interaction)
       break
@@ -127,7 +143,16 @@ export async function handleAutocomplete(interaction: AutocompleteInteraction): 
   )
 }
 
-// ── Command handlers ─────────────────────────────────────────────────────────
+async function handleTrace(interaction: ChatInputCommandInteraction): Promise<void> {
+  const count = interaction.options.getInteger("count") ?? 15
+  const entries = getRecentActivity(count)
+  const formatted = formatActivityTrace(entries)
+
+  // Discord message limit is 2000 chars
+  const truncated = formatted.length > 1950 ? formatted.slice(0, 1950) + "\n...(truncated)" : formatted
+
+  await interaction.reply({ content: truncated, ephemeral: true })
+}
 
 async function handleStatus(interaction: ChatInputCommandInteraction): Promise<void> {
   const status = getRunnerStatus()
@@ -226,6 +251,9 @@ async function handleModelPresets(interaction: ChatInputCommandInteraction): Pro
 // ── Registration ──────────────────────────────────────────────────────────────
 
 export async function registerSlashCommands(client: Client): Promise<void> {
+  // Start capturing stream events for /trace
+  startActivityTrace()
+
   if (!client.application) {
     console.warn("[slash] client.application not available; skipping command registration")
     return
