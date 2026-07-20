@@ -17,9 +17,10 @@
 		    src     = self;
 
 		    nodejs = pkgs.nodejs_22;
-		    # NOTE: regenerate after any package-lock change — `nix build` prints the
-		    # correct value, or use `prefetch-npm-deps package-lock.json`.
-		    npmDepsHash = pkgs.lib.fakeHash;
+		    # NOTE: regenerate after any package-lock change — run
+		    # `nix run nixpkgs#prefetch-npm-deps -- package-lock.json`,
+		    # or `nix build` prints the correct value on mismatch.
+		    npmDepsHash = "sha256-Zb1RZ3Y5uUIkaTMpebG1LFOmAGUrg2o1+eaoIFgSNp0=";
 
 		    nativeBuildInputs = with pkgs; [
 			python3      # node-gyp (better-sqlite3, node-pty)
