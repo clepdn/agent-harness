@@ -11,6 +11,7 @@ import { config, setDiscordBotUserId } from "../config"
 import { handleDiscordIngress } from "./pipeline"
 import { subscribeRunnerPresence, type RunnerPresence } from "../runner/presence"
 import { startStatusUpdater, stopStatusUpdater } from "./status-updater"
+import { startPrometheusServer, stopPrometheusServer } from "../prometheus"
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value.trim() : ""
@@ -168,6 +169,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
     )
     void setDiscordPresence(client, latestPresence)
     startStatusUpdater(client)
+    startPrometheusServer(config.prometheus?.port ?? 9100)
   })
 
   unsubscribePresence = subscribeRunnerPresence((presence) => {
@@ -246,6 +248,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
     stop: async () => {
       unsubscribePresence?.()
       stopStatusUpdater()
+      stopPrometheusServer()
       await client.destroy()
       console.log("[discord gateway] disconnected")
     },

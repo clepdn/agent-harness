@@ -275,6 +275,7 @@ const metricsT = table(merged.metrics)
 const toolsT = table(merged.tools)
 const llmBridgeT = table(merged.llm_bridge)
 const computerUseT = table(merged.computer_use)
+const prometheusT = table(merged.prometheus)
 
 // ── Subagent configs (array of tables) ────────────────────────────────────────
 
@@ -446,6 +447,9 @@ export const config = {
   computer_use: {
     enabled: bool(computerUseT.enabled, false),
     display: str(computerUseT.display, "").trim(),
+  },
+  prometheus: {
+    port: int(prometheusT.port, 9100),
   },
 }
 

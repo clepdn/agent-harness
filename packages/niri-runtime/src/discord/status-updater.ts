@@ -8,6 +8,7 @@
 
 import type { Client } from "discord.js"
 import { config } from "../config"
+import { setApiRequestsInWindow } from "../prometheus"
 
 const STATUS_INTERVAL_MS = 60_000
 
@@ -116,6 +117,7 @@ export function startStatusUpdater(client: Client): void {
     const usage = await fetchUmansUsage(apiKey)
     if (usage) {
       lastRequests = usage.usage.requests_in_window
+      setApiRequestsInWindow(lastRequests)
     }
 
     const autoInfo = `${working ? "working " : ""}${formatContext()} [${lastRequests}/400]`

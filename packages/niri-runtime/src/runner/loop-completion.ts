@@ -5,6 +5,7 @@ import { logMessage } from "../db"
 import { setContextSize } from "../discord/status-updater"
 import { buildCompletionMessages, rememberRecalledMemoryChunks } from "../memory"
 import { recordMetric } from "../metrics"
+import { recordLlmRequest } from "../prometheus"
 import { emit } from "../stream"
 import type { LoopState } from "./types"
 import {
@@ -193,6 +194,8 @@ async function createStreamedCompletion(
   const elapsedMs = Math.max(0, Date.now() - startedAt)
   const tokensPerSecond = usage.output && elapsedMs > 0 ? usage.output / (elapsedMs / 1000) : undefined
 
+  recordLlmRequest(model.id, "success", usage, tokensPerSecond)
+
   recordPromptResponse(model.id, toolChoice, state, { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond }, promptMetricId)
 
   return { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond }
@@ -319,6 +322,7 @@ export async function fetchCompletion(
           continue
         }
         console.error(`[api] fallback error: ${errMsg} model=${FALLBACK_MODEL} api=${FALLBACK_BASE}`)
+        recordLlmRequest(FALLBACK_MODEL, "error", null)
         throw fallbackErr
       }
     }
@@ -342,6 +346,7 @@ export async function fetchCompletion(
 
       if (!shouldFallback(errMsg)) {
         console.error(`[api] primary error: ${errMsg} model=${MODEL} api=${API_BASE}`)
+        recordLlmRequest(MODEL, "error", null)
         throw primaryErr
       }
 

@@ -2,6 +2,7 @@ import { config } from "../config"
 import { recordMetric } from "../metrics"
 import { emit } from "../stream"
 import { setContextSize, setWorking } from "../discord/status-updater"
+import { setPromWorking } from "../prometheus"
 import type { Message } from "../types"
 import {
   COMPACTION_MIN_CHARS,
@@ -265,6 +266,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
 
     const turnStart = state.conversation.length
     setWorking(true)
+    setPromWorking(true)
     const outcome = await processAssistantTurn(convId, state, hooks)
     turnCount += 1
 
@@ -293,11 +295,13 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
 
     if (outcome === CycleOutcome.Rest) {
       setWorking(false)
+      setPromWorking(false)
       return "rest"
     }
     if (outcome === CycleOutcome.NoTools) {
       if (discordSendNudged) continue
       setWorking(false)
+      setPromWorking(false)
       await waitForNextEvent(convId, hooks)
       continue
     }

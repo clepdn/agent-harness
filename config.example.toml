@@ -167,3 +167,7 @@ retention_days = 3
 # enabled_tools = []
 # blacklisted_tools = []
 # max_turns = 20
+
+# Prometheus metrics exporter
+# [prometheus]
+# port = 9100
