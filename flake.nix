@@ -37,8 +37,10 @@
 			pixman
 		    ];
 
-		    # No build script — ship src and run via tsx.
-		    dontNpmBuild = true;
+		    # The app entry runs from src via tsx, but the workspace library packages
+		    # (@mira/harness-*, @niri/*) are consumed through their package.json exports,
+		    # which point at dist/. Compile those to dist so the runtime can import them.
+		    npmBuildScript = "build:packages";
 
 		    installPhase = ''
 			runHook preInstall
