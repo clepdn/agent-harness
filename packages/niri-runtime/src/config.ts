@@ -410,6 +410,7 @@ export const config = {
   tools: {
     enabled_tools: strArray(toolsT.enabled_tools),
     blacklisted_tools: strArray(toolsT.blacklisted_tools),
+    hashline: bool(toolsT.hashline, false),
   },
   llm_bridge: {
     enabled: bool(llmBridgeT.enabled, false),

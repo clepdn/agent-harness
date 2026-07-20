@@ -207,6 +207,17 @@ export const TOOLS: Tool[] = [
     }),
   },
   {
+    name: "set_status",
+    description:
+      "Set your own Discord custom status text. The status appears as a custom activity. Auto-generated info (context usage % and API request count) is always appended. Format: \"{your text} | {auto_info}\". Pass empty string or null to clear. Max 128 chars total — keep your text short.",
+    parameters: s({
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Custom status text. Empty string or null clears the custom portion." },
+      },
+    }),
+  },
+  {
     name: "wait",
     description: "Pause and wait for the next incoming message or event. Use this when you've finished what you're doing and want to hear back before continuing.",
     parameters: s({ type: "object", properties: {} }),

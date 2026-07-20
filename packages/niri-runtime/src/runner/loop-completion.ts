@@ -2,6 +2,7 @@ import { stream } from "../llm"
 import type { AssistantMessage, AssistantMessageEvent, TextContent, ThinkingContent, Usage } from "../llm"
 import type { OpenAICompletionsOptions } from "../llm"
 import { logMessage } from "../db"
+import { setContextSize } from "../discord/status-updater"
 import { buildCompletionMessages, rememberRecalledMemoryChunks } from "../memory"
 import { recordMetric } from "../metrics"
 import { emit } from "../stream"
@@ -97,7 +98,10 @@ export function applyUsage(
   timing: Pick<CompletionTurnResult, "elapsedMs" | "tokensPerSecond"> = {},
 ): void {
   state.tokenCount += usage.totalTokens
-  if (usage.input) state.contextSize = usage.input + usage.cacheRead
+  if (usage.input) {
+    state.contextSize = usage.input + usage.cacheRead
+    setContextSize(state.contextSize)
+  }
   const rate = typeof timing.tokensPerSecond === "number" ? ` ${timing.tokensPerSecond.toFixed(1)} tok/s` : ""
   console.log(
     `[tokens] +${usage.totalTokens} total=${state.tokenCount}` +

@@ -1,5 +1,5 @@
 import OpenAI from "openai"
-import { createCodexBridgeServer } from "../packages/niri-runtime/src/codex-bridge"
+import { createCodexBridgeServer } from "../packages/llm-bridge/src/codex"
 
 const port = Number.parseInt(process.env.CODEX_CACHE_PROBE_PORT ?? "8811", 10)
 const model = process.env.CODEX_CACHE_PROBE_MODEL?.trim() || "gpt-5.6-terra"
