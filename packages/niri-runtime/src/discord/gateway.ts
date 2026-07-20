@@ -9,6 +9,7 @@ import {
 } from "discord.js"
 import { config, setDiscordBotUserId } from "../config"
 import { handleDiscordIngress } from "./pipeline"
+import { registerSlashCommands, handleInteraction, handleAutocomplete } from "./slash-commands"
 import { subscribeRunnerPresence, type RunnerPresence } from "../runner/presence"
 import { startStatusUpdater, stopStatusUpdater } from "./status-updater"
 import { startPrometheusServer, stopPrometheusServer } from "../prometheus"
@@ -170,6 +171,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
     void setDiscordPresence(client, latestPresence)
     startStatusUpdater(client)
     startPrometheusServer(config.prometheus?.port ?? 9100)
+    void registerSlashCommands(client)
   })
 
   unsubscribePresence = subscribeRunnerPresence((presence) => {
@@ -235,6 +237,21 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
       }
     } catch (err) {
       console.warn("[discord gateway] failed to ingest message:", err)
+    }
+  })
+
+  client.on(Events.InteractionCreate, async (interaction) => {
+    try {
+      if (interaction.isChatInputCommand()) {
+        await handleInteraction(interaction)
+      } else if (interaction.isAutocomplete()) {
+        await handleAutocomplete(interaction)
+      }
+    } catch (err) {
+      console.warn("[slash] interaction error:", err instanceof Error ? err.message : String(err))
+      if (interaction.isChatInputCommand() && !interaction.replied) {
+        await interaction.reply({ content: "an error occurred", ephemeral: true }).catch(() => {})
+      }
     }
   })
 

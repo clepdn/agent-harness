@@ -5,6 +5,7 @@ import { initDb } from "./db"
 import { initMetricsDb } from "./metrics"
 import { shutdown } from "./runner/index"
 import { startDiscordGateway } from "./discord/gateway"
+import { setGatewayCallbacks } from "./discord/slash-commands"
 import { startDiscordEmbeddingBackfill } from "./discord/search"
 import { setDiscordToolsAvailable } from "./discord/availability"
 import { ensureSoulFilePlacement } from "./bootstrap"
@@ -75,6 +76,7 @@ async function main() {
   }
 
   const server = createServer({ requestRestart, requestShutdown })
+  setGatewayCallbacks({ requestRestart, requestShutdown })
 
   await server.listen({ port: PORT, host: WORKER_HOST })
   console.log(`[niri] listening on ${WORKER_HOST}:${PORT}`)

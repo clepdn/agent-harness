@@ -118,6 +118,9 @@ gateway_enabled = true
 gateway_trace = false
 gateway_raw_fallback = true
 gateway_raw_fallback_all = false
+# Discord user ID of the owner. Only this user can use slash commands.
+# Find your ID: enable Developer Mode in Discord settings, right-click your name, Copy ID.
+owner_id = ""
 # Channel ids scanned by discord_scan when no channel_ids arg is passed.
 scan_channel_ids = []
 wake_on_event = false

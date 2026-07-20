@@ -237,6 +237,13 @@ export function getModelPreset(name: string): Record<string, unknown> | null {
   return isTable(preset) ? preset : null
 }
 
+/**
+ * Lists all available model preset names from [models.<name>].
+ */
+export function listModelPresets(): string[] {
+  return Object.keys(modelsT).sort()
+}
+
 // ── Typed accessors ───────────────────────────────────────────────────────────
 
 function table(value: TomlValue | undefined): TomlTable {
@@ -401,6 +408,7 @@ export const config = {
   discord: {
     bot_token: str(discordT.bot_token, "").trim(),
     bot_user_id: str(discordT.bot_user_id, "").trim(),
+    owner_id: str(discordT.owner_id, "").trim(),
     gateway_enabled: bool(discordT.gateway_enabled, true),
     gateway_trace: bool(discordT.gateway_trace, false),
     gateway_raw_fallback: bool(discordT.gateway_raw_fallback, true),
