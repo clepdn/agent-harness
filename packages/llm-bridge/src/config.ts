@@ -2,6 +2,8 @@
 // The bridge acts as our own OpenRouter — it routes requests to the best
 // available provider using pi-ai's model registry + custom providers.
 
+import fs from "node:fs"
+
 export interface CustomProvider {
   // name is derived from the providers.<name> key — not stored as a field.
   api_key?: string
@@ -48,7 +50,6 @@ export interface BridgeConfig {
  * integers, booleans, and single-line arrays of scalars.
  */
 function parseTomlFile(path: string): Record<string, unknown> {
-  const fs = require("node:fs")
   const text = fs.readFileSync(path, "utf-8")
   const root: Record<string, unknown> = {}
   let cursor: Record<string, unknown> = root
@@ -121,8 +122,6 @@ function parseTomlFile(path: string): Record<string, unknown> {
 }
 
 export function loadConfig(): BridgeConfig {
-  const fs = require("node:fs")
-
   // Check for --config flag
   const configArgIdx = process.argv.indexOf("--config")
   const configPath = configArgIdx >= 0 ? process.argv[configArgIdx + 1] : undefined

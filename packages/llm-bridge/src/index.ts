@@ -18,17 +18,31 @@ import { loadConfig } from "./config"
 import { createServer, discoverModels } from "./server"
 import { loadApiKeys } from "./auth"
 
+/** True only for hosts that stay on the local machine. */
+function isLoopbackHost(host: string): boolean {
+  const h = host.trim().toLowerCase()
+  return h === "localhost" || h === "::1" || h === "[::1]" || h.startsWith("127.")
+}
+
 const keysArgIdx = process.argv.indexOf("--keys")
 const keysPath = keysArgIdx >= 0 ? process.argv[keysArgIdx + 1] : undefined
+
+const config = loadConfig()
 
 const apiKeys = loadApiKeys(keysPath)
 if (apiKeys.size > 0) {
   console.log(`[bridge] loaded ${apiKeys.size} API key(s)`)
+} else if (isLoopbackHost(config.host)) {
+  console.log("[bridge] no API keys configured — running open (no auth) on loopback only")
 } else {
-  console.log("[bridge] no API keys configured — running open (no auth)")
+  // Fail closed: an unauthenticated bind on a non-loopback interface would expose
+  // an open proxy to our provider accounts. Refuse to start.
+  console.error(
+    `[bridge] refusing to start: no API keys configured, but host is "${config.host}" ` +
+      "(not loopback). Provide a --keys file, or bind host to 127.0.0.1.",
+  )
+  process.exit(1)
 }
-
-const config = loadConfig()
 
 async function main() {
   // Discover models from custom providers + pi-ai registry
