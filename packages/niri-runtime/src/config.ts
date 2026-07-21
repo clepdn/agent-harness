@@ -256,16 +256,24 @@ function resolvePreset(section: TomlValue | undefined, presets: TomlTable): Toml
 
   // If bridge = true on the preset, route through the llm_bridge_url
   // as a standard OpenAI-compatible endpoint, using llm_bridge_api_key
-  // for authentication (unless the preset specifies its own api_key).
+  // for authentication. A preset-level api_key wins if explicitly set on
+  // the preset itself; any section-level api_key (including one deep-merged
+  // from a stale secrets file) is discarded, since the bridge only accepts
+  // its own key and sending anything else guarantees a 401.
   if (resolved.bridge === true) {
     const bridgeUrl = str(merged.llm_bridge_url, "").trim()
     if (bridgeUrl) {
       resolved.provider = "openai"
       resolved.base_url = bridgeUrl
     }
+    const presetKey = str(preset.api_key, "").trim()
     const bridgeKey = str(merged.llm_bridge_api_key, "").trim()
-    if (bridgeKey && !str(resolved.api_key, "").trim()) {
+    if (presetKey) {
+      resolved.api_key = presetKey
+    } else if (bridgeKey) {
       resolved.api_key = bridgeKey
+    } else {
+      delete resolved.api_key
     }
   }
   delete resolved.bridge
