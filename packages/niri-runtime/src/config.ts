@@ -199,6 +199,31 @@ function deepMerge(base: TomlTable, overlay: TomlTable): TomlTable {
   return out
 }
 
+function trimmedString(value: TomlValue | undefined): string {
+  return typeof value === "string" ? value.trim() : ""
+}
+
+// Resolve the remote-bridge auth key, preferring an inline value over a file.
+// The file path supports the NixOS/agenix "path to a secret" pattern, keeping
+// the credential out of the config/secrets TOML. Throws when a key file is
+// configured but unreadable, so coral fails closed instead of running
+// unauthenticated.
+function resolveBridgeApiKey(config: TomlTable): string {
+  const inlineKey = trimmedString(config.llm_bridge_api_key)
+  if (inlineKey) return inlineKey
+
+  const keyFile = trimmedString(config.llm_bridge_api_key_file)
+  if (!keyFile) return ""
+
+  try {
+    return readFileSync(keyFile, "utf8").trim()
+  } catch (err) {
+    throw new Error(
+      `failed to read llm_bridge_api_key_file ${keyFile}: ${err instanceof Error ? err.message : String(err)}`,
+    )
+  }
+}
+
 const { configPath, secretsPath } = parseFlags(process.argv.slice(2))
 
 // Allow config path via env var (used by test runner where CLI flags conflict with node)
@@ -208,6 +233,9 @@ const resolvedSecretsPath = secretsPath ?? process.env.CORAL_SECRETS
 const baseTable = resolvedConfigPath ? loadFile(resolvedConfigPath) : {}
 const secretsTable = resolvedSecretsPath ? loadFile(resolvedSecretsPath) : {}
 const merged = deepMerge(baseTable, secretsTable)
+
+const bridgeApiKey = resolveBridgeApiKey(merged)
+if (bridgeApiKey) merged.llm_bridge_api_key = bridgeApiKey
 
 // ── Model preset resolution ───────────────────────────────────────────────────
 // Sections ([model], [fallback], [summary], [embeddings]) can reference a named

@@ -58,6 +58,22 @@ title = ""
 # # Tokens refresh + rotate back in place, just like codex's ~/.codex/auth.json.
 # auth_path = "~/.pi/auth.json"
 
+# ── Remote bridge client ─────────────────────────────────────────────────────
+# When a model preset sets `bridge = true`, coral routes that model through a
+# bridge reachable at llm_bridge_url as an OpenAI-compatible endpoint, using
+# llm_bridge_api_key for auth. Use this to talk to a bridge running on another
+# host instead of spawning one locally via [llm_bridge].
+# llm_bridge_url = "https://bridge.example.com/v1"
+#
+# The auth key can be supplied three ways (checked in this order):
+#   1. llm_bridge_api_key inline (belongs in secrets, not here)
+#   2. llm_bridge_api_key deep-merged from the secrets file
+#   3. llm_bridge_api_key_file - path to a file whose contents are the key.
+#      Intended for the NixOS/agenix "path to a secret" pattern; the path
+#      itself is not secret, so it can live in this config. If the file is set
+#      but unreadable, coral fails to start rather than running unauthenticated.
+# llm_bridge_api_key_file = "/run/agenix/bridge-client-key"
+
 [server]
 port = 3000
 
