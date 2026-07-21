@@ -63,7 +63,7 @@
 		};
 	    });
 
-	nixosModules.default = { config, pkgs, lib, ... }:
+	nixosModules.coral = { config, pkgs, lib, ... }:
 	    let
 		cfg            = config.services.coral;
 		settingsFormat = pkgs.formats.toml {};
@@ -283,5 +283,9 @@
 		};
 	    };
 
-    in systemOutputs // { inherit nixosModules; };
+    in systemOutputs // {
+      nixosModules = nixosModules // {
+        default = nixosModules.coral;
+      };
+    };
 }
