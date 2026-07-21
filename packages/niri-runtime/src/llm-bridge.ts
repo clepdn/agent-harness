@@ -49,7 +49,8 @@ export async function startLlmBridge(): Promise<void> {
   const cfg = config.llm_bridge
   if (!cfg.enabled) return
 
-  if (cfg.providers.length === 0) {
+  const providerNames = Object.keys(cfg.providers)
+  if (providerNames.length === 0) {
     console.warn("[llm-bridge] enabled=true but no providers configured — skipping")
     return
   }
@@ -58,7 +59,7 @@ export async function startLlmBridge(): Promise<void> {
   const bridgeEntry = path.join(repoRoot, "packages", "llm-bridge", "src", "index.ts")
   const tsxBin = path.join(repoRoot, "node_modules", ".bin", "tsx")
 
-  // Pass providers as JSON env var
+  // Pass providers as JSON env var (object keyed by name)
   const providersJson = JSON.stringify(cfg.providers)
 
   const env: Record<string, string> = {
@@ -68,7 +69,7 @@ export async function startLlmBridge(): Promise<void> {
     BRIDGE_PROVIDERS: providersJson,
   }
 
-  console.log(`[llm-bridge] starting on ${cfg.host}:${cfg.port} (${cfg.providers.length} providers: ${cfg.providers.map((p) => p.name).join(", ")})`)
+  console.log(`[llm-bridge] starting on ${cfg.host}:${cfg.port} (${providerNames.length} providers: ${providerNames.join(", ")})`)
 
   bridgeProcess = spawn(tsxBin, [bridgeEntry], {
     env,

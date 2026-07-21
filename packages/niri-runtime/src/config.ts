@@ -457,26 +457,29 @@ export const config = {
     port: int(llmBridgeT.port, 4040),
     providers: (() => {
       const raw = llmBridgeT.providers
-      if (!Array.isArray(raw)) return []
-      return raw
-        .filter((entry): entry is TomlTable => isTable(entry))
-        .map((entry) => ({
-          name: str(entry.name, "").trim(),
-          api_key: str(entry.api_key, "").trim(),
-          base_url: str(entry.base_url, "").trim(),
-          // codex + anthropic-oauth
-          auth_path: str(entry.auth_path, "").trim(),
-          // codex
-          model: str(entry.model, "").trim(),
-          reasoning_effort: str(entry.reasoning_effort, "").trim(),
-          // antigravity
-          client_id: str(entry.client_id, "").trim(),
-          client_secret: str(entry.client_secret, "").trim(),
-          refresh_token: str(entry.refresh_token, "").trim(),
-          project_id: str(entry.project_id, "").trim(),
-          binary_path: str(entry.binary_path, "").trim(),
-        }))
-        .filter((p) => p.name.length > 0)
+      // Support attrset: { umans: { api_key, base_url, ... }, ... }
+      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+        const out: Record<string, Record<string, string>> = {}
+        for (const [name, val] of Object.entries(raw as Record<string, TomlValue>)) {
+          if (!isTable(val)) continue
+          const entry = val as TomlTable
+          out[name] = {
+            api_key: str(entry.api_key, "").trim(),
+            api_key_file: str(entry.api_key_file, "").trim(),
+            base_url: str(entry.base_url, "").trim(),
+            auth_path: str(entry.auth_path, "").trim(),
+            model: str(entry.model, "").trim(),
+            reasoning_effort: str(entry.reasoning_effort, "").trim(),
+            client_id: str(entry.client_id, "").trim(),
+            client_secret: str(entry.client_secret, "").trim(),
+            refresh_token: str(entry.refresh_token, "").trim(),
+            project_id: str(entry.project_id, "").trim(),
+            binary_path: str(entry.binary_path, "").trim(),
+          }
+        }
+        return out
+      }
+      return {}
     })(),
   },
   subagents: subagentConfigs,

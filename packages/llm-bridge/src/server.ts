@@ -113,7 +113,7 @@ export async function discoverModels(config: BridgeConfig): Promise<void> {
   }
 
   // 2. Discover models from custom providers with base_url + api_key
-  for (const provider of config.providers) {
+  for (const [providerName, provider] of Object.entries(config.providers)) {
     if (provider.api_key && provider.base_url) {
       try {
         const resp = await fetch(`${provider.base_url}/models`, {
@@ -125,16 +125,16 @@ export async function discoverModels(config: BridgeConfig): Promise<void> {
             config.models[m.id] = {
               id: m.id,
               name: m.id,
-              provider: provider.name,
+              provider: providerName,
               baseUrl: provider.base_url,
               apiKey: provider.api_key,
               ...(m.context_length ? { contextWindow: m.context_length } : {}),
             }
           }
-          console.log(`[bridge] discovered ${data.data?.length ?? 0} models from ${provider.name}`)
+          console.log(`[bridge] discovered ${data.data?.length ?? 0} models from ${providerName}`)
         }
       } catch (err) {
-        console.error(`[bridge] failed to fetch models from ${provider.name}:`, err)
+        console.error(`[bridge] failed to fetch models from ${providerName}:`, err)
       }
     }
 
@@ -155,10 +155,10 @@ export async function discoverModels(config: BridgeConfig): Promise<void> {
             authPath: provider.auth_path,
           }
         }
-        console.log(`[bridge] discovered ${models.length} Anthropic OAuth models from ${provider.name}`)
+        console.log(`[bridge] discovered ${models.length} Anthropic OAuth models from ${providerName}`)
       } catch (err) {
         console.error(
-          `[bridge] failed to discover Anthropic models from ${provider.name}:`,
+          `[bridge] failed to discover Anthropic models from ${providerName}:`,
           err instanceof Error ? err.message : err,
         )
       }
@@ -221,7 +221,7 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
     // Route to custom backends based on model name
     if (isAntigravityModel(modelId)) {
       // Set env vars from provider config (antigravity reads these at runtime)
-      const agProvider = config.providers.find((p) => p.name === "antigravity")
+      const agProvider = config.providers["antigravity"]
       if (agProvider) {
         if (agProvider.client_id) process.env.ANTIGRAVITY_CLIENT_ID = agProvider.client_id
         if (agProvider.client_secret) process.env.ANTIGRAVITY_CLIENT_SECRET = agProvider.client_secret
@@ -232,7 +232,7 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
       return handleAntigravityCompletion(req, reply)
     }
     if (isCodexModel(modelId)) {
-      const codexProvider = config.providers.find((p) => p.name === "codex")
+      const codexProvider = config.providers["codex"]
       const result = await handleCodexCompletion(body, codexProvider)
       return reply.code(result.status).headers(result.headers).send(result.body)
     }

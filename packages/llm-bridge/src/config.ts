@@ -3,9 +3,9 @@
 // available provider using pi-ai's model registry + custom providers.
 
 export interface CustomProvider {
-  name: string
-  //通用 (umans, etc.)
+  // name is derived from the providers.<name> key — not stored as a field.
   api_key?: string
+  api_key_file?: string
   base_url?: string
   // Path to the provider's auth.json (codex + anthropic-oauth).
   auth_path?: string
@@ -37,7 +37,8 @@ export interface BridgeModelConfig {
 export interface BridgeConfig {
   port: number
   host: string
-  providers: CustomProvider[]
+  // Providers keyed by name: { umans: { api_key, base_url, ... }, ... }
+  providers: Record<string, CustomProvider>
   models: Record<string, BridgeModelConfig>
 }
 
@@ -78,15 +79,20 @@ function parseTomlFile(path: string): Record<string, unknown> {
       continue
     }
 
-    // table: [section]
+    // table: [section] or [section.subsection]
     const tableMatch = line.match(/^\[(.+)\]$/)
     if (tableMatch) {
-      const key = tableMatch[1]!.trim()
-      const existing = root[key]
-      if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
-        root[key] = {}
+      const parts = tableMatch[1]!.trim().split(".")
+      let obj: Record<string, unknown> = root
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i]!.trim()
+        const existing = obj[part]
+        if (!existing || typeof existing !== "object" || Array.isArray(existing)) {
+          obj[part] = {}
+        }
+        obj = obj[part] as Record<string, unknown>
       }
-      cursor = root[key] as Record<string, unknown>
+      cursor = obj
       continue
     }
 
@@ -115,6 +121,8 @@ function parseTomlFile(path: string): Record<string, unknown> {
 }
 
 export function loadConfig(): BridgeConfig {
+  const fs = require("node:fs")
+
   // Check for --config flag
   const configArgIdx = process.argv.indexOf("--config")
   const configPath = configArgIdx >= 0 ? process.argv[configArgIdx + 1] : undefined
@@ -135,23 +143,48 @@ export function loadConfig(): BridgeConfig {
     : parseInt(process.env.BRIDGE_PORT ?? "4040", 10)
   const host = (fileConfig?.host as string) ?? process.env.BRIDGE_HOST ?? "127.0.0.1"
 
-  let providers: CustomProvider[] = []
+  let providers: Record<string, CustomProvider> = {}
 
-  // From file config
-  if (fileConfig?.providers && Array.isArray(fileConfig.providers)) {
-    providers = fileConfig.providers as CustomProvider[]
-  }
-
-  // From env var (harness-spawned case)
-  if (providers.length === 0) {
-    const providersJson = process.env.BRIDGE_PROVIDERS
-    if (providersJson) {
-      providers = JSON.parse(providersJson) as CustomProvider[]
+  // From file config — providers is an object keyed by name
+  if (fileConfig?.providers && typeof fileConfig.providers === "object" && !Array.isArray(fileConfig.providers)) {
+    const raw = fileConfig.providers as Record<string, unknown>
+    for (const [name, val] of Object.entries(raw)) {
+      if (val && typeof val === "object" && !Array.isArray(val)) {
+        providers[name] = val as CustomProvider
+      }
     }
   }
 
-  if (providers.length === 0) {
+  // From env var (harness-spawned case) — still JSON for backward compat
+  if (Object.keys(providers).length === 0) {
+    const providersJson = process.env.BRIDGE_PROVIDERS
+    if (providersJson) {
+      const parsed = JSON.parse(providersJson)
+      // Support both object and array (legacy) format
+      if (Array.isArray(parsed)) {
+        for (const p of parsed) {
+          if (p.name) providers[p.name] = p
+        }
+      } else {
+        providers = parsed as Record<string, CustomProvider>
+      }
+    }
+  }
+
+  if (Object.keys(providers).length === 0) {
     throw new Error("[bridge] no providers configured. use --config <path> or set BRIDGE_PROVIDERS")
+  }
+
+  // Resolve api_key_file -> api_key for each provider
+  for (const [name, provider] of Object.entries(providers)) {
+    if (provider.api_key_file && !provider.api_key) {
+      try {
+        provider.api_key = fs.readFileSync(provider.api_key_file, "utf-8").trim()
+        console.log(`[bridge] loaded api_key for provider "${name}" from ${provider.api_key_file}`)
+      } catch (err) {
+        console.error(`[bridge] failed to read api_key_file for provider "${name}": ${err}`)
+      }
+    }
   }
 
   return { port, host, providers, models: {} }
@@ -161,5 +194,5 @@ export function loadConfig(): BridgeConfig {
  * Find a provider by name from the config.
  */
 export function getProvider(config: BridgeConfig, name: string): CustomProvider | undefined {
-  return config.providers.find((p) => p.name === name)
+  return config.providers[name]
 }
