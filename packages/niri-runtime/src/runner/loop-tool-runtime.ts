@@ -121,7 +121,7 @@ export async function executeToolCall(
   // Pi args are already a parsed object — no JSON parsing needed.
   const args: ToolArgs = call.arguments as ToolArgs
 
-  if ((call.name === "wait" || call.name === "rest") && latestAssistantContent(state).length === 0) {
+  if ((call.name === "wait" || call.name === "end_session") && latestAssistantContent(state).length === 0) {
     console.warn(
       `[runner] ${call.name} called with empty assistant content; allowing tool-only turn (provider emitted no text).`,
     )

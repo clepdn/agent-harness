@@ -63,9 +63,9 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       return { isWait: true }
     },
 
-    rest: async ({ convId, state, call, args }) => {
-      if (args.note) console.log("[runner] rest note:", args.note)
-      recordToolResult(convId, state, call, "rest", args, "Goodnight.")
+    end_session: async ({ convId, state, call, args }) => {
+      if (args.note) console.log("[runner] end_session note:", args.note)
+      recordToolResult(convId, state, call, "end_session", args, "Session ended.")
       await saveRestSnapshot(state.conversation, args.note as string | undefined)
       return { shouldRest: true }
     },

@@ -257,7 +257,7 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
       },
     ),
     functionTool(
-      "rest",
+      "end_session",
       "End the active session after writing a durable snapshot.",
       {
         type: "object",

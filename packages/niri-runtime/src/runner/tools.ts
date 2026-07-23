@@ -234,8 +234,8 @@ export const TOOLS: Tool[] = [
     }),
   },
   {
-    name: "rest",
-    description: "Go to sleep and end this session. Call this when you're truly done for now — conversation context will be cleared.",
+    name: "end_session",
+    description: "End the active session. Call this when you're truly done for now — conversation context will be cleared.",
     parameters: s({
       type: "object",
       properties: {
@@ -317,7 +317,7 @@ const ACTIVE_TOOLS = TOOLS.filter((t) => isToolEnabled(t.name))
  * Returns true if a tool is available to a subagent.
  * Auto-blacklists event-loop tools (wait, rest, wait_then_continue, subagent).
  */
-const SUBAGENT_AUTO_BLACKLIST = new Set(["wait", "rest", "wait_then_continue", "subagent"])
+const SUBAGENT_AUTO_BLACKLIST = new Set(["wait", "end_session", "wait_then_continue", "subagent"])
 
 export function isToolEnabledForSubagent(
   name: string,
