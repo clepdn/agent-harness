@@ -1,4 +1,7 @@
 import Fastify, { type FastifyInstance } from "fastify"
+import fs from "node:fs"
+import path from "node:path"
+import os from "node:os"
 import type { BridgeConfig, BridgeModelConfig } from "./config"
 import { oaiMessagesToContext, oaiSseChunk, oaiCompletionResponse } from "./translate"
 import { buildModel, streamCompletion } from "./pi-ai"
@@ -9,7 +12,7 @@ import { handleAntigravityCompletion } from "./antigravity"
 import { handleCodexCompletion } from "./codex"
 import { resolveProviderName, hasUsageSupport, getUsageForModel } from "./usage"
 import { recordCodexUsage } from "./codex-usage"
-import { getProviders, getModels } from "@earendil-works/pi-ai/compat"
+import { getProviders, getModels, getEnvApiKey } from "@earendil-works/pi-ai/compat"
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai"
 
 // OAuth token stores, keyed by auth file path so every model backed by the same
@@ -38,6 +41,61 @@ function getApiKey(modelConfig: BridgeModelConfig): Promise<string> {
     return store.getAccessToken()
   }
   return Promise.resolve(modelConfig.apiKey)
+}
+
+// ── Provider credential detection ─────────────────────────────────────────────
+// pi-ai's registry advertises models for ~35 providers, but most are unusable
+// without credentials (OpenRouter alone lists 269 models). To keep /v1/models
+// honest — only list models we can actually serve — a registry provider's models
+// are only registered when we can find credentials for it: an explicit bridge
+// key, a pi-ai-resolvable env key (incl. ADC/Bedrock/OAuth env tokens), or a
+// special custom provider the bridge routes those models through.
+
+const HOME = os.homedir()
+
+// Registry providers whose models the bridge reroutes to a special custom
+// provider instead of pi-ai's env-key path, mapped to that provider's name.
+const SPECIAL_ROUTING: Record<string, "antigravity" | "codex"> = {
+  google: "antigravity",
+  "google-vertex": "antigravity",
+  openai: "codex",
+  "openai-codex": "codex",
+}
+
+function codexReachable(config: BridgeConfig): boolean {
+  if (config.providers["codex"]?.auth_path) return true
+  if (process.env.CODEX_AUTH_PATH) return true
+  // codex's handler falls back to ~/.codex/auth.json
+  return fs.existsSync(path.join(HOME, ".codex", "auth.json"))
+}
+
+function antigravityReachable(config: BridgeConfig): boolean {
+  const ag = config.providers["antigravity"]
+  if (ag && (ag.refresh_token || ag.client_id)) return true
+  if (process.env.ANTIGRAVITY_REFRESH_TOKEN) return true
+  // antigravity's loader falls back to ~/.gemini/antigravity-cli/antigravity-oauth-token
+  return fs.existsSync(path.join(HOME, ".gemini", "antigravity-cli", "antigravity-oauth-token"))
+}
+
+/**
+ * Can we actually serve a pi-ai registry provider's models? Returns true when an
+ * explicit bridge key, a pi-ai-resolvable env key, or a configured special
+ * custom provider backs it.
+ */
+function providerHasCredentials(config: BridgeConfig, providerName: string): boolean {
+  // 1. Explicit key in bridge config for this provider name
+  if (config.providers[providerName]?.api_key) return true
+  // 2. pi-ai can resolve a key from env (incl. ADC/Bedrock/OAuth env tokens)
+  if (getEnvApiKey(providerName)) return true
+  // 3. Models rerouted to a configured special custom provider
+  switch (SPECIAL_ROUTING[providerName]) {
+    case "antigravity":
+      return antigravityReachable(config)
+    case "codex":
+      return codexReachable(config)
+    default:
+      return false
+  }
 }
 
 // ── Anthropic model discovery ───────────────────────────────────────────────────
@@ -95,8 +153,15 @@ async function fetchAnthropicModels(
  * Called on startup.
  */
 export async function discoverModels(config: BridgeConfig): Promise<void> {
-  // 1. Add models from pi-ai's built-in registry
+  // 1. Add models from pi-ai's built-in registry — but only for providers we
+  //    actually have credentials for, so /v1/models doesn't advertise hundreds
+  //    of unusable models (e.g. OpenRouter's 269).
+  const skipped: string[] = []
   for (const provider of getProviders()) {
+    if (!providerHasCredentials(config, provider)) {
+      skipped.push(provider)
+      continue
+    }
     for (const model of getModels(provider)) {
       // Only add if not already present (custom providers take priority)
       if (!config.models[model.id]) {
@@ -112,6 +177,9 @@ export async function discoverModels(config: BridgeConfig): Promise<void> {
         }
       }
     }
+  }
+  if (skipped.length) {
+    console.log(`[bridge] skipping ${skipped.length} registry provider(s) without credentials: ${skipped.join(", ")}`)
   }
 
   // 2. Discover models from custom providers with base_url + api_key
@@ -190,18 +258,31 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
     models: Object.keys(config.models).length,
   }))
 
-  // List all models
-  app.get("/v1/models", async () => {
-    const models = Object.values(config.models).map((m) => ({
-      id: m.id,
-      object: "model" as const,
-      created: 0,
-      owned_by: m.provider,
-      // Passthrough of the provider's context window so clients (e.g. coral's
-      // status display) can compute a context-usage percentage.
-      ...(m.contextWindow ? { context_length: m.contextWindow } : {}),
-    }))
-    return { object: "list", data: models }
+  // List models the caller is authorized to use. When API keys are configured,
+  // a valid key is required (401 otherwise, matching OpenAI/Anthropic) and only
+  // the models that key is scoped for are returned.
+  app.get("/v1/models", async (req: any, reply: any) => {
+    let authKey: ApiKeyEntry | null = null
+    if (apiKeys.size > 0) {
+      authKey = authenticate(req.headers.authorization, apiKeys)
+      if (!authKey) {
+        return reply.code(401).send({ error: { message: "Invalid or missing API key", type: "authentication_error" } })
+      }
+    }
+
+    const models = Object.values(config.models)
+      // Only serve models this key is scoped for. Open mode (no keys) sees all.
+      .filter((m) => !authKey || isModelAllowed(authKey, m.id))
+      .map((m) => ({
+        id: m.id,
+        object: "model" as const,
+        created: 0,
+        owned_by: m.provider,
+        // Passthrough of the provider's context window so clients (e.g. coral's
+        // status display) can compute a context-usage percentage.
+        ...(m.contextWindow ? { context_length: m.contextWindow } : {}),
+      }))
+    return reply.send({ object: "list", data: models })
   })
 
   // Provider usage — normalized "budget consumed" for the provider backing a
