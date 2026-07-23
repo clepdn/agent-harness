@@ -182,6 +182,21 @@ export interface CodexHandlerResult {
   status: number
   headers: Record<string, string>
   body: string
+  // Upstream x-codex-* rate-limit headers (usage snapshot), if any. Kept
+  // separate from `headers` so they're not forwarded to the client.
+  rateLimitHeaders?: Record<string, string>
+}
+
+/** Pull the x-codex-* rate-limit header family off an upstream response. */
+function extractCodexRateLimitHeaders(h: Headers): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (h && typeof h.forEach === "function") {
+    h.forEach((value: string, key: string) => {
+      const lower = key.toLowerCase()
+      if (lower.startsWith("x-codex-")) out[lower] = value
+    })
+  }
+  return out
 }
 
 /**
@@ -251,9 +266,10 @@ export async function handleCodexCompletion(
   }
   if (accountId) headers["chatgpt-account-id"] = accountId
   const upstream = await fetchImpl(CODEX_URL, { method: "POST", headers, body: JSON.stringify(upstreamBody) })
+  const rateLimitHeaders = extractCodexRateLimitHeaders(upstream.headers)
   const raw = await upstream.text()
   if (!upstream.ok) {
-    return { status: upstream.status, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: { message: raw || upstream.statusText, type: "codex_upstream_error" } }) }
+    return { status: upstream.status, headers: { "content-type": "application/json" }, body: JSON.stringify({ error: { message: raw || upstream.statusText, type: "codex_upstream_error" } }), rateLimitHeaders }
   }
   const events = parseSse(raw)
   const result = collectResult(events)
@@ -270,11 +286,12 @@ export async function handleCodexCompletion(
       chunks.push(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model: mapModel(requestBody.model, defaultModel), choices: [], usage })}\n\n`)
     }
     chunks.push("data: [DONE]\n\n")
-    return { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" }, body: chunks.join("") }
+    return { status: 200, headers: { "content-type": "text/event-stream; charset=utf-8", "cache-control": "no-cache" }, body: chunks.join(""), rateLimitHeaders }
   }
   return {
     status: 200,
     headers: { "content-type": "application/json" },
+    rateLimitHeaders,
     body: JSON.stringify({
       id, object: "chat.completion", created, model: mapModel(requestBody.model, defaultModel),
       choices: [{ index: 0, message: { role: "assistant", content: result.content || null, ...(result.toolCalls.length ? { tool_calls: result.toolCalls } : {}) }, finish_reason: finishReason }],

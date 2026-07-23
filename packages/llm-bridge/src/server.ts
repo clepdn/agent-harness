@@ -7,6 +7,8 @@ import { authenticate, isModelAllowed, type ApiKeyEntry } from "./auth"
 import { createAnthropicStore, type TokenStore } from "./anthropic-oauth"
 import { handleAntigravityCompletion } from "./antigravity"
 import { handleCodexCompletion } from "./codex"
+import { resolveProviderName, hasUsageSupport, getUsageForModel } from "./usage"
+import { recordCodexUsage } from "./codex-usage"
 import { getProviders, getModels } from "@earendil-works/pi-ai/compat"
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai"
 
@@ -195,8 +197,48 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
       object: "model" as const,
       created: 0,
       owned_by: m.provider,
+      // Passthrough of the provider's context window so clients (e.g. coral's
+      // status display) can compute a context-usage percentage.
+      ...(m.contextWindow ? { context_length: m.contextWindow } : {}),
     }))
     return { object: "list", data: models }
+  })
+
+  // Provider usage — normalized "budget consumed" for the provider backing a
+  // model. Auth mirrors chat completions. See usage.ts / umans.ts.
+  app.get("/v1/usage", async (req: any, reply: any) => {
+    let authKey: ApiKeyEntry | null = null
+    if (apiKeys.size > 0) {
+      authKey = authenticate(req.headers.authorization, apiKeys)
+      if (!authKey) {
+        return reply.code(401).send({ error: { message: "Invalid or missing API key", type: "authentication_error" } })
+      }
+    }
+
+    const modelId = (req.query?.model ?? "") as string
+    if (!modelId) {
+      return reply.code(400).send({ error: { message: "query param 'model' is required", type: "invalid_request_error" } })
+    }
+
+    if (authKey && !isModelAllowed(authKey, modelId)) {
+      return reply.code(403).send({ error: { message: `Key is not allowed to access model '${modelId}'`, type: "permission_error" } })
+    }
+
+    const providerName = resolveProviderName(config, modelId)
+    if (!providerName) {
+      return reply.code(404).send({ error: { message: `Model '${modelId}' not found`, type: "invalid_request_error" } })
+    }
+
+    if (!hasUsageSupport(providerName)) {
+      return reply.code(501).send({ available: false, provider: providerName, reason: "usage not implemented for this provider" })
+    }
+
+    const usage = await getUsageForModel(config, providerName, modelId)
+    if (!usage) {
+      return reply.code(502).send({ available: false, provider: providerName, reason: "usage fetch failed" })
+    }
+
+    return reply.send({ available: true, provider: providerName, ...usage })
   })
 
   // Unified chat completions — routes based on model name
@@ -234,6 +276,9 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
     if (isCodexModel(modelId)) {
       const codexProvider = config.providers["codex"]
       const result = await handleCodexCompletion(body, codexProvider)
+      // Push-model usage: cache the latest rate-limit snapshot from the
+      // upstream x-codex-* headers so /v1/usage can serve it.
+      if (result.rateLimitHeaders) recordCodexUsage("codex", result.rateLimitHeaders)
       return reply.code(result.status).headers(result.headers).send(result.body)
     }
 

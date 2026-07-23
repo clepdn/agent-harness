@@ -94,6 +94,7 @@ const METRIC_HELP: Record<string, { help: string; type: string }> = {
   coral_llm_tokens_per_second: { help: "Latest tokens per second", type: "gauge" },
   coral_requests_in_window_calculated: { help: "Requests in the rolling 5h window (our calculation)", type: "gauge" },
   coral_requests_in_window_api: { help: "Requests in window as reported by the umans API", type: "gauge" },
+  coral_provider_usage_ratio: { help: "Fraction (0-1) of the provider's usage budget consumed, from the bridge /v1/usage endpoint", type: "gauge" },
   coral_working: { help: "1 if agent is actively in a tool loop, 0 if idle", type: "gauge" },
 }
 
@@ -126,6 +127,15 @@ export function recordLlmRequest(
 /** Set the API-reported requests in window (from umans /v1/usage). */
 export function setApiRequestsInWindow(count: number): void {
   setGauge("coral_requests_in_window_api", count)
+}
+
+/**
+ * Set the provider usage ratio (0-1 consumed) for a provider/model, sourced
+ * from the bridge's normalized /v1/usage endpoint. Works across providers
+ * (umans, codex, anthropic) since it's the provider-agnostic `percent`.
+ */
+export function setProviderUsageRatio(provider: string, model: string, ratio: number): void {
+  setGauge("coral_provider_usage_ratio", ratio, { provider, model })
 }
 
 /** Set the working flag (1 = active tool loop, 0 = idle). */

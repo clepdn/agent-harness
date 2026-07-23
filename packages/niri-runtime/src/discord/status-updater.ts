@@ -1,23 +1,32 @@
 /**
  * Discord status updater — periodically sets the bot's custom activity
- * to show context usage and Umans API request count.
+ * to show context usage and provider budget usage.
  *
- * Format (model info available):  "x% [y/400]"
- * Format (model info unavailable): "205K [y/400]"
+ * Provider usage now comes from the llm-bridge's /v1/usage endpoint (the
+ * bridge holds the provider credential), so coral needs only its bridge
+ * client key. The bridge returns a provider-custom `display` string.
+ *
+ * Format (model info available):  "x% [123/400]"
+ * Format (model info unavailable): "205K [123/400]"
+ * Format (no provider usage):      "x%"
  */
 
 import type { Client } from "discord.js"
 import { config } from "../config"
-import { setApiRequestsInWindow } from "../prometheus"
+import { setApiRequestsInWindow, setProviderUsageRatio } from "../prometheus"
 
 const STATUS_INTERVAL_MS = 60_000
 
-interface UmansUsage {
-  usage: { requests_in_window: number }
-  limits: { requests: { hard_cap: number } }
+/** Normalized usage payload from the bridge's GET /v1/usage. */
+interface BridgeUsage {
+  available: boolean
+  provider?: string
+  percent?: number
+  display?: string
+  stats?: Record<string, unknown>
 }
 
-interface UmansModel {
+interface BridgeModel {
   id: string
   context_length?: number
 }
@@ -65,7 +74,7 @@ async function fetchModelContextLength(apiKey: string, baseUrl: string, modelId:
       headers: { Authorization: `Bearer ${apiKey}` },
     })
     if (!resp.ok) return
-    const data = (await resp.json()) as { data?: UmansModel[] }
+    const data = (await resp.json()) as { data?: BridgeModel[] }
     const model = data.data?.find((m) => m.id === modelId)
     if (model?.context_length) {
       maxContextTokens = model.context_length
@@ -74,13 +83,15 @@ async function fetchModelContextLength(apiKey: string, baseUrl: string, modelId:
   } catch {}
 }
 
-async function fetchUmansUsage(apiKey: string): Promise<UmansUsage | null> {
+async function fetchBridgeUsage(apiKey: string, baseUrl: string, modelId: string): Promise<BridgeUsage | null> {
   try {
-    const resp = await fetch("https://api.code.umans.ai/v1/usage", {
+    const resp = await fetch(`${baseUrl}/usage?model=${encodeURIComponent(modelId)}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     })
+    // 501/502 => provider has no usage concept (yet) or a transient failure.
     if (!resp.ok) return null
-    return (await resp.json()) as UmansUsage
+    const data = (await resp.json()) as BridgeUsage
+    return data.available ? data : null
   } catch {
     return null
   }
@@ -97,7 +108,7 @@ function formatContext(): string {
 }
 
 let intervalHandle: ReturnType<typeof setInterval> | null = null
-let lastRequests = 0
+let usageDisplay: string | null = null
 let modelInfoFetched = false
 
 export function startStatusUpdater(client: Client): void {
@@ -114,13 +125,23 @@ export function startStatusUpdater(client: Client): void {
       modelInfoFetched = true
     }
 
-    const usage = await fetchUmansUsage(apiKey)
-    if (usage) {
-      lastRequests = usage.usage.requests_in_window
-      setApiRequestsInWindow(lastRequests)
+    if (config.model.base_url && config.model.model) {
+      const usage = await fetchBridgeUsage(apiKey, config.model.base_url, config.model.model)
+      if (usage) {
+        usageDisplay = usage.display ?? usageDisplay
+        // Cross-provider usage ratio (0-1) — works for umans/codex/anthropic.
+        if (typeof usage.percent === "number") {
+          setProviderUsageRatio(usage.provider ?? "unknown", config.model.model, usage.percent)
+        }
+        // Keep the api-usage gauge fed when the provider exposes a raw window count.
+        const raw = (usage.stats as { usage?: { requests_in_window?: number } } | undefined)?.usage?.requests_in_window
+        if (typeof raw === "number") setApiRequestsInWindow(raw)
+      }
     }
 
-    const autoInfo = `${working ? "working " : ""}${formatContext()} [${lastRequests}/400]`
+    const segments = [formatContext()]
+    if (usageDisplay) segments.push(`[${usageDisplay}]`)
+    const autoInfo = `${working ? "working " : ""}${segments.join(" ")}`
 
     const status = customStatusText
       ? `${customStatusText} | ${autoInfo}`
