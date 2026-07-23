@@ -87,8 +87,9 @@ export function authenticate(
   apiKeys: Map<string, ApiKeyEntry>,
 ): ApiKeyEntry | null {
   if (!authHeader) return null
-  if (!authHeader.startsWith("Bearer ")) return null
-  const token = authHeader.slice(7).trim()
+  const token = authHeader.startsWith("Bearer ")
+    ? authHeader.slice(7).trim()
+    : authHeader.trim()
   return apiKeys.get(token) ?? null
 }
 
