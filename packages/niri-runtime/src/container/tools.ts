@@ -5,7 +5,6 @@ import {
   DEFAULT_COMMAND_TIMEOUT_MS,
   DEFAULT_FILE_TIMEOUT_MS,
   IMAGE_MAX_BYTES,
-  IMAGE_ROOT,
   USE_DOCKER_SHELL,
   normalizeTimeoutMs,
   resolveMaxLines,
@@ -97,16 +96,6 @@ export async function runCommand(command: string, maxLines?: number, timeoutMs?:
   return `[truncated — showing last ${cap} of ${lines.length} lines]\n${kept.join("\n")}`
 }
 
-function normalizeImagePath(filePath: string): string {
-  const raw = String(filePath ?? "").trim()
-  if (!raw) throw new Error("image path is required")
-  const normalized = path.posix.normalize(raw)
-  if (!(normalized === IMAGE_ROOT || normalized.startsWith(`${IMAGE_ROOT}/`))) {
-    throw new Error(`image path must be inside ${IMAGE_ROOT}`)
-  }
-  return normalized
-}
-
 async function resolveLocalPath(filePath: string, timeoutMs: number): Promise<string> {
   const raw = String(filePath ?? "").trim()
   if (!raw) throw new Error("path is required")
@@ -150,15 +139,14 @@ function imageMimeFromBytes(filePath: string, data: Buffer): string | null {
 
 /**
  * Read an image from the container and encode it as a data URL for multimodal input.
- * Only paths inside the configured IMAGE_ROOT are allowed.
  *
- * @param filePath - Absolute image path inside the allowed image root.
+ * @param filePath - Absolute path to an image file.
  * @param timeoutMs - Optional read timeout in milliseconds.
  * @returns Parsed image payload suitable for model multimodal input.
- * @throws If validation, decoding, or path checks fail.
+ * @throws If decoding or file checks fail.
  */
 export async function readImageForModel(filePath: string, timeoutMs?: number): Promise<ModelImageInput> {
-  const safePath = normalizeImagePath(filePath)
+  const safePath = path.normalize(filePath)
   const opTimeoutMs = normalizeTimeoutMs(timeoutMs, DEFAULT_FILE_TIMEOUT_MS)
 
   if (!USE_DOCKER_SHELL) {

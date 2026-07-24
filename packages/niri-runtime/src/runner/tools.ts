@@ -94,11 +94,11 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "image_tool",
-    description: `Attach an image from ${IMAGE_ROOT_HINT} so it is injected as a multimodal user message on the next model turn. Use this after creating/downloading an image with shell.`,
+    description: `Attach an image (e.g. ${IMAGE_ROOT_HINT}/screenshot.png) so it is injected as a multimodal user message on the next model turn. Use this after creating/downloading an image with shell.`,
     parameters: s({
       type: "object",
       properties: {
-        path: { type: "string", description: `Absolute image path inside ${IMAGE_ROOT_HINT} (for example ${IMAGE_ROOT_HINT}/screenshot.png).` },
+        path: { type: "string", description: `Absolute path to an image file (for example ${IMAGE_ROOT_HINT}/screenshot.png).` },
         note: { type: "string", description: "Optional text instruction to accompany the image for the next turn." },
         timeout_ms: { type: "integer", description: "Read timeout in milliseconds. Defaults to 120000. Max 600000." },
       },
