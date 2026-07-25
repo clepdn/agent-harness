@@ -173,7 +173,8 @@
 				Group            = cfg.group;
 				WorkingDirectory = cfg.homeDir;
 				ExecStart        = "${pkgs.bash}/bin/bash -lc '${cfg.package}/bin/coral${configFlag}${secretsFlag}'";
-				Restart          = "on-failure";
+				Environment      = "NIRI_MANAGED_WORKER=true";
+				Restart          = "always";
 				RestartSec       = "10s";
 			    };
 			};
@@ -276,7 +277,7 @@
 				Group            = cfg.group;
 				WorkingDirectory = "/var/lib/llm-bridge";
 				ExecStart        = "${pkgs.bash}/bin/bash -lc '${cfg.package}/bin/llm-bridge${configFlag}${keysFlag}'";
-				Restart          = "on-failure";
+				Restart          = "always";
 				RestartSec       = "10s";
 			    };
 			};

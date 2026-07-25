@@ -287,7 +287,28 @@ function resolvePreset(section: TomlValue | undefined, presets: TomlTable): Toml
  */
 export function getModelPreset(name: string): Record<string, unknown> | null {
   const preset = modelsT[name.trim()]
-  return isTable(preset) ? preset : null
+  if (!isTable(preset)) return null
+  // Resolve bridge/provider/api_key just like resolvePreset does at startup,
+  // so runtime model swaps see the correct bridge url and key.
+  const resolved = { ...preset }
+  if (resolved.bridge === true) {
+    const bridgeUrl = str(merged.llm_bridge_url, "").trim()
+    if (bridgeUrl) {
+      resolved.provider = "openai"
+      resolved.base_url = bridgeUrl
+    }
+    const presetKey = str(preset.api_key, "").trim()
+    const bridgeKey = str(merged.llm_bridge_api_key, "").trim()
+    if (presetKey) {
+      resolved.api_key = presetKey
+    } else if (bridgeKey) {
+      resolved.api_key = bridgeKey
+    } else {
+      delete resolved.api_key
+    }
+  }
+  delete resolved.bridge
+  return resolved
 }
 
 /**
