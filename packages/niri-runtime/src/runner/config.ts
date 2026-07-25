@@ -68,6 +68,7 @@ export const FALLBACK_TOOL_CHOICE = config.fallback.tool_choice
 // ── Thinking ──────────────────────────────────────────────────────────────────
 export const ENABLE_THINKING = config.model.enable_thinking
 export const THINKING_EFFORT = config.model.thinking_effort
+export const PRIMARY_VISION = config.model.vision
 
 // ── Extra headers ─────────────────────────────────────────────────────────────
 const fallbackHeaders: Record<string, string> = {}

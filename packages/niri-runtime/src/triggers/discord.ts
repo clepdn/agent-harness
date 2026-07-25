@@ -2,7 +2,7 @@ import type { UserMessage } from "../types"
 import { getDb } from "../db"
 import { asObject, asString, extractImageAttachments, renderDiscordUserMentions } from "../discord/parse"
 import { getCachedPronouns } from "../discord/pronouns"
-import { config } from "../config"
+import { modelState } from "../runner/model-state"
 
 function asIsoTimestamp(value: unknown, fallback: string): string {
   if (typeof value !== "string" && typeof value !== "number") return fallback
@@ -88,7 +88,7 @@ function formatImageBlock(images: ReturnType<typeof extractImageAttachments>): s
     const meta = [img.filename, img.contentType].filter(Boolean).join(", ")
     return `- ${img.url}${meta ? ` (${meta})` : ""}`
   })
-  return `\n\nimages (discord cdn links — download with shell${config.model.vision ? ", then inspect with image_tool if useful" : ""}):\n${lines.join("\n")}`
+  return `\n\nimages (discord cdn links — download with shell${modelState.primaryVision ? ", then inspect with image_tool if useful" : ""}):\n${lines.join("\n")}`
 }
 
 export function fromDiscord(body: unknown): UserMessage {

@@ -194,6 +194,7 @@ async function handleModelInfo(interaction: ChatInputCommandInteraction): Promis
     `**use fallback:** ${modelState.useFallback}`,
     `**thinking:** ${modelState.enableThinking ? `on (${modelState.thinkingEffort})` : "off"}`,
     `**tool choice:** ${modelState.primaryToolChoice}`,
+    `**vision:** ${modelState.primaryVision}`,
   ]
 
   await interaction.reply({ content: lines.join("\n"), ephemeral: true })

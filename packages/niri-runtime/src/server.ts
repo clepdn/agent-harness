@@ -343,6 +343,7 @@ export function createServer(options: { requestRestart?: (reason?: string) => vo
     useFallback: modelState.useFallback,
     enableThinking: modelState.enableThinking,
     thinkingEffort: modelState.thinkingEffort,
+    vision: modelState.primaryVision,
   }))
 
   app.post("/awp/swap-model", async (req, reply) => {

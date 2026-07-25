@@ -24,6 +24,7 @@ import {
   FALLBACK_TOOL_CHOICE as initFallbackToolChoice,
   ENABLE_THINKING as initEnableThinking,
   THINKING_EFFORT as initThinkingEffort,
+  PRIMARY_VISION as initPrimaryVision,
   RESPECT_CACHE as initRespectCache,
   USE_FALLBACK as initUseFallback,
 } from "./config"
@@ -33,6 +34,7 @@ export interface RuntimeModelConfig {
   primaryModel: Model | null
   primaryApiKey: string | undefined
   primaryToolChoice: ToolChoice
+  primaryVision: boolean
   enableThinking: boolean
   thinkingEffort: ThinkingEffort
 
@@ -58,6 +60,7 @@ export const modelState: RuntimeModelConfig = {
   primaryModel: initPrimaryModel,
   primaryApiKey: initPrimaryKey,
   primaryToolChoice: initPrimaryToolChoice,
+  primaryVision: initPrimaryVision,
   enableThinking: initEnableThinking,
   thinkingEffort: initThinkingEffort,
 
@@ -83,6 +86,7 @@ export type SwapDecision =
       toolChoice: ToolChoice
       enableThinking: boolean
       thinkingEffort: ThinkingEffort
+      vision: boolean
     }
   | { action: "rest"; preset: string; reason: string }
 
@@ -173,6 +177,9 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
       ? (preset.thinking_effort as ThinkingEffort)
       : modelState.thinkingEffort
 
+  const vision =
+    typeof preset.vision === "boolean" ? preset.vision : modelState.primaryVision
+
   return {
     action: "swap",
     preset: presetName,
@@ -181,6 +188,7 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
     toolChoice,
     enableThinking,
     thinkingEffort,
+    vision,
   }
 }
 
@@ -192,11 +200,12 @@ export function applyModelSwap(decision: Extract<SwapDecision, { action: "swap" 
   modelState.primaryModel = decision.model
   modelState.primaryApiKey = decision.apiKey
   modelState.primaryToolChoice = decision.toolChoice
+  modelState.primaryVision = decision.vision
   modelState.enableThinking = decision.enableThinking
   modelState.thinkingEffort = decision.thinkingEffort
 
   console.log(
     `[model-swap] swapped primary model to ${decision.model.id} ` +
-      `(provider=${decision.model.provider}, base=${decision.model.baseUrl})`,
+      `(provider=${decision.model.provider}, base=${decision.model.baseUrl}, vision=${decision.vision})`,
   )
 }

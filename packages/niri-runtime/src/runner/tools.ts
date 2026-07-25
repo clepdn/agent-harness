@@ -292,6 +292,8 @@ export const TOOLS: Tool[] = [
   },
 ]
 
+import { modelState } from "./model-state"
+
 // ── Tool filtering ────────────────────────────────────────────────────────────
 
 /** All tool names in declaration order. */
@@ -304,14 +306,16 @@ export const ALL_TOOL_NAMES = TOOLS.map((t) => t.name)
  */
 export function isToolEnabled(name: string): boolean {
   const { enabled_tools, blacklisted_tools } = config.tools
-  if (name === "image_tool" && !config.model.vision) return false
+  if (name === "image_tool" && !modelState.primaryVision) return false
   if (name === "computer" && !config.computer_use.enabled) return false
   const enabled = enabled_tools.length === 0 || enabled_tools.includes(name)
   return enabled && !blacklisted_tools.includes(name)
 }
 
 /** Filtered tool list for the main agent (after [tools] config). */
-const ACTIVE_TOOLS = TOOLS.filter((t) => isToolEnabled(t.name))
+function getActiveTools(): Tool[] {
+  return TOOLS.filter((t) => isToolEnabled(t.name))
+}
 
 /**
  * Returns true if a tool is available to a subagent.
@@ -344,6 +348,6 @@ export function buildContext(state: Pick<LoopState, "systemPrompt" | "conversati
   return {
     systemPrompt: state.systemPrompt || undefined,
     messages: state.conversation,
-    tools: ACTIVE_TOOLS,
+    tools: getActiveTools(),
   }
 }
