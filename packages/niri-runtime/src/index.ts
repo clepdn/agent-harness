@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process"
+import { tryShim, SHIM_FAILED_ENV } from "./shim"
 import { REPO_ROOT } from "./agent-config"
 import { createServer } from "./server"
 import { initDb } from "./db"
@@ -30,6 +31,16 @@ function spawnReplacementProcess(): void {
 }
 
 async function main() {
+  // Check for shim mode before anything else.
+  // If the shim is active, this blocks until the child exits.
+  // On clean exit (0) the process terminates here.
+  // On failure we fall through to normal startup in safe mode.
+  await tryShim()
+
+  if (process.env[SHIM_FAILED_ENV]) {
+    console.warn("[niri] started in safe mode — shim child failed, running from nix store")
+  }
+
   if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error(`invalid worker port: ${process.env.PORT}`)
   process.umask(0o077)
   console.log("[niri] starting up...")
