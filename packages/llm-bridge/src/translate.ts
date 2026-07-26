@@ -123,15 +123,9 @@ export function oaiMessagesToContext(
         break
 
       case "user": {
-        const parts = oaiContentToParts(msg.content)
-        // If all parts are text, collapse to a plain string for backward compat.
-        // Otherwise pass the array (includes image content).
-        const hasImages = parts.some((p) => p.type === "image")
         piMessages.push({
           role: "user",
-          content: hasImages
-            ? parts
-            : parts.map((p) => (p.type === "text" ? p.text : "")).join(""),
+          content: oaiContentToParts(msg.content),
           timestamp: Date.now(),
         } as UserMessage)
         break
