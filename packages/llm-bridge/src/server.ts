@@ -12,6 +12,7 @@ import { handleAntigravityCompletion } from "./antigravity"
 import { handleCodexCompletion } from "./codex"
 import { resolveProviderName, hasUsageSupport, getUsageForModel } from "./usage"
 import { recordCodexUsage } from "./codex-usage"
+import { capImagesForUmans, isUmansModel, UMANS_MAX_IMAGES } from "./umans"
 import { getProviders, getModels, getEnvApiKey } from "@earendil-works/pi-ai/compat"
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai"
 
@@ -384,7 +385,19 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
           temperature: body.temperature,
         })
       : (() => {
-          const context = oaiMessagesToContext(body.messages ?? [], body.tools)
+          // umans corner: the upstream rejects a request carrying more than
+          // UMANS_MAX_IMAGES images, so keep only the most recent ones.
+          let messages = body.messages ?? []
+          if (isUmansModel(modelConfig)) {
+            const capped = capImagesForUmans(messages)
+            if (capped.dropped > 0) {
+              console.log(
+                `[bridge] umans: dropped ${capped.dropped} image(s) over the ${UMANS_MAX_IMAGES}-image cap`,
+              )
+            }
+            messages = capped.messages
+          }
+          const context = oaiMessagesToContext(messages, body.tools)
           const piModel = buildModel(modelConfig)
           const options = {
             apiKey: resolvedApiKey,

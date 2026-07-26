@@ -9,7 +9,7 @@ import type {
 
 // ── OAI → pi-ai translation ───────────────────────────────────────────────────
 
-interface OaiMessage {
+export interface OaiMessage {
   role: string
   content?: string | OaiContentPart[] | null
   tool_calls?: Array<{
