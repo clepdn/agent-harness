@@ -49,6 +49,56 @@ export function oaiContentToText(content: unknown): string {
   return ""
 }
 
+/**
+ * Parse a data URL (`data:image/jpeg;base64,...`) into its mimeType and base64
+ * data components. Returns `null` if the string is not a valid data URL.
+ */
+function parseDataUrl(url: string): { mimeType: string; data: string } | null {
+  const match = url.match(/^data:([^;]+);base64,(.+)$/)
+  if (!match) return null
+  return { mimeType: match[1], data: match[2] }
+}
+
+/**
+ * Convert an OpenAI `content` field into pi-ai content parts, preserving image
+ * content. Plain strings become a single text part. Arrays are mapped
+ * element-by-element: `{ type: "text" }` → TextContent, `{ type: "image_url" }`
+ * → ImageContent (data URL is parsed into mimeType + base64 data).
+ *
+ * Image parts that cannot be parsed (e.g. non-data URLs) are silently dropped.
+ */
+export function oaiContentToParts(
+  content: unknown,
+): Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> {
+  if (typeof content === "string") {
+    return content ? [{ type: "text", text: content }] : []
+  }
+  if (!Array.isArray(content)) return []
+
+  const parts: Array<{ type: "text"; text: string } | { type: "image"; data: string; mimeType: string }> = []
+
+  for (const p of content) {
+    if (!p || typeof p !== "object") continue
+    const part = p as OaiContentPart
+
+    if (typeof part.text === "string" && part.text) {
+      parts.push({ type: "text", text: part.text })
+      continue
+    }
+
+    if (part.type === "image_url" && part.image_url) {
+      const url = typeof part.image_url === "string" ? part.image_url : part.image_url.url
+      if (!url) continue
+      const parsed = parseDataUrl(url)
+      if (parsed) {
+        parts.push({ type: "image", data: parsed.data, mimeType: parsed.mimeType })
+      }
+    }
+  }
+
+  return parts
+}
+
 interface OaiTool {
   type: string
   function: {
@@ -73,9 +123,15 @@ export function oaiMessagesToContext(
         break
 
       case "user": {
+        const parts = oaiContentToParts(msg.content)
+        // If all parts are text, collapse to a plain string for backward compat.
+        // Otherwise pass the array (includes image content).
+        const hasImages = parts.some((p) => p.type === "image")
         piMessages.push({
           role: "user",
-          content: oaiContentToText(msg.content),
+          content: hasImages
+            ? parts
+            : parts.map((p) => (p.type === "text" ? p.text : "")).join(""),
           timestamp: Date.now(),
         } as UserMessage)
         break
