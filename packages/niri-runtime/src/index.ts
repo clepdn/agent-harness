@@ -12,8 +12,11 @@ import { setDiscordToolsAvailable } from "./discord/availability"
 import { ensureSoulFilePlacement } from "./bootstrap"
 import { startLlmBridge, stopLlmBridge } from "./llm-bridge"
 import { clientTools } from "./client"
+import { config } from "./config"
 
-const PORT = Number.parseInt(process.env.PORT ?? "3000", 10)
+// The control plane assigns each worker its port via PORT; standalone runs take
+// it from [server].port. Env wins so one config file can back many workers.
+const PORT = Number.parseInt(process.env.PORT ?? String(config.server.port), 10)
 const WORKER_HOST = process.env.NIRI_WORKER_HOST?.trim() || "127.0.0.1"
 const RESTART_COMMAND = process.env.NIRI_RESTART_COMMAND?.trim() || "npm run start:worker"
 const MANAGED_WORKER = process.env.NIRI_MANAGED_WORKER?.trim().toLowerCase() === "true"
@@ -41,7 +44,7 @@ async function main() {
     console.warn("[niri] started in safe mode — shim child failed, running from nix store")
   }
 
-  if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error(`invalid worker port: ${process.env.PORT}`)
+  if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error(`invalid worker port: ${process.env.PORT ?? config.server.port}`)
   process.umask(0o077)
   console.log("[niri] starting up...")
 

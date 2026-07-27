@@ -4,13 +4,13 @@
 
 ```sh
 npm ci
-cp agents/mira.example.yaml agents/mira.yaml
-chmod 600 agents/mira.yaml
-# edit agents/mira.yaml
+cp agents/mira.example.toml agents/mira.toml
+chmod 600 agents/mira.toml
+# edit agents/mira.toml
 npm start
 ```
 
-The server reads every `.yaml` and `.yml` file in `agents/`. Files ending in `.example.yaml` or `.example.yml` are skipped.
+The server reads every `.toml` file in `agents/`. Files ending in `.example.toml` are skipped.
 
 ## Run a client
 
@@ -36,70 +36,58 @@ For example, an agent with `home: /home/niri` keeps long-term memories in `/home
 
 For routine maintenance, ask the agent to inspect, organize, or repair their own memories using the memory tools. Treat `soul.md` and `memories/` like a private diary: do not read or change them unless the agent asks; it's weird if you do. For backup or recovery, stop the worker and preserve the entire agent home rather than copying only the Markdown files.
 
-## Agent YAML specification
+## Agent TOML specification
+
+One file in `agents/` is one agent. Files ending in `.example.toml` are skipped.
+Keys are literal — write nested values as tables, never as dotted keys.
+
+An agent file describes only what the control plane owns. Everything the agent
+*runs on* — model, fallback, tools, context, Discord, subagents — lives in the
+runtime TOML named by `config`, in the same format a standalone
+`coral --config …` run reads. There is one config dialect, and both ways of
+starting a worker feed it the identical file.
 
 ### Top level
 
 | Field | Type | Required | Default |
 | --- | --- | --- | --- |
-| `id` | string matching `[a-zA-Z0-9_-]+` | no | filename without `.yaml` or `.yml` |
+| `id` | string matching `[a-zA-Z0-9_-]+` | no | filename without `.toml` |
 | `name` | string | no | `id` |
 | `port` | integer `1..65535` | no | control port plus the file's sorted position |
 | `home` | path | no | `data/agents/<id>` |
 | `client` | `local` or an HTTP(S) URL | yes | — |
-| `workspace` | path | no | repository root; applies to `client: local` |
-| `model` | object | no | — |
-| `fallback` | object | no | — |
-| `embedding` | object | no | — |
-| `summary` | object | no | — |
-| `discord` | object | no | — |
-| `settings` | object | no | `{}` |
+| `workspace` | path | no | repository root; applies to `client = "local"` |
+| `config` | path, or a list of paths | no | — |
+| `secrets` | path | no | — |
+| `[settings]` | table | no | `{}` |
 
-Relative `home` and `workspace` paths resolve from the repository root.
+Relative `home`, `workspace`, `config`, and `secrets` paths resolve from the
+repository root. A `config` or `secrets` path that does not exist fails startup.
 
-### `model`
+### `config` and `secrets`
 
-| Field | Type |
-| --- | --- |
-| `provider` | `openai` or `anthropic` |
-| `name` | string |
-| `baseUrl` | string |
-| `apiKey` | string |
-| `thinking` | boolean |
+The worker is spawned with these as `--config` and `--secrets` flags. `config`
+may be a list: each file is deep-merged over the previous one, so several
+agents can share a base file and layer their own differences on top. `secrets`
+is merged last, so a key set in both resolves to the secrets value.
 
-### `fallback` and `summary`
+```toml
+config = ["/etc/coral/config.toml", "/etc/coral/agents/mira.toml"]
+secrets = "/run/agenix/coralSecrets"
+```
 
-| Field | Type |
-| --- | --- |
-| `name` | string |
-| `baseUrl` | string |
-| `apiKey` | string |
+Credentials reach the worker as files, never as environment variables — the
+agent's own shell tool inherits that environment.
 
-### `embedding`
+### `[settings]`
 
-| Field | Type |
-| --- | --- |
-| `name` | string |
-| `baseUrl` | string |
-| `apiKey` | string |
-| `dimensions` | positive integer |
+`settings` accepts string, number, and boolean values keyed by uppercase
+runtime setting names, and becomes the worker's environment. It is for the
+settings that are genuinely environment-shaped; anything the runtime reads from
+TOML belongs in `config`. Names the server manages — `PORT`, `HOME`,
+`CORAL_CONFIG`, `CORAL_SECRETS`, and the `NIRI_*` prefixes — are rejected.
 
-### `discord`
-
-| Field | Type |
-| --- | --- |
-| `token` | string |
-| `enabled` | boolean |
-| `botUserId` | string |
-| `dmWhitelist` | comma-separated string |
-| `scanChannelIds` | comma-separated string |
-| `wakeOnEvent` | boolean |
-
-### `settings`
-
-`settings` accepts string, number, and boolean values keyed by uppercase runtime setting names.
-
-> **TODO:** Promote active settings into first-party YAML sections for tools, context management, Discord batching/cooldowns, state, and bridges. Remove the settings that have no runtime reader.
+> **TODO:** Promote the remaining active settings into first-party TOML sections for tools, context management, Discord batching/cooldowns, state, and bridges. Remove the settings that have no runtime reader.
 
 #### Tools and model calls
 
@@ -159,7 +147,7 @@ Relative `home` and `workspace` paths resolve from the repository root.
 
 Agent ids, worker ports, canonical home paths, Discord tokens, and enabled bridge ports must be unique.
 
-Agent YAML files contain credentials and should use mode `0600`. Tool-client endpoints should stay on loopback or a trusted private network.
+Agent TOML files contain credentials and should use mode `0600`. Tool-client endpoints should stay on loopback or a trusted private network.
 
 ## Check the repository
 

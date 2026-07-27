@@ -16,6 +16,13 @@ import {
 
 initDb()
 
+/** Archived rows store the whole original message under `content`; pull its inner content out. */
+function sourceContent(message: { content: unknown }): unknown {
+  const source = message.content
+  if (source && typeof source === "object" && "content" in source) return source.content
+  return source
+}
+
 test("immutable context archive preserves exact messages and supports literal search", () => {
   const marker = `lossless-search-${Date.now()}`
   const message = { role: "user", content: `the exact hidden detail is ${marker}` } as Message
@@ -52,7 +59,7 @@ test("summary DAG expands parent provenance before newer direct messages", () =>
   assert.ok(expanded)
   assert.equal(expanded.totalMessages, 3)
   assert.deepEqual(
-    expanded.messages.map((message) => (message.content as { content: string }).content),
+    expanded.messages.map(sourceContent),
     [first.content, second.content, third.content],
   )
 
@@ -136,7 +143,6 @@ test("rest snapshot extends the current summary with the exact raw tail", () => 
   const preSummaryWake = makeUserMessage("legacy wake message before summary") as Message
 
   const snapshot = recordRestContextSnapshot([
-    { role: "system", content: "bootstrap" },
     preSummaryWake,
     { role: "user", content: parentForest },
     ...tail,
@@ -148,7 +154,7 @@ test("rest snapshot extends the current summary with the exact raw tail", () => 
   const expanded = expandContextSummary(snapshot.summaryId, 0, 10)
   assert.ok(expanded)
   assert.deepEqual(
-    expanded.messages.map((message) => (message.content as { content: string }).content),
+    expanded.messages.map(sourceContent),
     [oldSource.content, preSummaryWake.content, tail[0]?.content, tail[1]?.content],
   )
 })
@@ -162,5 +168,11 @@ test("rest snapshot creates a recoverable summary before the first compaction", 
 
   assert.match(snapshot.forest, /^\[context summary v1\]/)
   assert.equal(contextSummaryId(snapshot.forest), snapshot.summaryId)
-  assert.equal(expandContextSummary(snapshot.summaryId)?.totalMessages, 1)
+  const expanded = expandContextSummary(snapshot.summaryId)
+  assert.ok(expanded)
+  assert.equal(expanded.totalMessages, 2)
+  assert.deepEqual(
+    expanded.messages.map(sourceContent),
+    ["bootstrap", raw.content],
+  )
 })

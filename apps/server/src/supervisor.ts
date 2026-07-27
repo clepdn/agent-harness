@@ -11,6 +11,18 @@ type SupervisorOptions = {
   onReady: (agent: ResolvedLocalAgent) => void
 }
 
+/**
+ * The worker takes its whole configuration from TOML, so the control plane
+ * hands it the very flags a standalone `coral` run would use. Nothing about
+ * the model, tools, or Discord travels through the environment.
+ */
+function workerArgs(agent: ResolvedLocalAgent): string[] {
+  return [
+    ...agent.config.flatMap((file) => ["--config", file]),
+    ...(agent.secrets ? ["--secrets", agent.secrets] : []),
+  ]
+}
+
 const HEALTH_TIMEOUT_MS = 30_000
 const STOP_TIMEOUT_MS = 75_000
 
@@ -77,7 +89,7 @@ export class LocalAgentSupervisor {
     await fs.mkdir(this.agent.home, { recursive: true, mode: 0o700 })
     await fs.chmod(this.agent.home, 0o700)
     const instanceId = randomUUID()
-    const child = spawn(process.execPath, ["--import", "tsx", this.options.workerEntry], {
+    const child = spawn(process.execPath, ["--import", "tsx", this.options.workerEntry, ...workerArgs(this.agent)], {
       cwd: this.options.repoRoot,
       env: { ...this.options.workerEnv, NIRI_WORKER_INSTANCE_ID: instanceId },
       stdio: "inherit",

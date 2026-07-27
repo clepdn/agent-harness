@@ -68,7 +68,7 @@ test("applyDiscordSendNudge fires after a harness restart when the discord event
 
   const turnMessages: Message[] = [state.conversation[1]!]
 
-  const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
+  const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages, 1)
 
   assert.equal(nudged, true)
   assert.equal(state.conversation.length, 3)
@@ -79,20 +79,17 @@ test("applyDiscordSendNudge does not fire when discord_send was already called",
   const state = makeState()
   const turnMessages: Message[] = [
     makeUserMessage("[user/discord] [discord/channel] can you reply"),
-    {
-      role: "assistant",
-      content: "sending now",
-      tool_calls: [
+    makeAssistantMessage("sending now", {
+      content: [
+        { type: "text", text: "sending now" },
         {
+          type: "toolCall",
           id: "call_123",
-          type: "function",
-          function: {
-            name: "discord_send",
-            arguments: "{\"channel_id\":\"1\",\"content\":\"sending now\"}",
-          },
+          name: "discord_send",
+          arguments: { channel_id: "1", content: "sending now" },
         },
       ],
-    } as unknown as Message,
+    }),
   ]
 
   const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
@@ -105,22 +102,14 @@ test("applyDiscordSendNudge keeps a wake DM active across a preliminary tool ste
   const state = makeState()
   state.conversation.push(
     makeUserMessage("[wake] 7/14/2026, 3:22:59 AM — triggered by discord\n\n[discord/dm] @meowskullz\n\nboop"),
-    {
-      role: "assistant",
-      content: "",
-      tool_calls: [
-        {
-          id: "call_memory",
-          type: "function",
-          function: { name: "memory_read", arguments: '{"path":"wake.md"}' },
-        },
-      ],
-    } as unknown as Message,
+    makeAssistantMessage("", {
+      content: [{ type: "toolCall", id: "call_memory", name: "memory_read", arguments: { path: "wake.md" } }],
+    }),
     makeToolResultMessage("call_memory", "test", "wake notes"),
     makeAssistantMessage("hey you ^.^"),
   )
 
-  const nudged = __loopTest.applyDiscordSendNudge(state, [state.conversation[3]!])
+  const nudged = __loopTest.applyDiscordSendNudge(state, state.conversation.slice(1), 1)
 
   assert.equal(nudged, true)
   assert.match(String(state.conversation[4]?.content), /did not call discord_send/i)
@@ -130,28 +119,20 @@ test("applyDiscordSendNudge sees discord_send from an earlier tool step in the a
   const state = makeState()
   state.conversation.push(
     makeUserMessage("[wake] 7/14/2026, 3:22:59 AM — triggered by discord\n\n[discord/dm] @meowskullz\n\nboop"),
-    {
-      role: "assistant",
-      content: "",
-      tool_calls: [
-        {
-          id: "call_send",
-          type: "function",
-          function: { name: "discord_send", arguments: '{"source_item_id":"1","content":"boop"}' },
-        },
-      ],
-    } as unknown as Message,
+    makeAssistantMessage("", {
+      content: [{ type: "toolCall", id: "call_send", name: "discord_send", arguments: { source_item_id: "1", content: "boop" } }],
+    }),
     makeToolResultMessage("call_send", "test", "sent!"),
     makeAssistantMessage("okay, delivered"),
   )
 
-  const nudged = __loopTest.applyDiscordSendNudge(state, [state.conversation[3]!])
+  const nudged = __loopTest.applyDiscordSendNudge(state, state.conversation.slice(1), 1)
 
   assert.equal(nudged, false)
   assert.equal(state.conversation.length, 4)
 })
 
-test("applyLoopGuardNudge appends an in-band user nudge and saves", async () => {
+test("applyLoopGuardNudge appends an in-band user nudge", async () => {
   const state = makeState()
   let saved = false
 
@@ -177,7 +158,9 @@ test("applyLoopGuardNudge appends an in-band user nudge and saves", async () => 
     "loop guard tripped after 120 turns",
   )
 
-  assert.equal(saved, true)
+  // Persistence is deliberately deferred: the nudge lands in-band and is
+  // written out later by the rest snapshot, not by applyLoopGuardNudge.
+  assert.equal(saved, false)
   assert.equal(state.conversation.length, 1)
   assert.equal(state.conversation[0]?.role, "user")
   assert.match(String(state.conversation[0]?.content), /loop guard tripped after 120 turns/i)

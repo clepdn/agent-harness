@@ -1,5 +1,5 @@
 import { stat } from "fs/promises";
-import { resolveMutationTargetPath } from "./fs-write";
+import { resolveMutationTargetPath } from "./fs-write.js";
 
 export type SnapshotInfo = {
 	snapshotId: string;

@@ -27,7 +27,8 @@ export async function resolveMutationTargetPath(path: string): Promise<string> {
 			return currentPath;
 		}
 
-		const [nextPart, ...tail] = remainingParts;
+		// Length checked above, so the head is present.
+		const [nextPart, ...tail] = remainingParts as [string, ...string[]];
 		const candidatePath = join(currentPath, nextPart);
 
 		try {

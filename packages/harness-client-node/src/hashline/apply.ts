@@ -4,7 +4,7 @@
  * Vendored & adapted from oh-my-pi (MIT, github.com/can1357/oh-my-pi).
  */
 
-import { throwIfAborted } from "./runtime";
+import { throwIfAborted } from "./runtime.js";
 import {
 	RE_SIGNIFICANT,
 	computeLineHash,
@@ -13,13 +13,13 @@ import {
 	isFuzzyEquivalentLine,
 	hintMatchesLine,
 	hintHasSignal,
-} from "./hash";
+} from "./hash.js";
 import {
 	getHashlineBarePrefixRe,
 	type Anchor,
 	type HashlineEdit,
-} from "./parse";
-import { computeChangedLineRange } from "./format";
+} from "./parse.js";
+import { computeChangedLineRange } from "./format.js";
 
 interface HashMismatch {
 	line: number;
@@ -679,7 +679,12 @@ function validateAnchorEdits(
 				return true;
 			}
 		}
-		mismatches.push({ line: ref.line, expected: ref.hash, actual, textHint: ref.textHint });
+		mismatches.push({
+			line: ref.line,
+			expected: ref.hash,
+			actual,
+			...(ref.textHint !== undefined ? { textHint: ref.textHint } : {}),
+		});
 		return false;
 	}
 

@@ -5,22 +5,25 @@ import * as path from "node:path"
 import * as os from "node:os"
 import { initDb } from "../db"
 import { ingestDiscordEvent } from "./state"
+import { config } from "../config"
 
 test("discord dm whitelist tests", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "niri-test-state-"))
   const originalHome = process.env.NIRI_HOME
   process.env.NIRI_HOME = tempDir
 
-  const originalWhitelist = process.env.DISCORD_DM_WHITELIST
-  const originalBotId = process.env.DISCORD_BOT_USER_ID
+  // The whitelist and bot identity are [discord] config, not environment.
+  const discord = config.discord as { dm_whitelist: string[]; bot_user_id: string }
+  const originalWhitelist = discord.dm_whitelist
+  const originalBotId = discord.bot_user_id
 
   try {
     initDb()
 
-    process.env.DISCORD_BOT_USER_ID = "bot123"
+    discord.bot_user_id = "bot123"
 
     // 1. Whitelist not set - DM from userA should be ingested
-    process.env.DISCORD_DM_WHITELIST = ""
+    discord.dm_whitelist = []
     const dmFromUserA = {
       message: {
         id: "msg_dm_1",
@@ -39,7 +42,7 @@ test("discord dm whitelist tests", () => {
     assert.equal(res1.bucket, "dm")
 
     // 2. Whitelist is set (userA, userB) - DM from userA should be ingested
-    process.env.DISCORD_DM_WHITELIST = "userA,userB"
+    discord.dm_whitelist = ["userA", "userB"]
     const dmFromUserA_2 = {
       message: {
         id: "msg_dm_2",
@@ -73,7 +76,7 @@ test("discord dm whitelist tests", () => {
     }
     const res3 = ingestDiscordEvent(dmFromUserC)
     assert.equal(res3.stored, false, "Should not store DM when user is not whitelisted")
-    assert.equal(res3.reason, "ignored DM: sender is not in DISCORD_DM_WHITELIST")
+    assert.equal(res3.reason, "ignored DM: sender is not in [discord].dm_whitelist")
 
     // 4. Whitelist is set (userA, userB) - DM from bot itself (self) should still be stored (for history)
     const dmFromSelf = {
@@ -114,16 +117,8 @@ test("discord dm whitelist tests", () => {
 
   } finally {
     process.env.NIRI_HOME = originalHome
-    if (originalWhitelist !== undefined) {
-      process.env.DISCORD_DM_WHITELIST = originalWhitelist
-    } else {
-      delete process.env.DISCORD_DM_WHITELIST
-    }
-    if (originalBotId !== undefined) {
-      process.env.DISCORD_BOT_USER_ID = originalBotId
-    } else {
-      delete process.env.DISCORD_BOT_USER_ID
-    }
+    discord.dm_whitelist = originalWhitelist
+    discord.bot_user_id = originalBotId
     try {
       fs.rmSync(tempDir, { recursive: true, force: true })
     } catch {

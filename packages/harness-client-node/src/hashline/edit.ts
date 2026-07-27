@@ -2,10 +2,10 @@
 
 import { readFileSync, existsSync, writeFileSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { resolveToCwd } from "./path-utils";
-import { applyHashlineEdits } from "./apply";
-import { formatHashlineRegion } from "./format";
-import type { HashlineEdit } from "./parse";
+import { resolveToCwd } from "./path-utils.js";
+import { applyHashlineEdits } from "./apply.js";
+import { formatHashlineRegion } from "./format.js";
+import type { HashlineEdit } from "./parse.js";
 
 export interface HashlineEditResult {
   success: boolean;
@@ -15,7 +15,7 @@ export interface HashlineEditResult {
 
 function parseAnchor(anchor: string): { line: number; hash: string } | undefined {
   const match = anchor.match(/^(\d+)#([A-Z]+)/);
-  if (!match) return undefined;
+  if (!match?.[1] || !match[2]) return undefined;
   return { line: parseInt(match[1], 10), hash: match[2] };
 }
 
@@ -55,11 +55,11 @@ export async function hashlineEdit(
 
     if (edit.op === "replace") {
       if (!pos) return { success: false, message: "replace requires pos anchor" };
-      parsedEdits.push({ op: "replace", pos, end, lines: edit.lines ?? [] });
+      parsedEdits.push({ op: "replace", pos, ...(end ? { end } : {}), lines: edit.lines ?? [] });
     } else if (edit.op === "append") {
-      parsedEdits.push({ op: "append", pos, lines: edit.lines ?? [] });
+      parsedEdits.push({ op: "append", ...(pos ? { pos } : {}), lines: edit.lines ?? [] });
     } else if (edit.op === "prepend") {
-      parsedEdits.push({ op: "prepend", pos, lines: edit.lines ?? [] });
+      parsedEdits.push({ op: "prepend", ...(pos ? { pos } : {}), lines: edit.lines ?? [] });
     } else {
       return { success: false, message: `Unknown op: ${edit.op}` };
     }

@@ -20,7 +20,7 @@
 		    # NOTE: regenerate after any package-lock change — run
 		    # `nix run nixpkgs#prefetch-npm-deps -- package-lock.json`,
 		    # or `nix build` prints the correct value on mismatch.
-		    npmDepsHash = "sha256-Zb1RZ3Y5uUIkaTMpebG1LFOmAGUrg2o1+eaoIFgSNp0=";
+		    npmDepsHash = "sha256-OBvYjvTB2RBuYEheGh6p2BYBPTNg7cH7H9HCrOjnQ+s=";
 
 		    nativeBuildInputs = with pkgs; [
 			python3      # node-gyp (better-sqlite3, node-pty)
@@ -49,16 +49,22 @@
 			cp -r packages apps node_modules package.json tsconfig.json tsconfig.base.json \
 			    $out/lib/coral/
 
+			# Worker — one process per agent, reads its TOML from --config
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/coral \
 			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
 			    --add-flags "$out/lib/coral/packages/niri-runtime/src/index.ts"
 
-			runHook postInstall
+			# Control plane — spawns one worker per agent file
+			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/coral-server \
+			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
+			    --add-flags "$out/lib/coral/apps/server/src/index.ts"
 
-			# Bridge binary — same source, different entry point
+			# Bridge — same source, different entry point
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/llm-bridge \
 			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
 			    --add-flags "$out/lib/coral/packages/llm-bridge/src/index.ts"
+
+			runHook postInstall
 		    '';
 		};
 	    });
@@ -136,6 +142,50 @@
 			default = null;
 			description = "Path to a TOML secrets file passed via --secrets.";
 		    };
+		    agents = lib.mkOption {
+			type    = lib.types.attrsOf settingsFormat.type;
+			default = {};
+			example = lib.literalExpression ''
+			    {
+				coral = { client = "local"; };
+				mira  = {
+				    client = "http://mira-macbook.local:3002";
+				    config = [ "/etc/coral/mira-overrides.toml" ];
+				};
+			    }
+			'';
+			description = ''
+			    Agents supervised by the control plane, keyed by agent id. Each
+			    value is a freeform agent TOML file — see "Agent TOML
+			    specification" in the coral README.
+
+			    `config`, `secrets`, `home`, and `workspace` are filled in from
+			    this module unless the agent sets them, so every agent shares
+			    `settings` as its base runtime config. An agent that sets
+			    `config` replaces that list, so include the shared file first
+			    if you mean to layer on top of it.
+
+			    `home` defaults to `''${homeDir}/agents/''${id}`. A single-agent
+			    deployment migrating from the standalone worker was using
+			    `homeDir` itself, so set `home = homeDir` for that agent (or
+			    move its soul, memories, state, and niri.db) — otherwise it
+			    wakes up with an empty home.
+
+			    Leaving this empty runs a single standalone worker instead of
+			    the control plane, which is the original behaviour.
+			'';
+		    };
+
+		    controlPort = lib.mkOption {
+			type    = lib.types.port;
+			default = cfg.settings.server.port or 3000;
+			defaultText = lib.literalExpression "settings.server.port or 3000";
+			description = ''
+			    Port the control plane listens on when `agents` is set. Workers
+			    are assigned this port plus their file's sorted position unless
+			    they declare a `port` of their own.
+			'';
+		    };
 		};
 
 		config = lib.mkIf cfg.enable {
@@ -162,8 +212,30 @@
 			let
 			    configFlag  = lib.optionalString (cfg.configFile  != null) " --config ${lib.escapeShellArg cfg.configFile}";
 			    secretsFlag = lib.optionalString (cfg.secretsFile != null) " --secrets ${lib.escapeShellArg cfg.secretsFile}";
+
+			    # Every agent inherits the shared config and secrets; anything
+			    # the agent declares itself wins. Homes must land outside the
+			    # read-only store, so they default under the service home.
+			    agentFile = id: agent: settingsFormat.generate "coral-agent-${id}.toml" ({
+				home      = "${cfg.homeDir}/agents/${id}";
+				workspace = cfg.homeDir;
+			    }
+			    // lib.optionalAttrs (cfg.configFile  != null) { config  = [ cfg.configFile ]; }
+			    // lib.optionalAttrs (cfg.secretsFile != null) { secrets = cfg.secretsFile; }
+			    // agent);
+
+			    agentDirectory = pkgs.linkFarm "coral-agents" (lib.mapAttrsToList (id: agent: {
+				name = "${id}.toml";
+				path = agentFile id agent;
+			    }) cfg.agents);
+
+			    controlPlane = cfg.agents != {};
+			    command =
+				if controlPlane
+				then "${cfg.package}/bin/coral-server --port ${toString cfg.controlPort} --agents ${agentDirectory}"
+				else "${cfg.package}/bin/coral${configFlag}${secretsFlag}";
 			in {
-			    description = "Coral harness runner";
+			    description = if controlPlane then "Coral control plane" else "Coral harness runner";
 			    after    = [ "multi-user.target" ];
 			    wants    = [ "multi-user.target" ];
 			    wantedBy = [ "multi-user.target" ];
@@ -172,8 +244,11 @@
 				User             = cfg.user;
 				Group            = cfg.group;
 				WorkingDirectory = cfg.homeDir;
-				ExecStart        = "${pkgs.bash}/bin/bash -lc '${cfg.package}/bin/coral${configFlag}${secretsFlag}'";
-				Environment      = "NIRI_MANAGED_WORKER=true";
+				ExecStart        = "${pkgs.bash}/bin/bash -lc '${command}'";
+				Environment      = [
+				    "NIRI_MANAGED_WORKER=true"
+				    "NIRI_CONTROL_HOME=${cfg.homeDir}/control"
+				];
 				Restart          = "always";
 				RestartSec       = "10s";
 			    };

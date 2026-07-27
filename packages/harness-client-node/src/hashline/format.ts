@@ -4,7 +4,7 @@
  * Vendored & adapted from oh-my-pi (MIT, github.com/can1357/oh-my-pi).
  */
 
-import { computeLineHash } from "./hash";
+import { computeLineHash } from "./hash.js";
 
 // ─── Affected-line computation (for returning anchors after edit) ───────
 

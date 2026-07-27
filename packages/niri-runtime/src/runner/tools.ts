@@ -108,12 +108,12 @@ export const TOOLS: Tool[] = [
   {
     name: "discord_scan",
     description:
-      "Scan configured Discord channels and ingest messages into the local Discord inbox database. Uses DISCORD_SCAN_CHANNEL_IDS by default; pass channel_ids to override.",
+      "Scan configured Discord channels and ingest messages into the local Discord inbox database. Uses the [discord].scan_channel_ids config by default; pass channel_ids to override.",
     parameters: s({
       type: "object",
       properties: {
         limit: { type: "integer", description: "Per-channel message fetch limit (default 50, max 100)." },
-        channel_ids: { type: "array", items: { type: "string" }, description: "Optional channel id list to scan instead of DISCORD_SCAN_CHANNEL_IDS." },
+        channel_ids: { type: "array", items: { type: "string" }, description: "Optional channel id list to scan instead of [discord].scan_channel_ids." },
         before_message_id: { type: "string", description: "Optional message id cursor for older backfill scans." },
       },
     }),

@@ -2,9 +2,9 @@
 
 import { readFileSync, existsSync } from "node:fs";
 
-import { computeLineHash } from "./hash";
-import { isImageFile } from "./file-kind";
-import { resolveToCwd } from "./path-utils";
+import { computeLineHash } from "./hash.js";
+import { isImageFile } from "./file-kind.js";
+import { resolveToCwd } from "./path-utils.js";
 
 export interface HashlineReadResult {
   content: string;

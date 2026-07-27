@@ -12,6 +12,7 @@ async function main(): Promise<void> {
   const host = new NodeToolHost({
     capabilities: parseToolCapabilities(argument("--capabilities")),
     workspace: { id: path.basename(workspaceRoot) || "workspace", root: workspaceRoot },
+    ...(process.argv.includes("--hashline") ? { hashline: true } : {}),
   })
   const client = new ToolClientHttpServer({
     host,

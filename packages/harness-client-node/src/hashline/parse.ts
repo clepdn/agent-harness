@@ -4,13 +4,13 @@
  * Vendored & adapted from oh-my-pi (MIT, github.com/can1357/oh-my-pi).
  */
 
-import { NIBBLE_STR, HASH_ALPHABET_RE } from "./hash";
+import { NIBBLE_STR, HASH_ALPHABET_RE } from "./hash.js";
 import {
 	getHashLength,
 	exampleAnchor,
 	HASH_LENGTH_MIN,
 	HASH_LENGTH_MAX,
-} from "./config";
+} from "./config.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────
 

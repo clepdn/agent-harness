@@ -4,6 +4,7 @@ import type { ClientToolExecutor } from "@mira/harness-core"
 import { HttpToolClient, type HttpToolClientStatus } from "@mira/harness-server"
 import type { ClientToolName, ClientToolResult, ToolCapability, ToolInvocation, WorkspaceDescriptor } from "@mira/harness-protocol"
 import { AGENT_ID, REPO_ROOT } from "../agent-config"
+import { config } from "../config"
 
 export type ConfiguredToolClient = ClientToolExecutor & {
   start(): Promise<void>
@@ -23,6 +24,7 @@ class LocalToolClient implements ConfiguredToolClient {
         id: `${agentId}-server`,
         root: process.env.NIRI_CLIENT_WORKSPACE?.trim() || REPO_ROOT,
       },
+      hashline: config.tools.hashline,
     })
   }
 

@@ -6,10 +6,8 @@ apps/*/dist/
 
 # private agent definitions
 .env
-agents/*.yaml
-agents/*.yml
-!agents/*.example.yaml
-!agents/*.example.yml
+agents/*.toml
+!agents/*.example.toml
 secrets.toml.env
 config.toml
 

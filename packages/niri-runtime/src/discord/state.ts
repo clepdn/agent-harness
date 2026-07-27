@@ -174,15 +174,12 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
   }
 
   if (record.isDm && !record.isFromSelf) {
-    const whitelist = process.env.DISCORD_DM_WHITELIST
-    if (whitelist && whitelist.trim()) {
-      const allowedIds = whitelist.split(",").map((id) => id.trim()).filter(Boolean)
-      if (!record.authorId || !allowedIds.includes(record.authorId)) {
-        return {
-          stored: false,
-          isNew: false,
-          reason: "ignored DM: sender is not in DISCORD_DM_WHITELIST",
-        }
+    const allowedIds = config.discord.dm_whitelist
+    if (allowedIds.length > 0 && (!record.authorId || !allowedIds.includes(record.authorId))) {
+      return {
+        stored: false,
+        isNew: false,
+        reason: "ignored DM: sender is not in [discord].dm_whitelist",
       }
     }
   }
@@ -796,7 +793,7 @@ export async function scanDiscordChannels(params?: {
       fetched_messages: 0,
       stored_messages: 0,
       inbox_items: 0,
-      note: "no channels configured; set DISCORD_SCAN_CHANNEL_IDS or pass channel_ids",
+      note: "no channels configured; set [discord].scan_channel_ids or pass channel_ids",
     }
   }
 

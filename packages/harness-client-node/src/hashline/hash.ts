@@ -5,7 +5,7 @@
  */
 
 import * as XXH from "xxhashjs";
-import { getHashLength } from "./config";
+import { getHashLength } from "./config.js";
 
 // ─── Hash computation ───────────────────────────────────────────────────
 

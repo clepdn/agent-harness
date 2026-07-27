@@ -7,172 +7,29 @@
  *   coral --config /etc/coral/config.toml --secrets /etc/coral/secrets.toml.env
  *
  * Both flags are optional; missing values fall back to the defaults defined
- * below. Secrets are deep-merged on top of config so a key declared in both
- * resolves to the secrets value.
+ * below. `--config` may be repeated, in which case each file is deep-merged
+ * over the previous one; secrets are then deep-merged on top of the result, so
+ * a key declared in several places resolves to the last one that set it.
  */
 
 import { existsSync, readFileSync } from "node:fs"
-
-// ── Tiny TOML parser ──────────────────────────────────────────────────────────
-// Handles: comments, [tables], nested [a.b] tables, basic and literal strings,
-// integers, floats, booleans, and single-line arrays of scalars. That's enough
-// for the config schema below.
-
-type TomlValue = string | number | boolean | TomlValue[] | { [k: string]: TomlValue }
-type TomlTable = Record<string, TomlValue>
-
-function parseToml(text: string): TomlTable {
-  const root: TomlTable = {}
-  let cursor: TomlTable = root
-
-  for (const raw of text.split(/\r?\n/)) {
-    const line = stripComment(raw).trim()
-    if (!line) continue
-
-    // Array-of-tables header: [[key]] or [[a.b]]
-    // Each occurrence creates a fresh table and appends it to an array.
-    if (line.startsWith("[[") && line.endsWith("]]")) {
-      const path = line.slice(2, -2).trim()
-      if (!path) throw new Error("empty array-of-tables header")
-      cursor = root
-      const segments = path.split(".")
-      for (let i = 0; i < segments.length; i++) {
-        const key = segments[i]!.trim()
-        const isLast = i === segments.length - 1
-        const existing = cursor[key]
-        if (isLast) {
-          // Create or append to the array of tables
-          if (existing === undefined) {
-            cursor[key] = []
-          } else if (!Array.isArray(existing)) {
-            throw new Error(`table path "${path}" overlaps a non-array value at "${key}"`)
-          }
-          const arr = cursor[key] as TomlValue[]
-          const fresh: TomlTable = {}
-          arr.push(fresh)
-          cursor = fresh
-        } else {
-          // Navigate through intermediate keys
-          if (existing === undefined) {
-            const fresh: TomlTable = {}
-            cursor[key] = fresh
-            cursor = fresh
-          } else if (isTable(existing)) {
-            cursor = existing
-          } else if (Array.isArray(existing)) {
-            // Use the last element of an existing array-of-tables
-            const last = existing[existing.length - 1]
-            if (!isTable(last)) throw new Error(`cannot navigate into non-table array element at "${key}"`)
-            cursor = last
-          } else {
-            throw new Error(`table path "${path}" overlaps a non-table value at "${key}"`)
-          }
-        }
-      }
-      continue
-    }
-
-    if (line.startsWith("[") && line.endsWith("]")) {
-      const path = line.slice(1, -1).trim()
-      if (!path) throw new Error("empty table header")
-      cursor = root
-      for (const segment of path.split(".")) {
-        const key = segment.trim()
-        const next = cursor[key]
-        if (next === undefined) {
-          const fresh: TomlTable = {}
-          cursor[key] = fresh
-          cursor = fresh
-        } else if (isTable(next)) {
-          cursor = next
-        } else {
-          throw new Error(`table path "${path}" overlaps a non-table value`)
-        }
-      }
-      continue
-    }
-
-    const eq = line.indexOf("=")
-    if (eq <= 0) throw new Error(`invalid TOML line: ${raw}`)
-    const key = line.slice(0, eq).trim()
-    cursor[key] = parseValue(line.slice(eq + 1).trim())
-  }
-  return root
-}
-
-function stripComment(line: string): string {
-  let inString = false
-  let quote = ""
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i]
-    if (inString) {
-      if (c === "\\") { i++; continue }
-      if (c === quote) inString = false
-    } else if (c === '"' || c === "'") {
-      inString = true
-      quote = c
-    } else if (c === "#") {
-      return line.slice(0, i)
-    }
-  }
-  return line
-}
-
-function parseValue(text: string): TomlValue {
-  if (!text) throw new Error("missing TOML value")
-  if (text.startsWith('"') && text.endsWith('"')) return JSON.parse(text) as string
-  if (text.startsWith("'") && text.endsWith("'")) return text.slice(1, -1)
-  if (text === "true") return true
-  if (text === "false") return false
-  if (text.startsWith("[") && text.endsWith("]")) {
-    const inner = text.slice(1, -1).trim()
-    if (!inner) return []
-    return splitArrayItems(inner).map(parseValue)
-  }
-  const num = Number(text)
-  if (Number.isFinite(num)) return num
-  throw new Error(`could not parse TOML value: ${text}`)
-}
-
-function splitArrayItems(text: string): string[] {
-  const items: string[] = []
-  let depth = 0
-  let inString = false
-  let quote = ""
-  let start = 0
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i]
-    if (inString) {
-      if (c === "\\") { i++; continue }
-      if (c === quote) inString = false
-    } else if (c === '"' || c === "'") {
-      inString = true
-      quote = c
-    } else if (c === "[") depth++
-    else if (c === "]") depth--
-    else if (c === "," && depth === 0) {
-      items.push(text.slice(start, i).trim())
-      start = i + 1
-    }
-  }
-  const last = text.slice(start).trim()
-  if (last) items.push(last)
-  return items
-}
+import { deepMerge, isTable, parseToml, type TomlTable, type TomlValue } from "@niri/toml"
 
 // ── CLI flag parsing ──────────────────────────────────────────────────────────
 
-function parseFlags(argv: string[]): { configPath?: string; secretsPath?: string } {
-  let configPath: string | undefined
+function parseFlags(argv: string[]): { configPaths: string[]; secretsPath?: string } {
+  // --config repeats: later files deep-merge over earlier ones, so a control
+  // plane can layer a per-agent override on a shared base without rewriting it.
+  const configPaths: string[] = []
   let secretsPath: string | undefined
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === "--config" || a === "-c") configPath = argv[++i]
+    if (a === "--config" || a === "-c") { const next = argv[++i]; if (next) configPaths.push(next) }
     else if (a === "--secrets" || a === "-s") secretsPath = argv[++i]
-    else if (a?.startsWith("--config=")) configPath = a.slice("--config=".length)
+    else if (a?.startsWith("--config=")) configPaths.push(a.slice("--config=".length))
     else if (a?.startsWith("--secrets=")) secretsPath = a.slice("--secrets=".length)
   }
-  return { configPath, secretsPath }
+  return { configPaths, secretsPath }
 }
 
 // ── Loading & merging ─────────────────────────────────────────────────────────
@@ -184,19 +41,6 @@ function loadFile(path: string): TomlTable {
   } catch (err) {
     throw new Error(`failed to parse ${path}: ${err instanceof Error ? err.message : String(err)}`)
   }
-}
-
-function isTable(value: unknown): value is TomlTable {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-}
-
-function deepMerge(base: TomlTable, overlay: TomlTable): TomlTable {
-  const out: TomlTable = { ...base }
-  for (const [k, v] of Object.entries(overlay)) {
-    const baseValue = out[k]
-    out[k] = isTable(baseValue) && isTable(v) ? deepMerge(baseValue, v) : v
-  }
-  return out
 }
 
 function trimmedString(value: TomlValue | undefined): string {
@@ -224,13 +68,15 @@ function resolveBridgeApiKey(config: TomlTable): string {
   }
 }
 
-const { configPath, secretsPath } = parseFlags(process.argv.slice(2))
+const { configPaths, secretsPath } = parseFlags(process.argv.slice(2))
 
 // Allow config path via env var (used by test runner where CLI flags conflict with node)
-const resolvedConfigPath = configPath ?? process.env.CORAL_CONFIG
+const resolvedConfigPaths = configPaths.length > 0
+  ? configPaths
+  : (process.env.CORAL_CONFIG ? [process.env.CORAL_CONFIG] : [])
 const resolvedSecretsPath = secretsPath ?? process.env.CORAL_SECRETS
 
-const baseTable = resolvedConfigPath ? loadFile(resolvedConfigPath) : {}
+const baseTable = resolvedConfigPaths.reduce<TomlTable>((acc, file) => deepMerge(acc, loadFile(file)), {})
 const secretsTable = resolvedSecretsPath ? loadFile(resolvedSecretsPath) : {}
 const merged = deepMerge(baseTable, secretsTable)
 
@@ -341,7 +187,11 @@ function bool(value: TomlValue | undefined, fallback: boolean): boolean {
 }
 
 function strArray(value: TomlValue | undefined): string[] {
-  return Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : []
+  if (Array.isArray(value)) return value.filter((v): v is string => typeof v === "string")
+  // Accept the comma-separated spelling too: these fields were environment
+  // variables before they were TOML, and both surfaces still hand us strings.
+  if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean)
+  return []
 }
 
 function pickEnum<T extends string>(value: TomlValue | undefined, allowed: readonly T[], fallback: T): T {
@@ -484,6 +334,7 @@ export const config = {
   discord: {
     bot_token: str(discordT.bot_token, "").trim(),
     bot_user_id: str(discordT.bot_user_id, "").trim(),
+    dm_whitelist: strArray(discordT.dm_whitelist),
     owner_id: str(discordT.owner_id, "").trim(),
     gateway_enabled: bool(discordT.gateway_enabled, true),
     gateway_trace: bool(discordT.gateway_trace, false),

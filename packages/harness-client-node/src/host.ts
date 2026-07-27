@@ -15,16 +15,23 @@ import {
   IMAGE_ROOT,
   MAX_RESULT_BYTES,
   NODE_TOOL_RUNTIME_GENERATION,
+  USE_DOCKER_SHELL,
   configureNodeToolRuntime,
   type NodeToolRuntimeOptions,
 } from "./config.js"
-import { closeBash, openBash } from "./shell.js"
+import { closeBash, currentWorkingDirectory, openBash } from "./shell.js"
 import { editFile, readFile, readImageForModel, runCommand } from "./tools.js"
+import { hashlineEdit, hashlineRead } from "./hashline/index.js"
 
 export type NodeToolHostOptions = {
   capabilities?: Iterable<ToolCapability>
   workspace?: Partial<WorkspaceDescriptor>
   runtime?: NodeToolRuntimeOptions
+  /**
+   * Serve `read_file`/`edit_file` with hash-anchored line addressing. Requires
+   * direct filesystem access, so it is unavailable behind the Docker shell.
+   */
+  hashline?: boolean
 }
 
 const ALL_CAPABILITIES: ToolCapability[] = ["shell", "read_file", "edit_file", "image_tool"]
@@ -61,6 +68,7 @@ export class NodeToolHost implements ClientToolHost {
   private readonly capabilities: ToolCapability[]
   private readonly workspace: WorkspaceDescriptor
   private readonly runtimeGeneration: number
+  private readonly hashline: boolean
   private started = false
 
   constructor(options: NodeToolHostOptions = {}) {
@@ -75,6 +83,10 @@ export class NodeToolHost implements ClientToolHost {
     })
     this.capabilities = [...new Set(options.capabilities ?? parseToolCapabilities(process.env.HARNESS_CLIENT_CAPABILITIES))]
     if (this.capabilities.length === 0) throw new Error("at least one client capability is required")
+    // Hashline reads and writes the filesystem directly, so the Docker shell —
+    // where the files live inside the container — cannot serve it.
+    this.hashline =
+      (options.hashline ?? process.env.HARNESS_HASHLINE?.trim().toLowerCase() === "true") && !USE_DOCKER_SHELL
     this.workspace = {
       id: options.workspace?.id?.trim() || path.basename(CLIENT_WORKSPACE_ROOT) || "workspace",
       root: CLIENT_WORKSPACE_ROOT,
@@ -82,6 +94,7 @@ export class NodeToolHost implements ClientToolHost {
       imageRoot: IMAGE_ROOT,
       platform: options.workspace?.platform?.trim() || process.platform,
       persistentShell: this.capabilities.includes("shell"),
+      hashline: this.hashline,
     }
   }
 
@@ -150,6 +163,15 @@ export class NodeToolHost implements ClientToolHost {
         return output || "(no output)"
       }
       case "read_file": {
+        if (this.hashline) {
+          const region = hashlineRead(
+            String(args.path ?? ""),
+            typeof args.start_line === "number" ? args.start_line : 1,
+            typeof args.end_line === "number" ? args.end_line : undefined,
+            await currentWorkingDirectory(),
+          )
+          return `[${region.startLine}-${region.endLine} of ${region.totalLines}]\n${region.content}`
+        }
         const output = await readFile(
           String(args.path ?? ""),
           typeof args.start_line === "number" ? args.start_line : undefined,
@@ -159,6 +181,15 @@ export class NodeToolHost implements ClientToolHost {
         return output || "(empty file)"
       }
       case "edit_file": {
+        if (this.hashline && Array.isArray(args.edits)) {
+          const result = await hashlineEdit(
+            String(args.path ?? ""),
+            args.edits as Parameters<typeof hashlineEdit>[1],
+            await currentWorkingDirectory(),
+          )
+          if (!result.success) throw new Error(result.message)
+          return result.preview ? `${result.message}\n${result.preview}` : result.message
+        }
         const result = await editFile(
           String(args.path ?? ""),
           String(args.old_text ?? ""),

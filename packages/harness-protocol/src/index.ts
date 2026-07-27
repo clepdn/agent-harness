@@ -10,6 +10,7 @@ export type WorkspaceDescriptor = {
   imageRoot?: string
   platform?: string
   persistentShell?: boolean
+  hashline?: boolean
 }
 
 export type ToolInvocation = {

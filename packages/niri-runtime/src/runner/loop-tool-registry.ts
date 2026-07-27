@@ -1,9 +1,9 @@
 import type { UserMessage as PiUserMessage } from "../llm"
 import { config } from "../config"
 import { normalizeTimeoutMs } from "../container/config"
-import { editFile, readFile, readImageForModel, runCommand } from "../container/index"
-import { hashlineRead } from "../hashline/read"
-import { hashlineEdit } from "../hashline/edit"
+import type { ClientImageArtifact, ClientToolName } from "@mira/harness-protocol"
+import { AGENT_ID } from "../agent-config"
+import { clientTools } from "../client"
 import { logMessage } from "../db"
 import {
   listDiscordBackread,
@@ -28,6 +28,40 @@ import { saveRestSnapshot } from "./util"
 import { executeAction } from "./computer-use"
 
 const DEFAULT_WAIT_THEN_CONTINUE_MS = 10_000
+
+/**
+ * Invoke a tool on the attached client. Undefined args are dropped so the
+ * client sees only what the model actually supplied.
+ */
+async function runClientTool(tool: ClientToolName, args: Record<string, unknown>): Promise<string> {
+  const supplied: Record<string, unknown> = {}
+  for (const [key, value] of Object.entries(args)) {
+    if (value !== undefined) supplied[key] = value
+  }
+  const result = await clientTools.execute({
+    agentId: AGENT_ID,
+    tool,
+    args: supplied,
+    ...(typeof args.timeout_ms === "number" ? { timeoutMs: args.timeout_ms } : {}),
+  })
+  if (result.status === "ok") return result.output ?? ""
+  return result.output?.startsWith("error:") ? result.output : `error: ${result.output ?? `${tool} failed`}`
+}
+
+/**
+ * Fetch an image artifact from the attached client. Throws so the caller's
+ * existing catch records the failure as a tool error.
+ */
+async function runClientImageTool(path: string, timeoutMs?: number): Promise<ClientImageArtifact> {
+  const result = await clientTools.execute({
+    agentId: AGENT_ID,
+    tool: "image_tool",
+    args: { path },
+    ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+  })
+  if (result.status !== "ok" || !result.image) throw new Error(result.output ?? "image_tool returned no image")
+  return result.image
+}
 
 /**
  * Builds the function-tool handler table for the runner loop.
@@ -75,34 +109,17 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         name: "shell",
         logArgKeys: ["command", "timeout_ms"] as const,
         runArgKeys: ["command", "max_lines", "timeout_ms"] as const,
-        run: (command, max_lines, timeout_ms) =>
-          runCommand(command as string, max_lines as number | undefined, timeout_ms as number | undefined),
+        run: (command, max_lines, timeout_ms) => runClientTool("shell", { command, max_lines, timeout_ms }),
         emptyFallback: "(no output)",
       }),
 
     read_file: async (ctx) => {
-      if (config.tools.hashline) {
-        const result = await runStandardTool(ctx, {
-          name: "read_file",
-          logArgKeys: ["path", "start_line", "end_line", "timeout_ms"] as const,
-          runArgKeys: ["path", "start_line", "end_line", "timeout_ms"] as const,
-          run: (path, start_line, end_line) => {
-            const r = hashlineRead(path as string, (start_line as number) || 1, end_line as number | undefined)
-            return Promise.resolve(`[${r.startLine}-${r.endLine} of ${r.totalLines}]\n${r.content}`)
-          },
-          emptyFallback: "(empty file)",
-        })
-        if (GIT_UPSTREAM_NAG) {
-          checkGitUpstream(ctx.args.path as string, ctx.convId, ctx.state)
-        }
-        return result
-      }
       const result = await runStandardTool(ctx, {
         name: "read_file",
         logArgKeys: ["path", "start_line", "end_line", "timeout_ms"] as const,
         runArgKeys: ["path", "start_line", "end_line", "timeout_ms"] as const,
         run: (path, start_line, end_line, timeout_ms) =>
-          readFile(path as string, start_line as number | undefined, end_line as number | undefined, timeout_ms as number | undefined),
+          runClientTool("read_file", { path, start_line, end_line, timeout_ms }),
         emptyFallback: "(empty file)",
       })
       if (GIT_UPSTREAM_NAG) {
@@ -111,37 +128,15 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       return result
     },
 
+    // Anchored (`edits`) and exact-text (`old_text`/`new_text`) payloads are both
+    // forwarded as-is; the attached client decides which contract it serves.
     edit_file: async (ctx) => {
-      if (config.tools.hashline && Array.isArray(ctx.args.edits)) {
-        const result = await runStandardTool(ctx, {
-          name: "edit_file",
-          logArgKeys: ["path", "timeout_ms"] as const,
-          runArgKeys: ["path", "edits", "timeout_ms"] as const,
-          run: async (path, edits) => {
-            const r = await hashlineEdit(path as string, edits as any[])
-            return r.success ? `${r.message}\n${r.preview ?? ""}` : `error: ${r.message}`
-          },
-          emitArgKeys: ["path"] as const,
-          previewChars: 0,
-        })
-        if (GIT_UPSTREAM_NAG) {
-          checkGitUpstream(ctx.args.path as string, ctx.convId, ctx.state)
-        }
-        return result
-      }
       const result = await runStandardTool(ctx, {
         name: "edit_file",
         logArgKeys: ["path", "timeout_ms"] as const,
-        runArgKeys: ["path", "old_text", "new_text", "timeout_ms"] as const,
-        run: async (path, old_text, new_text, timeout_ms) => {
-          const editResult = await editFile(
-            path as string,
-            old_text as string,
-            new_text as string,
-            timeout_ms as number | undefined,
-          )
-          return editResult.ok ? editResult.message : `error: ${editResult.message}`
-        },
+        runArgKeys: ["path", "edits", "old_text", "new_text", "timeout_ms"] as const,
+        run: (path, edits, old_text, new_text, timeout_ms) =>
+          runClientTool("edit_file", { path, edits, old_text, new_text, timeout_ms }),
         emitArgKeys: ["path"] as const,
         previewChars: 0,
       })
@@ -199,7 +194,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       let result: string
 
       try {
-        const image = await readImageForModel(args.path as string, args.timeout_ms as number | undefined)
+        const image = await runClientImageTool(args.path as string, args.timeout_ms as number | undefined)
         const note =
           typeof args.note === "string" && args.note.trim()
             ? args.note.trim()
