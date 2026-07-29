@@ -164,7 +164,7 @@ async function handleStatus(interaction: ChatInputCommandInteraction): Promise<v
     `**context size:** ${status.contextSize.toLocaleString()} tokens`,
     `**total tokens:** ${status.tokenCount.toLocaleString()}`,
     `**uptime:** ${Math.floor(status.uptimeMs / 1000 / 60)} min`,
-    `**respect cache:** ${modelState.respectCache}`,
+    `**preserve prompt cache:** ${modelState.preservePromptCache}`,
     `**thinking:** ${modelState.enableThinking ? `on (${modelState.thinkingEffort})` : "off"}`,
   ]
 
@@ -190,7 +190,7 @@ async function handleModelInfo(interaction: ChatInputCommandInteraction): Promis
     "**summary:** " + (modelState.summaryModel
       ? `${modelState.summaryModel.id} (${modelState.summaryModel.provider})`
       : "none"),
-    `**respect cache:** ${modelState.respectCache}`,
+    `**preserve prompt cache:** ${modelState.preservePromptCache}`,
     `**use fallback:** ${modelState.useFallback}`,
     `**thinking:** ${modelState.enableThinking ? `on (${modelState.thinkingEffort})` : "off"}`,
     `**tool choice:** ${modelState.primaryToolChoice}`,

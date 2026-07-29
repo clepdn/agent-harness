@@ -6,8 +6,10 @@ import { setPromWorking } from "../prometheus"
 import type { Message } from "../types"
 import { modelState } from "./model-state"
 import {
-  COMPACTION_MIN_CHARS,
-  COMPACTION_TURN_AGE,
+  TOOL_RESULT_COMPACTION_MIN_CHARS,
+  TOOL_RESULT_COMPACTION_MIN_AGE_TURNS,
+  TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT,
+  meetsToolResultCompactionContextThreshold,
   CONTEXT_COMPACT_TRIGGER_TOKENS,
   estimatePromptTokens,
   findSummaryMessageIndex,
@@ -156,29 +158,45 @@ function applyDiscordSendNudge(
   state.conversation.push({ role: "user", content: nudge, timestamp: Date.now() })
   return true
 }
+
 /**
- * Proactively summarizes old, large tool results using the compaction model.
- * Only runs when respect_cache is false. Targets tool results that are
- * ≥ compaction_turn_age turns old and ≥ compaction_min_chars in size.
+ * Proactively summarizes old, large tool results once enough of the active
+ * model's context window is occupied.
  */
 async function applyProactiveCompaction(state: LoopState): Promise<boolean> {
-  if (modelState.respectCache) return false
+  if (modelState.preservePromptCache) return false
+
+  const activeModel = modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel
+  if (
+    !activeModel ||
+    !meetsToolResultCompactionContextThreshold(
+      state.contextSize,
+      activeModel.contextWindow,
+      TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT,
+    )
+  ) {
+    return false
+  }
 
   const provider = configuredSummaryProvider()
   if (!provider.model) return false
 
-  const { messages, compacted } = await proactiveCompaction(
+  const { messages, compacted, attempted } = await proactiveCompaction(
     state.conversation,
     provider.model,
     provider.apiKey,
-    COMPACTION_TURN_AGE,
-    COMPACTION_MIN_CHARS,
+    TOOL_RESULT_COMPACTION_MIN_AGE_TURNS,
+    TOOL_RESULT_COMPACTION_MIN_CHARS,
   )
 
-  if (compacted === 0) return false
+  if (attempted === 0) return false
+  state.conversation = messages
+  if (compacted === 0) {
+    console.warn("[context] proactive: tool result could not be reduced; suppressing repeat attempts")
+    return true
+  }
 
   const beforeEstimate = state.contextSize
-  state.conversation = messages
   state.contextSize = estimatePromptTokens(state.conversation)
   setContextSize(state.contextSize)
 
@@ -272,8 +290,11 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       return "rest"
     }
 
-    await applyProactiveCompaction(state)
-    await applyLLMCompaction(state, "pre-turn")
+    if (state.contextSize >= CONTEXT_COMPACT_TRIGGER_TOKENS) {
+      await applyLLMCompaction(state, "pre-turn")
+    } else {
+      await applyProactiveCompaction(state)
+    }
 
     const turnStart = state.conversation.length
     setWorking(true)
@@ -354,7 +375,6 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       continue
     }
 
-    await applyLLMCompaction(state, "post-turn")
   }
 }
 

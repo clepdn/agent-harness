@@ -124,6 +124,10 @@ Token / compaction thresholds.
 | `compact_chunk_messages` | `32` | Messages summarized per compaction chunk. |
 | `compact_summary_max_chars` | `16000` | Hard cap on generated summary length. |
 | `idle_compaction_minutes` | `45` | Idle time before background compaction runs. Decimals supported (e.g. `2.5` for 2m30s). Set to `0` to disable. |
+| `preserve_prompt_cache` | `true` | Keep the conversation prefix stable for prompt caching. Disables LLM compaction and requires a rest before switching models. |
+| `tool_result_compaction_min_age_turns` | `5` | Minimum later assistant turns before a tool result is eligible for proactive compaction. |
+| `tool_result_compaction_min_chars` | `2000` | Minimum tool-result length eligible for proactive compaction. |
+| `tool_result_compaction_min_context_percent` | `50` | Minimum percentage of the active generation model's context window that must be used before proactive tool-result compaction runs. |
 
 ## `[runner]`
 

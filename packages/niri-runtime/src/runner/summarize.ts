@@ -370,6 +370,7 @@ export async function summarizeConversationViaLLM(
 // ── Proactive per-message compaction ──────────────────────────────────────────
 
 const COMPACTED_MARKER = "[compacted]"
+const COMPACTION_ATTEMPTED_MARKER = "[compaction attempted; original result follows]"
 
 /**
  * Summarizes a single tool result message using the compaction model.
@@ -410,13 +411,17 @@ async function summarizeToolResult(
   }
 }
 
+type ToolResultSummarizer = (
+  content: string,
+  toolName: string,
+  model: Model,
+  apiKey: string | undefined,
+) => Promise<string | null>
+
 /**
- * Walks the conversation and proactively summarizes tool result messages that
- * are old enough (≥ turnAge assistant messages after them) and large enough
- * (≥ minChars). Returns the updated messages and a count of compacted items.
- *
- * Only runs when respect_cache is false — when respect_cache is true, the
- * conversation is left untouched to preserve prompt cache.
+ * Attempts at most one eligible tool result per call. Limiting the work keeps
+ * proactive compaction from issuing an unbounded burst of summary requests
+ * before the next primary-model turn.
  */
 export async function proactiveCompaction(
   messages: Message[],
@@ -424,47 +429,46 @@ export async function proactiveCompaction(
   apiKey: string | undefined,
   turnAge: number,
   minChars: number,
-): Promise<{ messages: Message[]; compacted: number }> {
-  // Collect assistant message indices for turn counting
-  const assistantIndices: number[] = []
-  for (let i = 0; i < messages.length; i++) {
-    if (messages[i]!.role === "assistant") assistantIndices.push(i)
-  }
-
-  // Quick helper: count assistant messages after position i
-  function assistantsAfter(i: number): number {
-    return assistantIndices.filter((idx) => idx > i).length
-  }
-
-  let compacted = 0
+  summarize: ToolResultSummarizer = summarizeToolResult,
+): Promise<{ messages: Message[]; compacted: number; attempted: number }> {
+  let assistantsRemaining = messages.reduce((count, message) => count + (message.role === "assistant" ? 1 : 0), 0)
   const result = [...messages]
 
   for (let i = 0; i < result.length; i++) {
     const msg = result[i]!
-    if (msg.role !== "toolResult") continue
-
-    // Skip if not old enough
-    if (assistantsAfter(i) < turnAge) continue
+    if (msg.role === "assistant") {
+      assistantsRemaining--
+      continue
+    }
+    if (msg.role !== "toolResult" || assistantsRemaining < turnAge) continue
 
     const content = messageStringContent(msg)
-
-    // Skip if already compacted
-    if (content.startsWith(COMPACTED_MARKER)) continue
-
-    // Skip if not large enough
-    if (content.length < minChars) continue
-
-    const summary = await summarizeToolResult(content, msg.toolName || "unknown", model, apiKey)
-    if (!summary) continue
-
-    result[i] = {
-      ...msg,
-      content: [{ type: "text" as const, text: `${COMPACTED_MARKER} ${summary}` }],
+    if (
+      content.startsWith(COMPACTED_MARKER) ||
+      content.startsWith(COMPACTION_ATTEMPTED_MARKER) ||
+      content.length < minChars
+    ) {
+      continue
     }
-    compacted++
+
+    const summary = await summarize(content, msg.toolName || "unknown", model, apiKey)
+    result[i] = summary
+      ? {
+          ...msg,
+          content: [{ type: "text" as const, text: `${COMPACTED_MARKER} ${summary}` }],
+        }
+      : {
+          ...msg,
+          content: [
+            { type: "text" as const, text: COMPACTION_ATTEMPTED_MARKER },
+            ...msg.content,
+          ],
+        }
+
+    return { messages: result, compacted: summary ? 1 : 0, attempted: 1 }
   }
 
-  return { messages: result, compacted }
+  return { messages: result, compacted: 0, attempted: 0 }
 }
 
 // ── Fallback context window ───────────────────────────────────────────────────

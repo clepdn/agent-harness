@@ -26,7 +26,7 @@ import {
   THINKING_EFFORT as initThinkingEffort,
   PRIMARY_VISION as initPrimaryVision,
   PRIMARY_NUDGE_ON_NO_TOOL as initPrimaryNudgeOnNoTool,
-  RESPECT_CACHE as initRespectCache,
+  PRESERVE_PROMPT_CACHE as initPreservePromptCache,
   USE_FALLBACK as initUseFallback,
 } from "./config"
 
@@ -50,7 +50,7 @@ export interface RuntimeModelConfig {
   summaryApiKey: string | undefined
 
   // Context behavior
-  respectCache: boolean
+  preservePromptCache: boolean
 
   // Flags
   useFallback: boolean
@@ -74,7 +74,7 @@ export const modelState: RuntimeModelConfig = {
   summaryModel: initSummaryModel,
   summaryApiKey: initSummaryKey,
 
-  respectCache: initRespectCache,
+  preservePromptCache: initPreservePromptCache,
   useFallback: initUseFallback,
 }
 
@@ -99,7 +99,7 @@ export type SwapDecision =
  * session context.
  *
  * Rest is triggered when:
- *   - The current session respects cache (model swap invalidates the prompt cache)
+ *   - The current session preserves its prompt cache (model swaps invalidate it)
  *   - The new model's context window is smaller than the current context size
  *
  * Otherwise the swap is compatible and the context carries over.
@@ -146,13 +146,13 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
     throw new Error(`failed to build model from preset "${presetName}"`)
   }
 
-  // Compatibility check 1: if the current session respects cache, a model swap
-  // invalidates the prompt cache (different tokenizer/prefix). Must rest.
-  if (modelState.respectCache) {
+  // Compatibility check 1: preserving the current prompt cache means a model
+  // swap would invalidate its tokenizer/prefix. Must rest.
+  if (modelState.preservePromptCache) {
     return {
       action: "rest",
       preset: presetName,
-      reason: `current session respects cache - model swap to "${presetName}" invalidates prompt cache`,
+      reason: `preserving the prompt cache requires a rest before swapping to "${presetName}"`,
     }
   }
 

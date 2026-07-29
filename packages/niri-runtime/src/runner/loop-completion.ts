@@ -30,10 +30,11 @@ import type { Model } from "../llm"
 
 /**
  * Resolves the configured summary model pair.
- * When respect_cache is true, returns null — no summaries are produced.
+ * When prompt-cache preservation is enabled, returns null so summaries cannot
+ * invalidate the cached conversation prefix.
  */
 export function configuredSummaryProvider(): { model: Model | null; apiKey: string | undefined } {
-  if (modelState.respectCache) return { model: null, apiKey: undefined }
+  if (modelState.preservePromptCache) return { model: null, apiKey: undefined }
   if (modelState.summaryModel) return { model: modelState.summaryModel, apiKey: modelState.summaryApiKey }
   return {
     model: modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel,

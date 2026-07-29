@@ -4,9 +4,23 @@ import { config } from "../config"
 // ── Misc thresholds ───────────────────────────────────────────────────────────
 
 export const CONTEXT_COMPACT_TRIGGER_TOKENS = config.context.compact_trigger_tokens
-export const RESPECT_CACHE = config.context.respect_cache
-export const COMPACTION_TURN_AGE = Math.max(1, config.context.compaction_turn_age)
-export const COMPACTION_MIN_CHARS = Math.max(100, config.context.compaction_min_chars)
+export const PRESERVE_PROMPT_CACHE = config.context.preserve_prompt_cache
+export const TOOL_RESULT_COMPACTION_MIN_AGE_TURNS = Math.max(1, config.context.tool_result_compaction_min_age_turns)
+export const TOOL_RESULT_COMPACTION_MIN_CHARS = Math.max(100, config.context.tool_result_compaction_min_chars)
+export const TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT = Math.min(
+  100,
+  Math.max(0, config.context.tool_result_compaction_min_context_percent),
+)
+
+export function meetsToolResultCompactionContextThreshold(
+  contextSize: number,
+  contextWindow: number,
+  minContextPercent: number,
+): boolean {
+  if (contextWindow <= 0) return false
+  return contextSize / contextWindow * 100 >= minContextPercent
+}
+
 export const IDLE_COMPACTION_TIMEOUT_MS = (() => {
   const minutes = config.context.idle_compaction_minutes
   if (!Number.isFinite(minutes) || minutes <= 0) return 0
@@ -166,4 +180,6 @@ if (summaryModel) console.log(`[config] summary=${SUMMARY_MODEL} provider=${summ
 console.log(`[config] env=${config.agent.env} use_fallback=${USE_FALLBACK}`)
 console.log(`[config] thinking=${ENABLE_THINKING}`)
 if (IDLE_COMPACTION_TIMEOUT_MS > 0) console.log(`[config] idle_compaction=${IDLE_COMPACTION_TIMEOUT_MS / 60_000}min`)
-console.log(`[config] respect_cache=${RESPECT_CACHE} compaction_turn_age=${COMPACTION_TURN_AGE} compaction_min_chars=${COMPACTION_MIN_CHARS}`)
+console.log(
+  `[config] preserve_prompt_cache=${PRESERVE_PROMPT_CACHE} tool_result_compaction_min_age_turns=${TOOL_RESULT_COMPACTION_MIN_AGE_TURNS} tool_result_compaction_min_chars=${TOOL_RESULT_COMPACTION_MIN_CHARS} tool_result_compaction_min_context_percent=${TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT}`,
+)

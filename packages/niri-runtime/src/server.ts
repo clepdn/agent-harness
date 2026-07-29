@@ -325,7 +325,7 @@ export function createServer(options: { requestRestart?: (reason?: string) => vo
 
   // ── Model swap ──────────────────────────────────────────────────────────────
   // Swaps the primary model to a named preset defined under [models.<name>].
-  // If the current session respects cache or the new model's context window is
+  // If the current session preserves its prompt cache or the new model's context window is
   // smaller than the current context size, triggers a programmatic rest so the
   // next session starts fresh with the new model. Otherwise swaps in place.
 
@@ -334,7 +334,7 @@ export function createServer(options: { requestRestart?: (reason?: string) => vo
       ? { id: modelState.primaryModel.id, provider: modelState.primaryModel.provider, baseUrl: modelState.primaryModel.baseUrl }
       : null,
     fallback: { id: modelState.fallbackModel.id, provider: modelState.fallbackModel.provider, baseUrl: modelState.fallbackModel.baseUrl },
-    respectCache: modelState.respectCache,
+    preservePromptCache: modelState.preservePromptCache,
     useFallback: modelState.useFallback,
     enableThinking: modelState.enableThinking,
     thinkingEffort: modelState.thinkingEffort,

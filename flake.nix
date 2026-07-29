@@ -73,6 +73,58 @@
 	    let
 		cfg            = config.services.coral;
 		settingsFormat = pkgs.formats.toml {};
+		oldContextSettings = [
+		    "respect_cache"
+		    "compaction_turn_age"
+		    "compaction_min_chars"
+		];
+		defaultContextSettings = {
+		    preserve_prompt_cache = true;
+		    tool_result_compaction_min_age_turns = 5;
+		    tool_result_compaction_min_chars = 2000;
+		    tool_result_compaction_min_context_percent = 50;
+		};
+		settingsType = lib.types.submodule {
+		    freeformType = settingsFormat.type;
+		    options.context = lib.mkOption {
+			type = lib.types.submodule {
+			    freeformType = settingsFormat.type;
+			    imports = [
+				(lib.mkRenamedOptionModule [ "respect_cache" ] [ "preserve_prompt_cache" ])
+				(lib.mkRenamedOptionModule [ "compaction_turn_age" ] [ "tool_result_compaction_min_age_turns" ])
+				(lib.mkRenamedOptionModule [ "compaction_min_chars" ] [ "tool_result_compaction_min_chars" ])
+			    ];
+			    options = {
+				preserve_prompt_cache = lib.mkOption {
+				    type = lib.types.bool;
+				    default = true;
+				    description = "Preserve the prompt cache by disabling LLM compaction.";
+				};
+				tool_result_compaction_min_age_turns = lib.mkOption {
+				    type = lib.types.ints.positive;
+				    default = 5;
+				    description = "Minimum age in assistant turns for proactive tool-result compaction.";
+				};
+				tool_result_compaction_min_chars = lib.mkOption {
+				    type = lib.types.ints.positive;
+				    default = 2000;
+				    description = "Minimum tool-result size eligible for proactive compaction.";
+				};
+				tool_result_compaction_min_context_percent = lib.mkOption {
+				    type = lib.types.addCheck lib.types.number (value: value >= 0 && value <= 100);
+				    default = 50;
+				    description = "Minimum active context usage percentage for proactive tool-result compaction.";
+				};
+			    };
+			};
+		    };
+		};
+		contextSettings = removeAttrs cfg.settings.context oldContextSettings;
+		settingsForToml =
+		    removeAttrs cfg.settings [ "context" ]
+		    // lib.optionalAttrs (contextSettings != defaultContextSettings) {
+			context = contextSettings;
+		    };
 	    in {
 		options.services.coral = {
 		    enable = lib.mkEnableOption "coral";
@@ -97,7 +149,7 @@
 		    };
 
 		    settings = lib.mkOption {
-			type    = settingsFormat.type;
+			type    = settingsType;
 			default = {};
 			example = lib.literalExpression ''
 			    {
@@ -125,12 +177,11 @@
 		    configFile = lib.mkOption {
 			type    = lib.types.nullOr lib.types.path;
 			default =
-			    if cfg.settings == {}
+			    if settingsForToml == {}
 			    then null
-			    else settingsFormat.generate "coral-config.toml" cfg.settings;
+			    else settingsFormat.generate "coral-config.toml" settingsForToml;
 			defaultText = lib.literalExpression ''
-			    if settings == {} then null
-			    else (pkgs.formats.toml {}).generate "coral-config.toml" settings
+			    null when normalized settings are empty; otherwise generated TOML
 			'';
 			description = ''
 			    Path to a TOML config file passed via --config.
