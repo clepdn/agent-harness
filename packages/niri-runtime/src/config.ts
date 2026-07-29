@@ -279,6 +279,7 @@ export const config = {
     enable_thinking: bool(modelT.enable_thinking, true),
     thinking_effort: pickEnum(modelT.thinking_effort, thinkingEfforts, "low"),
     vision: bool(modelT.vision, false),
+    nudge_on_no_tool: bool(modelT.nudge_on_no_tool, false),
   },
   fallback: {
     provider: str(fallbackT.provider, "").trim(),

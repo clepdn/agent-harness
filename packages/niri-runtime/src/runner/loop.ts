@@ -321,6 +321,14 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
 
     if (outcome === CycleOutcome.NoTools) {
       if (discordSendNudged) continue
+      if (modelState.primaryNudgeOnNoTool) {
+        state.conversation.push({
+          role: "user",
+          content: "[system] Your turn would have ended here. If you really want to wait, call one of your wait tools. You'll stay in a tool loop otherwise.",
+          timestamp: Date.now(),
+        })
+        continue
+      }
       setWorking(false)
       setPromWorking(false)
       await waitForNextEvent(convId, hooks)

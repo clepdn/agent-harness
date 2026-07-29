@@ -69,6 +69,7 @@ export const FALLBACK_TOOL_CHOICE = config.fallback.tool_choice
 export const ENABLE_THINKING = config.model.enable_thinking
 export const THINKING_EFFORT = config.model.thinking_effort
 export const PRIMARY_VISION = config.model.vision
+export const PRIMARY_NUDGE_ON_NO_TOOL = config.model.nudge_on_no_tool
 
 // ── Extra headers ─────────────────────────────────────────────────────────────
 const fallbackHeaders: Record<string, string> = {}

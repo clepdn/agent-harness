@@ -25,6 +25,7 @@ import {
   ENABLE_THINKING as initEnableThinking,
   THINKING_EFFORT as initThinkingEffort,
   PRIMARY_VISION as initPrimaryVision,
+  PRIMARY_NUDGE_ON_NO_TOOL as initPrimaryNudgeOnNoTool,
   RESPECT_CACHE as initRespectCache,
   USE_FALLBACK as initUseFallback,
 } from "./config"
@@ -35,6 +36,7 @@ export interface RuntimeModelConfig {
   primaryApiKey: string | undefined
   primaryToolChoice: ToolChoice
   primaryVision: boolean
+  primaryNudgeOnNoTool: boolean
   enableThinking: boolean
   thinkingEffort: ThinkingEffort
 
@@ -61,6 +63,7 @@ export const modelState: RuntimeModelConfig = {
   primaryApiKey: initPrimaryKey,
   primaryToolChoice: initPrimaryToolChoice,
   primaryVision: initPrimaryVision,
+  primaryNudgeOnNoTool: initPrimaryNudgeOnNoTool,
   enableThinking: initEnableThinking,
   thinkingEffort: initThinkingEffort,
 
@@ -87,6 +90,7 @@ export type SwapDecision =
       enableThinking: boolean
       thinkingEffort: ThinkingEffort
       vision: boolean
+      nudgeOnNoTool: boolean
     }
   | { action: "rest"; preset: string; reason: string }
 
@@ -180,6 +184,9 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
   const vision =
     typeof preset.vision === "boolean" ? preset.vision : modelState.primaryVision
 
+  const nudgeOnNoTool =
+    typeof preset.nudge_on_no_tool === "boolean" ? preset.nudge_on_no_tool : modelState.primaryNudgeOnNoTool
+
   return {
     action: "swap",
     preset: presetName,
@@ -189,6 +196,7 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
     enableThinking,
     thinkingEffort,
     vision,
+    nudgeOnNoTool,
   }
 }
 
@@ -201,6 +209,7 @@ export function applyModelSwap(decision: Extract<SwapDecision, { action: "swap" 
   modelState.primaryApiKey = decision.apiKey
   modelState.primaryToolChoice = decision.toolChoice
   modelState.primaryVision = decision.vision
+  modelState.primaryNudgeOnNoTool = decision.nudgeOnNoTool
   modelState.enableThinking = decision.enableThinking
   modelState.thinkingEffort = decision.thinkingEffort
 
