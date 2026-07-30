@@ -213,13 +213,13 @@ function watch(provider) {
       return stop(provider);
     }
     const status = flows[provider].status;
-    // Re-render on the way past to pick up the new connected state.
+    // Only terminal states change the visible flow. Rebuilding app.innerHTML
+    // on every poll destroys the focused code input (and its value on iOS).
     if (status === "complete" || status === "error") {
       stop(provider);
       await load();
       return;
     }
-    await load();
   }, 2500);
 }
 
