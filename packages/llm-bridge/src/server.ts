@@ -8,6 +8,8 @@ import { buildModel, streamCompletion } from "./pi-ai"
 import { streamAnthropicDirect, createAnthropicClient } from "./anthropic-direct"
 import { authenticate, isModelAllowed, type ApiKeyEntry } from "./auth"
 import { createAnthropicStore, type TokenStore } from "./anthropic-oauth"
+import { registerAdminRoutes } from "./admin"
+import { NON_ANTHROPIC_AUTH_PROVIDERS } from "./oauth-login"
 import { handleAntigravityCompletion } from "./antigravity"
 import { handleCodexCompletion } from "./codex"
 import { resolveProviderName, hasUsageSupport, getUsageForModel } from "./usage"
@@ -32,14 +34,25 @@ function isCodexModel(modelId: string): boolean {
   return lower.startsWith("gpt-") || lower.startsWith("o3-") || lower.startsWith("o4-") || lower.startsWith("codex-")
 }
 
+/**
+ * One store per credential file, shared by everything that needs a token.
+ * FileTokenStore serialises refreshes through an internal chain, so a second
+ * store over the same file would defeat that and let two refreshes race —
+ * which matters because model discovery re-runs after every admin login, while
+ * agents are still serving traffic.
+ */
+function getAnthropicStore(authPath: string): TokenStore {
+  let store = tokenStores.get(authPath)
+  if (!store) {
+    store = createAnthropicStore({ authPath })
+    tokenStores.set(authPath, store)
+  }
+  return store
+}
+
 function getApiKey(modelConfig: BridgeModelConfig): Promise<string> {
   if (modelConfig.authPath) {
-    let store = tokenStores.get(modelConfig.authPath)
-    if (!store) {
-      store = createAnthropicStore({ authPath: modelConfig.authPath })
-      tokenStores.set(modelConfig.authPath, store)
-    }
-    return store.getAccessToken()
+    return getAnthropicStore(modelConfig.authPath).getAccessToken()
   }
   return Promise.resolve(modelConfig.apiKey)
 }
@@ -212,9 +225,11 @@ export async function discoverModels(config: BridgeConfig): Promise<void> {
     // 3. Anthropic subscription (OAuth) — discover models from Anthropic's API
     //    instead of hardcoding them. Credentials come from the provider's
     //    auth.json (auth_path); tokens refresh + rotate in place.
-    if (provider.auth_path) {
+    //    codex and antigravity also carry an auth_path, but theirs holds a
+    //    different credential shape and their models come from elsewhere.
+    if (provider.auth_path && !NON_ANTHROPIC_AUTH_PROVIDERS.has(providerName)) {
       try {
-        const store = createAnthropicStore({ authPath: provider.auth_path })
+        const store = getAnthropicStore(provider.auth_path)
         const token = await store.getAccessToken()
         const models = await fetchAnthropicModels(token, provider.base_url)
         for (const m of models) {
@@ -258,6 +273,14 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
     ok: true,
     models: Object.keys(config.models).length,
   }))
+
+  // Admin UI + subscription logins. Serialized re-discovery: two logins
+  // finishing at once would otherwise interleave writes into config.models.
+  let discovery: Promise<void> = Promise.resolve()
+  registerAdminRoutes(app, config, apiKeys, () => {
+    discovery = discovery.catch(() => {}).then(() => discoverModels(config))
+    return discovery
+  })
 
   // List models the caller is authorized to use. When API keys are configured,
   // a valid key is required (401 otherwise, matching OpenAI/Anthropic) and only

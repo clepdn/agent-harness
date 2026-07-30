@@ -4,6 +4,7 @@ export interface ApiKeyEntry {
   key: string           // UUID format, enforced
   name?: string         // optional human-readable name
   allowedModels: string[] // glob patterns: ["*"] = all, ["claude-*"] = claude models
+  caps: string[]        // extra privileges beyond inference, e.g. ["admin"]
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -28,15 +29,27 @@ export function isModelAllowed(keyEntry: ApiKeyEntry, modelId: string): boolean 
 }
 
 /**
+ * Check if a key carries a capability. Capabilities are exact strings, never
+ * globs — `allowedModels: ["*"]` must not imply admin.
+ */
+export function hasCap(keyEntry: ApiKeyEntry, cap: string): boolean {
+  return keyEntry.caps.includes(cap)
+}
+
+/**
  * Load API keys from a JSON file or argv.
  *
  * JSON format (array):
  * [
  *   { "key": "uuid-here", "allowedModels": ["*"], "name": "coral" },
- *   { "key": "uuid-here", "allowedModels": ["claude-*"], "name": "claude-only" }
+ *   { "key": "uuid-here", "allowedModels": ["claude-*"], "name": "claude-only" },
+ *   { "key": "uuid-here", "allowedModels": ["*"], "name": "me", "caps": ["admin"] }
  * ]
  *
  * Or single object.
+ *
+ * `caps` is optional and defaults to none. A key without "admin" cannot reach
+ * /admin, no matter how broad its allowedModels are.
  */
 export function loadApiKeys(keysPath?: string): Map<string, ApiKeyEntry> {
   const keys = new Map<string, ApiKeyEntry>()
@@ -67,9 +80,15 @@ export function loadApiKeys(keysPath?: string): Map<string, ApiKeyEntry> {
       throw new Error(`[bridge] API key "${key}" must have at least one allowedModels entry`)
     }
 
+    const caps = e.caps ?? []
+    if (!Array.isArray(caps) || caps.some((c) => typeof c !== "string")) {
+      throw new Error(`[bridge] API key "${key}" has a malformed caps field: expected an array of strings`)
+    }
+
     const keyEntry: ApiKeyEntry = {
       key,
       allowedModels: allowedModels as string[],
+      caps: caps as string[],
       ...(typeof e.name === "string" ? { name: e.name } : {}),
     }
 

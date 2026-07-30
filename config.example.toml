@@ -57,6 +57,28 @@ title = ""
 # # pi-ai auth.json: { "anthropic": { "type": "oauth", "refresh", "access", "expires" } }
 # # Tokens refresh + rotate back in place, just like codex's ~/.codex/auth.json.
 # auth_path = "~/.pi/auth.json"
+#
+# ── Admin UI (/admin) ────────────────────────────────────────────────────────
+# The bridge serves a page at /admin for signing into the subscription
+# providers (Claude Pro/Max, ChatGPT Codex) without shelling into the host.
+# Anthropic hands you an authorize URL and takes the code back by paste; codex
+# uses a device code and polls. Pure API-key providers like umans are not
+# listed — there is nothing to log into.
+#
+# Access needs a key in the --keys file carrying the "admin" cap:
+#
+#   [
+#     { "key": "<uuid>", "name": "coral", "allowedModels": ["*"] },
+#     { "key": "<uuid>", "name": "me", "allowedModels": ["*"], "caps": ["admin"] }
+#   ]
+#
+# caps defaults to []. allowedModels = ["*"] does NOT imply admin, so the keys
+# your agents hold cannot re-auth the accounts they run on.
+#
+# Credentials written by /admin must live somewhere writable — tokens rotate in
+# place on every refresh — so they land in the service state directory
+# (/var/lib/llm-bridge) rather than an agenix path. Set auth_path above to
+# override. API keys stay immutable in agenix; only OAuth credentials move.
 
 # ── Remote bridge client ─────────────────────────────────────────────────────
 # When a model preset sets `bridge = true`, coral routes that model through a

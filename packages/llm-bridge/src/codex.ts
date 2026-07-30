@@ -35,6 +35,32 @@ function accountIdFromToken(token: string): string | undefined {
   return decodeJwt(token)?.["https://api.openai.com/auth"]?.chatgpt_account_id
 }
 
+/**
+ * One refresh chain per credential file. Every request re-reads auth.json and
+ * refreshes when the access token is nearly expired, so a burst of traffic
+ * arriving in that window would otherwise present the same refresh token to the
+ * token endpoint several times over. OpenAI rotates refresh tokens, and reuse
+ * detection on a rotating credential can invalidate the chain outright — a
+ * forced re-login on a process that had been up for days. Keyed by path so
+ * unrelated credentials don't queue behind each other.
+ */
+const codexRefreshChains = new Map<string, Promise<unknown>>()
+
+export async function getCodexAccessToken(
+  authPath: string,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ token: string; accountId?: string }> {
+  const previous = codexRefreshChains.get(authPath) ?? Promise.resolve()
+  const next = previous.then(() => loadCodexAuth(authPath, fetchImpl))
+  // Keep the chain alive even when this attempt rejects, so a transient
+  // upstream failure doesn't wedge every request queued behind it.
+  codexRefreshChains.set(
+    authPath,
+    next.catch(() => {}),
+  )
+  return next
+}
+
 async function loadCodexAuth(authPath: string, fetchImpl: typeof fetch): Promise<{ token: string; accountId?: string }> {
   const auth = JSON.parse(fs.readFileSync(authPath, "utf8")) as CodexAuth
   let token = auth.tokens?.access_token?.trim()
@@ -200,6 +226,23 @@ function extractCodexRateLimitHeaders(h: Headers): Record<string, string> {
 }
 
 /**
+ * Where this bridge reads (and the admin login writes) the codex credential.
+ * Single source of truth: a login that writes somewhere else is a login that
+ * silently doesn't take effect.
+ */
+export function resolveCodexAuthPath(
+  provider?: { auth_path?: string },
+  override?: string,
+): string {
+  return (
+    override ||
+    provider?.auth_path ||
+    process.env.CODEX_AUTH_PATH?.trim() ||
+    path.join(os.homedir(), ".codex", "auth.json")
+  )
+}
+
+/**
  * Handle a chat completion request using the Codex backend.
  * Standalone function — can be called from any server context.
  */
@@ -208,12 +251,12 @@ export async function handleCodexCompletion(
   provider?: { model?: string; reasoning_effort?: string; auth_path?: string },
   options: BridgeOptions = {},
 ): Promise<CodexHandlerResult> {
-  const authPath = options.authPath || provider?.auth_path || process.env.CODEX_AUTH_PATH?.trim() || path.join(os.homedir(), ".codex", "auth.json")
+  const authPath = resolveCodexAuthPath(provider, options.authPath)
   const fetchImpl = options.fetchImpl || fetch
   const defaultModel = provider?.model || process.env.CODEX_BRIDGE_MODEL?.trim() || DEFAULT_MODEL
   const defaultReasoning = provider?.reasoning_effort || process.env.CODEX_BRIDGE_REASONING_EFFORT?.trim() || DEFAULT_REASONING_EFFORT
 
-  const { token, accountId } = await loadCodexAuth(authPath, fetchImpl)
+  const { token, accountId } = await getCodexAccessToken(authPath, fetchImpl)
   const mapped = mapMessages(requestBody.messages || [])
   const requestedCacheKey = typeof requestBody.prompt_cache_key === "string" ? requestBody.prompt_cache_key.trim() : ""
   const requestedUser = typeof requestBody.user === "string" ? requestBody.user.trim() : ""
@@ -306,14 +349,14 @@ export function createCodexBridgeServer(options: BridgeOptions = {}): FastifyIns
     ? configuredBodyLimit
     : DEFAULT_BODY_LIMIT
   const app = Fastify({ logger: false, bodyLimit })
-  const authPath = options.authPath || process.env.CODEX_AUTH_PATH?.trim() || path.join(os.homedir(), ".codex", "auth.json")
+  const authPath = resolveCodexAuthPath(undefined, options.authPath)
   const fetchImpl = options.fetchImpl || fetch
 
   app.get("/health", async () => ({ ok: true, authPath }))
   app.get("/v1/models", async () => ({ object: "list", data: [{ id: "Codex", object: "model" }, { id: DEFAULT_MODEL, object: "model" }] }))
   app.post("/v1/chat/completions", async (request, reply) => {
     const body = request.body as any
-    const { token, accountId } = await loadCodexAuth(authPath, fetchImpl)
+    const { token, accountId } = await getCodexAccessToken(authPath, fetchImpl)
     const mapped = mapMessages(body.messages || [])
     const requestedCacheKey = typeof body.prompt_cache_key === "string" ? body.prompt_cache_key.trim() : ""
     const requestedUser = typeof body.user === "string" ? body.user.trim() : ""

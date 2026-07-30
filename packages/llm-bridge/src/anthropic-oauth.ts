@@ -20,9 +20,9 @@
 // The file-backed store mirrors how the codex bridge treats ~/.codex/auth.json:
 // read → refresh-if-expired → atomic write-back (tmp + rename, mode 0600).
 
-import { readFileSync, writeFileSync, renameSync, existsSync } from "node:fs"
+import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "node:fs"
 import { homedir } from "node:os"
-import { join } from "node:path"
+import { dirname, join } from "node:path"
 import { refreshAnthropicToken } from "@earendil-works/pi-ai/oauth"
 import type { OAuthCredentials } from "@earendil-works/pi-ai"
 
@@ -52,6 +52,76 @@ export interface TokenStore {
 }
 
 /**
+ * Read one provider's credential out of a pi-shaped auth.json, if present.
+ *
+ * The refresh token must be non-empty, not merely a string: an entry with a
+ * blank refresh is unusable (every request would attempt a refresh and fail),
+ * so it has to read as absent rather than as a credential.
+ */
+export function readOAuthCredential(
+  authPath: string,
+  providerId: string = DEFAULT_PROVIDER_ID,
+): OAuthCredential | null {
+  if (!existsSync(authPath)) return null
+  const file = JSON.parse(readFileSync(authPath, "utf-8")) as AuthFile
+  const entry = file?.[providerId]
+  const refresh = entry && (entry as Record<string, unknown>).refresh
+  if (entry && entry.type === "oauth" && typeof refresh === "string" && refresh.length > 0) {
+    return entry as unknown as OAuthCredential
+  }
+  return null
+}
+
+/**
+ * Remove one provider's credential, leaving the rest of a shared auth.json
+ * intact. Deleting the entry rather than blanking its fields is what makes a
+ * sign-out actually read back as signed out.
+ */
+export function deleteOAuthCredential(
+  authPath: string,
+  providerId: string = DEFAULT_PROVIDER_ID,
+): void {
+  if (!existsSync(authPath)) return
+  let file: AuthFile
+  try {
+    file = JSON.parse(readFileSync(authPath, "utf-8")) as AuthFile
+  } catch {
+    return
+  }
+  if (!(providerId in file)) return
+  delete file[providerId]
+  const tmp = `${authPath}.${process.pid}.tmp`
+  writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 })
+  renameSync(tmp, authPath)
+}
+
+/**
+ * Merge one provider's credential into a pi-shaped auth.json, atomically and at
+ * mode 0600. Other providers' entries in the same file are preserved, so this
+ * stays safe to point at a shared ~/.pi/auth.json. A corrupt file is replaced
+ * rather than inherited — refusing to write would strand the login.
+ */
+export function writeOAuthCredential(
+  authPath: string,
+  cred: OAuthCredential,
+  providerId: string = DEFAULT_PROVIDER_ID,
+): void {
+  let file: AuthFile = {}
+  if (existsSync(authPath)) {
+    try {
+      file = JSON.parse(readFileSync(authPath, "utf-8")) as AuthFile
+    } catch {
+      file = {}
+    }
+  }
+  file[providerId] = cred
+  mkdirSync(dirname(authPath), { recursive: true, mode: 0o700 })
+  const tmp = `${authPath}.${process.pid}.tmp`
+  writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 })
+  renameSync(tmp, authPath)
+}
+
+/**
  * File-backed store. Reads pi's auth.json, refreshes on expiry, and writes the
  * rotated credential back atomically so refresh/access/expiry rotate in place.
  * Refreshes are serialized so concurrent requests can't double-refresh a
@@ -66,28 +136,11 @@ export class FileTokenStore implements TokenStore {
   ) {}
 
   private readCred(): OAuthCredential | null {
-    if (!existsSync(this.authPath)) return null
-    const file = JSON.parse(readFileSync(this.authPath, "utf-8")) as AuthFile
-    const entry = file?.[this.providerId]
-    if (entry && entry.type === "oauth" && typeof (entry as Record<string, unknown>).refresh === "string") {
-      return entry as unknown as OAuthCredential
-    }
-    return null
+    return readOAuthCredential(this.authPath, this.providerId)
   }
 
   private writeCred(cred: OAuthCredential): void {
-    let file: AuthFile = {}
-    if (existsSync(this.authPath)) {
-      try {
-        file = JSON.parse(readFileSync(this.authPath, "utf-8")) as AuthFile
-      } catch {
-        file = {}
-      }
-    }
-    file[this.providerId] = cred
-    const tmp = `${this.authPath}.${process.pid}.tmp`
-    writeFileSync(tmp, `${JSON.stringify(file, null, 2)}\n`, { mode: 0o600 })
-    renameSync(tmp, this.authPath)
+    writeOAuthCredential(this.authPath, cred, this.providerId)
   }
 
   hasCredentials(): boolean {

@@ -401,6 +401,12 @@
 			    serviceConfig = {
 				User             = cfg.user;
 				Group            = cfg.group;
+				# OAuth credentials (anthropic, codex) are rotated in place on
+				# every token refresh, so they cannot live in the nix store or
+				# /run/agenix. StateDirectory gives the admin UI somewhere
+				# writable that survives restarts; API keys stay immutable.
+				StateDirectory     = "llm-bridge";
+				StateDirectoryMode = "0700";
 				WorkingDirectory = "/var/lib/llm-bridge";
 				ExecStart        = "${pkgs.bash}/bin/bash -lc '${cfg.package}/bin/llm-bridge${configFlag}${keysFlag}'";
 				Restart          = "always";
