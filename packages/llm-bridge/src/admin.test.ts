@@ -5,7 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import Fastify from "fastify"
 import { registerAdminRoutes } from "./admin"
-import { loadApiKeys, type ApiKeyEntry } from "./auth"
+import { isModelAllowed, loadApiKeys, type ApiKeyEntry } from "./auth"
 import { logout, providerStatus, resolveAnthropicAuthPath, registerProvider, stateDir } from "./oauth-login"
 import { readCodexCredential, writeCodexCredential } from "./codex-auth"
 import { readOAuthCredential, writeOAuthCredential } from "./anthropic-oauth"
@@ -139,6 +139,28 @@ test("caps default to none and parse when present", () => {
   const loaded = loadApiKeys(file)
   assert.deepEqual(loaded.get(ADMIN_KEY)?.caps, ["admin"])
   assert.deepEqual(loaded.get(PLAIN_KEY)?.caps, [])
+})
+
+test("an explicitly empty allowedModels array is accepted without capabilities", () => {
+  const dir = tmpDir()
+  const file = path.join(dir, "keys.json")
+  fs.writeFileSync(file, JSON.stringify([{ key: PLAIN_KEY, allowedModels: [] }]))
+
+  const loaded = loadApiKeys(file)
+  const plainKey = loaded.get(PLAIN_KEY)
+  assert.ok(plainKey)
+  assert.deepEqual(plainKey.allowedModels, [])
+  assert.deepEqual(plainKey.caps, [])
+  assert.equal(isModelAllowed(plainKey, "claude-3-7-sonnet"), false)
+})
+
+test("allowedModels is required and must be an array", () => {
+  for (const entry of [{ key: ADMIN_KEY }, { key: ADMIN_KEY, allowedModels: "*" }]) {
+    const dir = tmpDir()
+    const file = path.join(dir, "keys.json")
+    fs.writeFileSync(file, JSON.stringify([entry]))
+    assert.throws(() => loadApiKeys(file), /allowedModels.*array/)
+  }
 })
 
 test("a malformed caps field fails loudly instead of silently dropping admin", () => {

@@ -69,9 +69,10 @@ title = ""
 #
 #   [
 #     { "key": "<uuid>", "name": "coral", "allowedModels": ["*"] },
-#     { "key": "<uuid>", "name": "me", "allowedModels": ["*"], "caps": ["admin"] }
+#     { "key": "<uuid>", "name": "me", "allowedModels": [], "caps": ["admin"] }
 #   ]
 #
+# allowedModels remains required; [] grants no model access regardless of caps.
 # caps defaults to []. allowedModels = ["*"] does NOT imply admin, so the keys
 # your agents hold cannot re-auth the accounts they run on.
 #

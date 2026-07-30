@@ -76,8 +76,8 @@ export function loadApiKeys(keysPath?: string): Map<string, ApiKeyEntry> {
     }
 
     const allowedModels = e.allowedModels
-    if (!Array.isArray(allowedModels) || allowedModels.length === 0) {
-      throw new Error(`[bridge] API key "${key}" must have at least one allowedModels entry`)
+    if (!Array.isArray(allowedModels)) {
+      throw new Error(`[bridge] API key "${key}" has a malformed allowedModels field: expected an array`)
     }
 
     const caps = e.caps ?? []
