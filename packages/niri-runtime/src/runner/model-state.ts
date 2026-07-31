@@ -26,6 +26,7 @@ import {
   THINKING_EFFORT as initThinkingEffort,
   PRIMARY_VISION as initPrimaryVision,
   PRIMARY_NUDGE_ON_NO_TOOL as initPrimaryNudgeOnNoTool,
+  PRIMARY_IDLE_COMPACTION_MS as initPrimaryIdleCompactionMs,
   PRESERVE_PROMPT_CACHE as initPreservePromptCache,
   USE_FALLBACK as initUseFallback,
 } from "./config"
@@ -37,6 +38,8 @@ export interface RuntimeModelConfig {
   primaryToolChoice: ToolChoice
   primaryVision: boolean
   primaryNudgeOnNoTool: boolean
+  // Idle compaction timeout in ms for the primary model (0 = off). Per-preset.
+  idleCompactionMs: number
   enableThinking: boolean
   thinkingEffort: ThinkingEffort
 
@@ -64,6 +67,7 @@ export const modelState: RuntimeModelConfig = {
   primaryToolChoice: initPrimaryToolChoice,
   primaryVision: initPrimaryVision,
   primaryNudgeOnNoTool: initPrimaryNudgeOnNoTool,
+  idleCompactionMs: initPrimaryIdleCompactionMs,
   enableThinking: initEnableThinking,
   thinkingEffort: initThinkingEffort,
 
@@ -91,6 +95,7 @@ export type SwapDecision =
       thinkingEffort: ThinkingEffort
       vision: boolean
       nudgeOnNoTool: boolean
+      idleCompactionMs: number
     }
   | { action: "rest"; preset: string; reason: string }
 
@@ -187,6 +192,15 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
   const nudgeOnNoTool =
     typeof preset.nudge_on_no_tool === "boolean" ? preset.nudge_on_no_tool : modelState.primaryNudgeOnNoTool
 
+  // Idle compaction is specified in minutes on the preset; convert to ms. 0/absent
+  // falls back to the current runtime value. Non-positive/invalid disables it.
+  const idleCompactionMs =
+    typeof preset.idle_compaction_minutes === "number"
+      ? preset.idle_compaction_minutes > 0
+        ? Math.round(preset.idle_compaction_minutes * 60_000)
+        : 0
+      : modelState.idleCompactionMs
+
   return {
     action: "swap",
     preset: presetName,
@@ -197,6 +211,7 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
     thinkingEffort,
     vision,
     nudgeOnNoTool,
+    idleCompactionMs,
   }
 }
 
@@ -210,6 +225,7 @@ export function applyModelSwap(decision: Extract<SwapDecision, { action: "swap" 
   modelState.primaryToolChoice = decision.toolChoice
   modelState.primaryVision = decision.vision
   modelState.primaryNudgeOnNoTool = decision.nudgeOnNoTool
+  modelState.idleCompactionMs = decision.idleCompactionMs
   modelState.enableThinking = decision.enableThinking
   modelState.thinkingEffort = decision.thinkingEffort
 

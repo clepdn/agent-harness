@@ -27,8 +27,13 @@ export function meetsToolResultCompactionContextThreshold(
   return contextSize / contextWindow * 100 >= minContextPercent
 }
 
-export const IDLE_COMPACTION_TIMEOUT_MS = (() => {
-  const minutes = config.context.idle_compaction_minutes
+/**
+ * Idle compaction is a per-model preset option (like nudge_on_no_tool). This is
+ * the initial value from [model]; presets can override it and it's swappable at
+ * runtime via modelState.idleCompactionMs. 0 = disabled.
+ */
+export const PRIMARY_IDLE_COMPACTION_MS = (() => {
+  const minutes = config.model.idle_compaction_minutes
   if (!Number.isFinite(minutes) || minutes <= 0) return 0
   return Math.round(minutes * 60_000)
 })()
@@ -185,7 +190,7 @@ console.log(`[config] fallback=${FALLBACK_MODEL} provider=${fallbackModel.provid
 if (summaryModel) console.log(`[config] summary=${SUMMARY_MODEL} provider=${summaryModel.provider} @ ${summaryModel.baseUrl}`)
 console.log(`[config] env=${config.agent.env} use_fallback=${USE_FALLBACK}`)
 console.log(`[config] thinking=${ENABLE_THINKING}`)
-if (IDLE_COMPACTION_TIMEOUT_MS > 0) console.log(`[config] idle_compaction=${IDLE_COMPACTION_TIMEOUT_MS / 60_000}min`)
+if (PRIMARY_IDLE_COMPACTION_MS > 0) console.log(`[config] idle_compaction=${PRIMARY_IDLE_COMPACTION_MS / 60_000}min`)
 console.log(
   `[config] compaction_strategy=${COMPACTION_STRATEGY} trigger=${CONTEXT_COMPACT_TRIGGER_TOKENS} deep_archive=${DEEP_ARCHIVE_ENABLED} journal_first=${JOURNAL_BEFORE_COMPACTION}` +
     (REMOTE_COMPACTION_ENDPOINT ? ` remote=${REMOTE_COMPACTION_ENDPOINT}` : ""),

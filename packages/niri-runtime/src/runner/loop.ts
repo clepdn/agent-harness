@@ -12,7 +12,6 @@ import {
   meetsToolResultCompactionContextThreshold,
   CONTEXT_COMPACT_TRIGGER_TOKENS,
   COMPACTION_STRATEGY,
-  IDLE_COMPACTION_TIMEOUT_MS,
   estimatePromptTokens,
   findSummaryMessageIndex,
   loadAgentSummaryContext,
@@ -49,7 +48,9 @@ export type RunLoopExit = "rest"
 
 async function waitForNextEvent(convId: number, state: LoopState, hooks: LoopHooks): Promise<void> {
   // When idle compaction is disabled, just block until the next event.
-  if (IDLE_COMPACTION_TIMEOUT_MS <= 0) {
+  // Read from modelState so it swaps with the model preset at runtime.
+  const idleCompactionMs = modelState.idleCompactionMs
+  if (idleCompactionMs <= 0) {
     const incoming = await hooks.waitForEvent()
     if (!incoming) return
     hooks.injectIncomingEvent(convId, incoming)
@@ -61,7 +62,7 @@ async function waitForNextEvent(convId: number, state: LoopState, hooks: LoopHoo
   // session doesn't sit at full context forever) and keep waiting. Any real
   // event — or a rest/shutdown request — breaks out immediately.
   while (true) {
-    const incoming = await hooks.waitForEventWithTimeout(IDLE_COMPACTION_TIMEOUT_MS)
+    const incoming = await hooks.waitForEventWithTimeout(idleCompactionMs)
     if (incoming) {
       hooks.injectIncomingEvent(convId, incoming)
       return

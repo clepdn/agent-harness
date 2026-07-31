@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { __loopTest } from "./loop"
+import { modelState } from "./model-state"
 import type { Message } from "../types"
 import type { LoopState } from "./types"
 import { makeUserMessage, makeAssistantMessage, makeToolResultMessage } from "./test-helpers"
@@ -208,6 +209,11 @@ test("waitForNextEvent bails out on shutdown instead of looping the idle timer",
   const calls: string[] = []
   let shuttingDown = false
 
+  // Idle compaction is a per-preset option that defaults to 0 (off). Enable it
+  // here so waitForNextEvent takes the idle-timeout branch this test exercises.
+  const savedIdle = modelState.idleCompactionMs
+  modelState.idleCompactionMs = 60_000
+
   await __loopTest.waitForNextEvent(7, makeState(), {
     clientTools: testClientTools,
     getTools: () => [],
@@ -229,6 +235,8 @@ test("waitForNextEvent bails out on shutdown instead of looping the idle timer",
     shouldShutdown: () => shuttingDown,
     resolveShutdown: () => {},
   })
+
+  modelState.idleCompactionMs = savedIdle
 
   // Exactly one timeout, no inject, no infinite loop.
   assert.deepEqual(calls, ["timeout"])

@@ -289,6 +289,10 @@ export const config = {
     thinking_effort: pickEnum(modelT.thinking_effort, thinkingEfforts, "low"),
     vision: bool(modelT.vision, false),
     nudge_on_no_tool: bool(modelT.nudge_on_no_tool, false),
+    // Minutes of session idle before a mid-session compaction pass runs. 0 = off.
+    // Per-model because it's really about that model's context/cache behavior;
+    // the global default stays 0 so it only turns on for presets that opt in.
+    idle_compaction_minutes: num(modelT.idle_compaction_minutes, 0),
   },
   fallback: {
     provider: str(fallbackT.provider, "").trim(),
@@ -343,7 +347,6 @@ export const config = {
     compact_recent_messages: int(contextT.compact_recent_messages, 80),
     compact_chunk_messages: int(contextT.compact_chunk_messages, 32),
     compact_summary_max_chars: int(contextT.compact_summary_max_chars, 16000),
-    idle_compaction_minutes: num(contextT.idle_compaction_minutes, 45),
     preserve_prompt_cache: bool(contextT.preserve_prompt_cache, true),
     tool_result_compaction_min_age_turns: int(contextT.tool_result_compaction_min_age_turns, 5),
     tool_result_compaction_min_chars: int(contextT.tool_result_compaction_min_chars, 2000),

@@ -127,6 +127,10 @@ identity = ""
 # Reference a preset defined under [models.<name>], or set fields directly.
 preset = "umans"
 # Any field here overrides the preset.
+# Minutes of session idle before a mid-session compaction pass runs. 0 = off.
+# Per-model/preset because it depends on the model's context + cache behavior.
+# Set it on a [models.<name>] preset to have it swap with the model.
+# idle_compaction_minutes = 45
 
 [fallback]
 # Used when the primary endpoint is unreachable or rate-limited (429/5xx).
@@ -146,8 +150,8 @@ compact_trigger_tokens = 90000
 compact_recent_messages = 80
 compact_chunk_messages = 32
 compact_summary_max_chars = 16000
-# 0 disables idle compaction.
-idle_compaction_minutes = 45
+# NOTE: idle_compaction_minutes moved to [model] (it's a per-model/preset option
+# now, since it's really about that model's context/cache behavior). Default 0.
 # Keep the conversation byte-for-byte stable for prompt caching. This disables
 # all LLM compaction and requires a rest before switching models.
 preserve_prompt_cache = true
