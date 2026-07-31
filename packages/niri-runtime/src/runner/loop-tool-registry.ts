@@ -103,15 +103,22 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
     end_session: async ({ convId, state, call, args }) => {
       if (args.note) console.log("[runner] end_session note:", args.note)
       recordToolResult(convId, state, call, "end_session", args, "Session ended.")
-      // Compact-then-save so a clean goodbye leaves a real summary behind for
-      // the next boot to rehydrate from, rather than resting with no summary.
+      // Save the raw snapshot FIRST as a guaranteed-continuity fallback, so if
+      // the rich summary compaction is slow or fails, next boot still rehydrates
+      // from the raw conversation instead of waking clean with nothing.
+      const note = args.note as string | undefined
+      await saveRestSnapshot(state.conversation, note)
+      // Then compact-and-resave so a clean goodbye leaves a real rich summary
+      // behind. Best-effort: the raw snapshot above already guarantees continuity.
       try {
         const compacted = await compactForShutdown(state)
-        if (compacted) console.log("[runner] end_session compacted the conversation before resting")
+        if (compacted) {
+          console.log("[runner] end_session compacted the conversation before resting")
+          await saveRestSnapshot(state.conversation, note)
+        }
       } catch (err) {
         console.warn(`[runner] end_session compaction failed: ${err instanceof Error ? err.message : String(err)}`)
       }
-      await saveRestSnapshot(state.conversation, args.note as string | undefined)
       return { shouldRest: true }
     },
 

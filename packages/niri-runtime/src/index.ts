@@ -102,7 +102,7 @@ async function main() {
     console.log(`\n[niri] ${sig} received${detail}, saving session snapshot...`)
 
     const timeout = new Promise<void>((resolve) =>
-      setTimeout(() => { console.log("[niri] shutdown timed out, forcing exit"); resolve() }, 60_000)
+      setTimeout(() => { console.log("[niri] shutdown timed out, forcing exit"); resolve() }, 300_000)
     )
 
     await Promise.race([shutdown(), timeout])
