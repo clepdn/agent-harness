@@ -9,6 +9,7 @@ import {
 } from "discord.js"
 import { config, setDiscordBotUserId } from "../config"
 import { handleDiscordIngress } from "./pipeline"
+import { noteDmTyping } from "./dm-debounce"
 import { registerSlashCommands, handleInteraction, handleAutocomplete } from "./slash-commands"
 import { subscribeRunnerPresence, type RunnerPresence } from "../runner/presence"
 import { startStatusUpdater, stopStatusUpdater } from "./status-updater"
@@ -149,6 +150,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
       GatewayIntentBits.DirectMessages,
+      GatewayIntentBits.DirectMessageTyping,
       GatewayIntentBits.MessageContent,
     ],
     partials: [Partials.Channel],
@@ -180,6 +182,20 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
   })
 
   client.on("raw", (packet: { t?: string; d?: Record<string, unknown> }) => {
+    // Typing indicators extend an in-flight DM wake debounce window. A DM
+    // typing event has no guild_id; guild typing is ignored.
+    if (packet?.t === "TYPING_START") {
+      const d = packet.d ?? {}
+      const channelId = asString(d.channel_id)
+      const guildId = asString(d.guild_id)
+      if (channelId && !guildId) {
+        noteDmTyping(channelId)
+        if (trace) {
+          console.log(`[discord gateway/raw] TYPING_START dm channel=${channelId} -> extend debounce`)
+        }
+      }
+      return
+    }
     if (packet?.t !== "MESSAGE_CREATE") return
     if (!rawFallback) return
     const d = packet.d ?? {}
