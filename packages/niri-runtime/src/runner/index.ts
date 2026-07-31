@@ -170,7 +170,7 @@ export function enqueueEvent(event: UserMessage, options: EnqueueOptions = {}): 
  * otherwise cold-wake the runner. This is the same pattern the trigger routes
  * use; boredom activations go through it too rather than calling wake() raw.
  */
-function activate(event: UserMessage): void {
+export function activate(event: UserMessage): void {
   if (isRunning()) enqueueEvent(event)
   else void wake(event)
 }

@@ -4,7 +4,8 @@ import { REPO_ROOT } from "./agent-config"
 import { createServer } from "./server"
 import { initDb } from "./db"
 import { initMetricsDb } from "./metrics"
-import { shutdown } from "./runner/index"
+import { shutdown, activate } from "./runner/index"
+import { initJobManager } from "./runner/jobs"
 import { startDiscordGateway } from "./discord/gateway"
 import { setGatewayCallbacks } from "./discord/slash-commands"
 import { startDiscordEmbeddingBackfill } from "./discord/search"
@@ -53,6 +54,10 @@ async function main() {
   await ensureSoulFilePlacement()
   initDb()
   initMetricsDb()
+
+  // Wire background jobs (e.g. subagents) to wake/steer the runner on completion.
+  // Without this, deliver stays null and completed-job notifications are silently dropped.
+  initJobManager(activate)
   try {
     await startLlmBridge()
   } catch (err) {
