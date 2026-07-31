@@ -27,6 +27,7 @@ import { findSubagent, runSubagent } from "./subagent"
 import { startJob } from "./jobs"
 import { describeContextSummary, expandContextSummary, grepContext } from "./context-store"
 import { saveRestSnapshot } from "./util"
+import { compactForShutdown } from "./loop"
 import { executeAction } from "./computer-use"
 
 const DEFAULT_WAIT_THEN_CONTINUE_MS = 10_000
@@ -102,6 +103,14 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
     end_session: async ({ convId, state, call, args }) => {
       if (args.note) console.log("[runner] end_session note:", args.note)
       recordToolResult(convId, state, call, "end_session", args, "Session ended.")
+      // Compact-then-save so a clean goodbye leaves a real summary behind for
+      // the next boot to rehydrate from, rather than resting with no summary.
+      try {
+        const compacted = await compactForShutdown(state)
+        if (compacted) console.log("[runner] end_session compacted the conversation before resting")
+      } catch (err) {
+        console.warn(`[runner] end_session compaction failed: ${err instanceof Error ? err.message : String(err)}`)
+      }
       await saveRestSnapshot(state.conversation, args.note as string | undefined)
       return { shouldRest: true }
     },

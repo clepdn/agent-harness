@@ -294,13 +294,16 @@ async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn"
 
 async function applyLLMCompaction(
   state: LoopState,
-  phase: "pre-turn" | "post-turn" | "idle",
+  phase: "pre-turn" | "post-turn" | "idle" | "shutdown",
   strategy: CompactionStrategy = COMPACTION_STRATEGY,
+  force = false,
 ): Promise<boolean> {
   // Gate strictly on the model-reported prompt_tokens (state.contextSize).
   // The char-based estimatePromptTokens inflates the tools schema ~3×, which
   // used to fire compaction at ~22-31k real tokens and produce nonsense summaries.
-  if (state.contextSize < CONTEXT_COMPACT_TRIGGER_TOKENS) return false
+  // `force` bypasses the gate — used on a clean end_session so the goodbye
+  // leaves a real summary behind even below the trigger.
+  if (!force && state.contextSize < CONTEXT_COMPACT_TRIGGER_TOKENS) return false
   const beforeEstimate = estimatePromptTokens(state.conversation)
 
   // companion + context-full salvage lessons from the same head that generated
@@ -383,6 +386,22 @@ async function applyLLMCompaction(
     summary,
   })
   return true
+}
+
+/**
+ * Force a compaction pass regardless of the token trigger, for a clean
+ * end_session. Summarizes the middle so the goodbye leaves a real
+ * `[context summary v1]` behind for the next boot to rehydrate from, instead of
+ * resting with "(no llm context summary yet)". No-op if there's nothing worth
+ * compacting (the summary wouldn't be smaller) or no summary model is available.
+ * Returns true if a summary was produced.
+ */
+export async function compactForShutdown(state: LoopState): Promise<boolean> {
+  const strategy = COMPACTION_STRATEGY === "off" ? "companion" : COMPACTION_STRATEGY
+  if (strategy === "snapcompact") {
+    return applyLLMCompaction(state, "shutdown", "context-full", true)
+  }
+  return applyLLMCompaction(state, "shutdown", strategy, true)
 }
 
 export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks): Promise<RunLoopExit> {
