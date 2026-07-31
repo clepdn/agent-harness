@@ -9,8 +9,9 @@ import { setRunnerPresence } from "./presence"
 import { createNiriToolCatalog } from "./tool-catalog"
 import { archiveContextMessages } from "./context-store"
 import type { RunnerStateInternal } from "./types"
-import { clearSession, loadRestSnapshot, loadSession, saveRestSnapshot, saveSession } from "./util"
+import { BOREDOM_WAKE_MS, clearSession, loadRestSnapshot, loadSession, saveRestSnapshot, saveSession } from "./util"
 import type { UserMessage, Message } from "../types"
+import { fromBoredom } from "../triggers/boredom"
 
 let eventResolvers: Array<(event: UserMessage | null) => void> = []
 let shutdownResolvers: Array<() => void> = []
@@ -165,6 +166,44 @@ export function enqueueEvent(event: UserMessage, options: EnqueueOptions = {}): 
 }
 
 /**
+ * Standard activation: enqueue the event if a session is already running,
+ * otherwise cold-wake the runner. This is the same pattern the trigger routes
+ * use; boredom activations go through it too rather than calling wake() raw.
+ */
+function activate(event: UserMessage): void {
+  if (isRunning()) enqueueEvent(event)
+  else void wake(event)
+}
+
+// ── Boredom wake timer ──────────────────────────────────────────────────────
+// When BOREDOM_WAKE_MS > 0, a timer starts after each session rests. If no
+// external event arrives within the window, it activates a synthetic boredom
+// event so the agent gets a turn to be present (check inbox/feeds/reach out) or
+// rest. Any real wake cancels the pending timer.
+
+let boredomTimer: ReturnType<typeof setTimeout> | null = null
+
+function cancelBoredomTimer(): void {
+  if (boredomTimer) {
+    clearTimeout(boredomTimer)
+    boredomTimer = null
+  }
+}
+
+function startBoredomTimer(): void {
+  if (BOREDOM_WAKE_MS <= 0) return
+  cancelBoredomTimer()
+  boredomTimer = setTimeout(() => {
+    boredomTimer = null
+    if (state.running) return
+    if (state.pendingInputs.length > 0) return
+    console.log("[runner] boredom timer fired — activating agent")
+    activate(fromBoredom())
+  }, BOREDOM_WAKE_MS)
+  boredomTimer.unref?.()
+}
+
+/**
  * Persists the active runner state for a process shutdown.
  *
  * Resolves immediately if no session is currently running.
@@ -295,6 +334,10 @@ function injectIncomingEvent(convId: number, event: UserMessage): void {
  * @returns A promise that resolves once this wake cycle fully completes.
  */
 export async function wake(event: UserMessage): Promise<void> {
+  // Any wake cancels a pending boredom timer — a real (or synthetic) activation
+  // is now in flight, so we don't want the idle timer firing on top of it.
+  cancelBoredomTimer()
+
   if (state.running) {
     enqueueEvent(event)
     return
@@ -389,6 +432,10 @@ export async function wake(event: UserMessage): Promise<void> {
       const next = state.pendingInputs.shift()!
       console.log("[runner] pending event queued, waking again")
       await wake(next)
+    } else if (!wasShutdownRequested) {
+      // Genuinely idle now — arm the boredom timer so the agent comes back on
+      // its own after a quiet stretch instead of resting forever.
+      startBoredomTimer()
     }
   }
 }
