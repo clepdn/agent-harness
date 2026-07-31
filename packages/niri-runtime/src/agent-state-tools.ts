@@ -347,4 +347,48 @@ export async function grepMemory(query: unknown, caseInsensitive?: unknown): Pro
   return matches.join("\n")
 }
 
+const SKILLS_ROOT = path.join(MEMORY_ROOT, "skills")
+
+/**
+ * Loads a skill doc from memories/skills/<name>.md, stripping YAML frontmatter,
+ * and returns the full body for injection into context. `name` may be given
+ * with or without the .md extension.
+ */
+export async function loadSkill(name: unknown): Promise<string> {
+  if (typeof name !== "string" || !name.trim()) {
+    throw new Error("name is required")
+  }
+  const base = name.trim().replace(/\.md$/i, "")
+  // reject path traversal / nested paths — skills are flat files
+  if (base.includes("/") || base.includes("\\") || base.includes("..")) {
+    throw new Error("skill name must be a bare filename (no path separators)")
+  }
+  const filePath = path.join(SKILLS_ROOT, `${base}.md`)
+  const relative = path.relative(SKILLS_ROOT, filePath)
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("skill name escapes the skills directory")
+  }
+
+  let content: string
+  try {
+    content = await fs.readFile(filePath, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      let available = ""
+      try {
+        const entries = (await fs.readdir(SKILLS_ROOT))
+          .filter((e) => e.endsWith(".md"))
+          .map((e) => e.replace(/\.md$/, ""))
+        available = entries.length ? ` Available skills: ${entries.sort().join(", ")}.` : ""
+      } catch {}
+      throw new Error(`skill not found: ${base}.${available}`)
+    }
+    throw error
+  }
+
+  // strip leading YAML frontmatter block
+  const body = content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, "").trimStart()
+  return `[skill: ${base}]\n${body}`
+}
+
 export const __agentStateToolsTest = { memoryPath }

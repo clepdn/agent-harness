@@ -113,6 +113,18 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
         },
       ),
       functionTool(
+        "skill",
+        "Load a skill doc from memories/skills/ into context (frontmatter stripped). Skills are detailed how-to guides for specific capabilities. Check the Skills index in your system prompt for what's available, then load the relevant one before doing capability-specific work.",
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            name: { type: "string", description: "The skill name, e.g. 'flood' or 'tangled' (with or without the .md extension)." },
+          },
+          required: ["name"],
+        },
+      ),
+      functionTool(
         "lcm_describe",
         "Inspect a known LCM summary by id before expanding it. Returns summary content, lineage, source counts, time ranges, estimated expansion cost, and a bounded-expansion manifest.",
         {

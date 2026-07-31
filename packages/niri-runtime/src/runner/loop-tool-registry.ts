@@ -3,7 +3,7 @@ import { config } from "../config"
 import { normalizeTimeoutMs } from "../container/config"
 import type { ClientImageArtifact, ClientToolName } from "@mira/harness-protocol"
 import { AGENT_ID } from "../agent-config"
-import { grepMemory, listMemory, readMemory, writeMemory, writeSoul } from "../agent-state-tools"
+import { grepMemory, listMemory, loadSkill, readMemory, writeMemory, writeSoul } from "../agent-state-tools"
 import { clientTools } from "../client"
 import { logMessage } from "../db"
 import {
@@ -238,6 +238,14 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         logArgKeys: ["query", "case_insensitive"] as const,
         runArgKeys: ["query", "case_insensitive"] as const,
         run: (query, caseInsensitive) => grepMemory(query, caseInsensitive),
+      }),
+
+    skill: (ctx) =>
+      runStandardTool(ctx, {
+        name: "skill",
+        logArgKeys: ["name"] as const,
+        runArgKeys: ["name"] as const,
+        run: (name) => loadSkill(name),
       }),
 
     lcm_describe: (ctx) =>

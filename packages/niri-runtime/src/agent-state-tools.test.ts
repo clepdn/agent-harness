@@ -274,6 +274,55 @@ test("memory and soul validation, warning, and backup operations", async (t) => 
   assert.equal(code, 0)
 })
 
+test("loadSkill strips frontmatter, resolves names, and rejects bad input", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "niri-skill-"))
+  const home = path.join(root, "home")
+  const skillsDir = path.join(home, "memories", "skills")
+  await fs.mkdir(skillsDir, { recursive: true })
+  await fs.writeFile(
+    path.join(skillsDir, "flood.md"),
+    "---\ndescription: torrent stuff\n---\n\n# flood\n\nbody line one\n",
+    "utf8",
+  )
+  await fs.writeFile(path.join(skillsDir, "bare.md"), "# bare\n\nno frontmatter here\n", "utf8")
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
 
+  const moduleUrl = new URL("./agent-state-tools.ts", import.meta.url).href
+  const script = `
+    import assert from "node:assert/strict"
+    const { loadSkill } = await import(${JSON.stringify(moduleUrl)})
 
+    // 1. frontmatter stripped, body preserved, name resolves without .md
+    const res = await loadSkill("flood")
+    assert.match(res, /\\[skill: flood\\]/)
+    assert.doesNotMatch(res, /description:/)
+    assert.match(res, /body line one/)
+
+    // 2. name with .md extension also works
+    const res2 = await loadSkill("flood.md")
+    assert.match(res2, /body line one/)
+
+    // 3. file without frontmatter returns body as-is
+    const bare = await loadSkill("bare")
+    assert.match(bare, /no frontmatter here/)
+
+    // 4. missing skill rejects and lists what's available
+    await assert.rejects(() => loadSkill("nope"), /skill not found.*flood/s)
+
+    // 5. path traversal rejected
+    await assert.rejects(() => loadSkill("../core"), /path separators|escapes/)
+    await assert.rejects(() => loadSkill(""), /name is required/)
+  `
+
+  const code = await new Promise<number | null>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      env: { ...process.env, NIRI_HOME: home },
+      stdio: "inherit",
+    })
+    child.on("error", reject)
+    child.on("close", resolve)
+  })
+
+  assert.equal(code, 0)
+})
 

@@ -90,7 +90,7 @@ everything. Memory search is server-side and works even when no client is attach
 
 Your authored long-term memories and your immutable conversation archive are different systems. Context summaries may contain a \`[context-summary-id sum_...]\` handle. Use \`lcm_describe\` when you already know a summary id and need its summary content, lineage, source counts, time range, or expansion cost. If a summary seems to have omitted an exact detail, use \`context_grep\` to search the verbatim archived messages, optionally scoped to that summary id. Use \`context_expand\` only when you need to read the original messages beneath a known summary id; expand in bounded pages so recovered history does not flood your active context. Describe or search before expanding. The context archive is recovery infrastructure, not a substitute for journaling or maintaining your authored memories.
 
-When an attached client workspace contains skill docs, read the relevant one before doing capability-specific work.
+Your skills live server-side under \`memories/skills/\`. The Skills index above lists what exists; before reaching for a tool or improvising a capability-specific workflow, check whether a relevant skill exists and load its full doc with the \`skill\` tool.
 
 ## Tools
 
@@ -102,6 +102,7 @@ ${clientToolLines || "- no client-local tools are attached"}
 - \`memory_read\`: read a Markdown file under the server-owned memories directory, with optional inclusive line bounds
 - \`memory_ls\`: list all files under the server-owned memories directory recursively
 - \`memory_grep\`: search memories using exact substring matching, returning matching lines and numbers
+- \`skill\`: load a skill doc from \`memories/skills/\` into context (frontmatter stripped). Check the Skills index for what's available, then load the relevant one before capability-specific work
 - \`lcm_describe\`: inspect a known \`sum_*\` context node's summary content, lineage, source counts, time range, and bounded expansion-cost manifest
 - \`context_grep\`: search the immutable verbatim archive of prior active-context messages; optionally pass a \`summary_id\` to stay within one summary's provenance tree
 - \`context_expand\`: read a bounded, paginated slice of the original messages beneath a \`[context-summary-id sum_...]\` handle
@@ -189,6 +190,55 @@ server-owned state; client shell and file tools remain on the attached client.
 ${buildEnvironmentSection(options)}`
 }
 
+const SKILLS_DIR = path.join(HOME_DIR, "memories", "skills")
+
+/**
+ * Extracts the `description:` field from a skill file's YAML frontmatter.
+ * Returns null if the file has no frontmatter or no description.
+ */
+function parseSkillDescription(content: string): string | null {
+  const match = content.match(/^---\s*\n([\s\S]*?)\n---/)
+  if (!match) return null
+  const descLine = match[1].split("\n").find((line) => /^\s*description\s*:/.test(line))
+  if (!descLine) return null
+  return descLine.replace(/^\s*description\s*:\s*/, "").trim() || null
+}
+
+/**
+ * Scans memories/skills/ and builds a compact index of available skills
+ * (name + description) for injection into the system prompt. This ensures
+ * the agent always knows what skills exist, even when a skill's full doc
+ * isn't surfaced by memory recall. Use the `skill` tool to load one.
+ */
+async function buildSkillsIndex(): Promise<string> {
+  let entries: string[]
+  try {
+    entries = await fs.readdir(SKILLS_DIR)
+  } catch {
+    return ""
+  }
+  const skills: { name: string; description: string }[] = []
+  for (const entry of entries.sort()) {
+    if (!entry.endsWith(".md")) continue
+    const name = entry.replace(/\.md$/, "")
+    const content = await readFile(path.join(SKILLS_DIR, entry))
+    if (!content) continue
+    const description = parseSkillDescription(content) ?? "(no description — add frontmatter)"
+    skills.push({ name, description })
+  }
+  if (skills.length === 0) return ""
+  const lines = skills.map((s) => `- \`${s.name}\`: ${s.description}`).join("\n")
+  return `## Skills
+
+You have detailed skill docs for specific capabilities. Before reaching for a tool or improvising a workflow, check whether a relevant skill exists below — if so, load it with the \`skill\` tool (\`skill\` with \`name\`) to pull the full doc into context. The index shows what exists; the doc has the how.
+
+${lines}
+
+---
+
+`
+}
+
 export async function buildBootstrap(
   event: UserMessage,
   priorRest?: PriorRestContext | null,
@@ -198,6 +248,7 @@ export async function buildBootstrap(
 
   const soul = await readFile(SOUL_FILE)
   const coreMemories = await readFile(path.join(HOME_DIR, "memories", "core.md"))
+  const skillsIndex = await buildSkillsIndex()
 
   const system = soul
     ? `\
@@ -206,6 +257,7 @@ ${soul}
 ---
 
 ${coreMemories ? `## Core Memories\n\n${coreMemories}\n\n---\n\n` : ""}\
+${skillsIndex}\
 ${buildEnvironmentSection(options)}`.trim()
     : buildFirstRunSystem(options).trim()
 
