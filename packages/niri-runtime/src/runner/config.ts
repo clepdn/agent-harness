@@ -5,6 +5,12 @@ import { config } from "../config"
 
 export const CONTEXT_COMPACT_TRIGGER_TOKENS = config.context.compact_trigger_tokens
 export const PRESERVE_PROMPT_CACHE = config.context.preserve_prompt_cache
+export const COMPACTION_STRATEGY = config.context.compaction_strategy
+export const DEEP_ARCHIVE_ENABLED = config.context.deep_archive
+export const JOURNAL_BEFORE_COMPACTION = config.context.journal_before_compaction
+export const REMOTE_COMPACTION_ENDPOINT = config.context.remote_compaction.endpoint
+export const REMOTE_COMPACTION_MODEL = config.context.remote_compaction.model
+export const REMOTE_COMPACTION_STREAMING_ENDPOINT = config.context.remote_compaction.streaming_endpoint
 export const TOOL_RESULT_COMPACTION_MIN_AGE_TURNS = Math.max(1, config.context.tool_result_compaction_min_age_turns)
 export const TOOL_RESULT_COMPACTION_MIN_CHARS = Math.max(100, config.context.tool_result_compaction_min_chars)
 export const TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT = Math.min(
@@ -180,6 +186,10 @@ if (summaryModel) console.log(`[config] summary=${SUMMARY_MODEL} provider=${summ
 console.log(`[config] env=${config.agent.env} use_fallback=${USE_FALLBACK}`)
 console.log(`[config] thinking=${ENABLE_THINKING}`)
 if (IDLE_COMPACTION_TIMEOUT_MS > 0) console.log(`[config] idle_compaction=${IDLE_COMPACTION_TIMEOUT_MS / 60_000}min`)
+console.log(
+  `[config] compaction_strategy=${COMPACTION_STRATEGY} trigger=${CONTEXT_COMPACT_TRIGGER_TOKENS} deep_archive=${DEEP_ARCHIVE_ENABLED} journal_first=${JOURNAL_BEFORE_COMPACTION}` +
+    (REMOTE_COMPACTION_ENDPOINT ? ` remote=${REMOTE_COMPACTION_ENDPOINT}` : ""),
+)
 console.log(
   `[config] preserve_prompt_cache=${PRESERVE_PROMPT_CACHE} tool_result_compaction_min_age_turns=${TOOL_RESULT_COMPACTION_MIN_AGE_TURNS} tool_result_compaction_min_chars=${TOOL_RESULT_COMPACTION_MIN_CHARS} tool_result_compaction_min_context_percent=${TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT}`,
 )

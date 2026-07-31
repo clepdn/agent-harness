@@ -11,6 +11,7 @@ import {
   TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT,
   meetsToolResultCompactionContextThreshold,
   CONTEXT_COMPACT_TRIGGER_TOKENS,
+  COMPACTION_STRATEGY,
   estimatePromptTokens,
   findSummaryMessageIndex,
   loadAgentSummaryContext,
@@ -18,6 +19,12 @@ import {
   saveRestSnapshot,
   summarizeConversationViaLLM,
 } from "./util"
+import type { CompactionStrategy } from "../config"
+import {
+  journalCompactionSummary,
+  resolveDeepArchiveBackend,
+} from "./compaction-companion"
+import { messageStringContent } from "./messages"
 import { addAssistantMessage, applyUsage, configuredSummaryProvider, emitThinking, fetchCompletion } from "./loop-completion"
 import { assistantContentText, isFunctionToolCall } from "./loop-content"
 import type { AssistantMessage, TextContent, ToolCall } from "../llm"
@@ -215,20 +222,75 @@ async function applyProactiveCompaction(state: LoopState): Promise<boolean> {
   return true
 }
 
-async function applyLLMCompaction(state: LoopState, phase: "pre-turn" | "post-turn"): Promise<boolean> {
+/** Pull the summary text out of a compacted conversation, if present. */
+function extractSummaryText(messages: Message[]): string | undefined {
+  const idx = findSummaryMessageIndex(messages)
+  if (idx < 0) return undefined
+  const msg = messages[idx]
+  const text = msg ? messageStringContent(msg) : ""
+  return text.trim() || undefined
+}
+
+/**
+ * The messages that a compaction dropped: everything in `before` whose exact
+ * content no longer survives verbatim in `after`. Used to feed the deep archive
+ * the specifics the summary compressed away.
+ */
+function discardedMessages(before: Message[], after: Message[]): Message[] {
+  const kept = new Set(after.map((m) => messageStringContent(m)))
+  return before.filter((m) => !kept.has(messageStringContent(m)))
+}
+
+/**
+ * Top-level compaction dispatcher. Routes the configured strategy to the right
+ * pipeline once the trigger threshold is crossed. Runs on every loop iteration;
+ * cheap no-op below threshold.
+ */
+async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn"): Promise<boolean> {
+  const strategy = COMPACTION_STRATEGY
+  if (strategy === "off") return false
+
+  if (state.contextSize >= CONTEXT_COMPACT_TRIGGER_TOKENS) {
+    // At/over the cliff: run the strategy's full burn.
+    if (strategy === "snapcompact") {
+      // Pure image-archive has no LLM summary; the renderer is not yet vendored,
+      // so degrade to context-full rather than silently skipping the burn.
+      console.warn("[context] snapcompact strategy requested but frame renderer is not vendored; using context-full")
+      return applyLLMCompaction(state, phase, "context-full")
+    }
+    return applyLLMCompaction(state, phase, strategy)
+  }
+
+  // Below the cliff: keep tool-result spam in check (except companion, which
+  // defers all rewriting to the single cliff-defense burn to protect cache).
+  if (strategy === "companion") return false
+  return applyProactiveCompaction(state)
+}
+
+async function applyLLMCompaction(
+  state: LoopState,
+  phase: "pre-turn" | "post-turn",
+  strategy: CompactionStrategy = COMPACTION_STRATEGY,
+): Promise<boolean> {
   // Gate strictly on the model-reported prompt_tokens (state.contextSize).
   // The char-based estimatePromptTokens inflates the tools schema ~3×, which
   // used to fire compaction at ~22-31k real tokens and produce nonsense summaries.
   if (state.contextSize < CONTEXT_COMPACT_TRIGGER_TOKENS) return false
   const beforeEstimate = estimatePromptTokens(state.conversation)
 
-  const summaryProvider = configuredSummaryProvider()
+  // companion + context-full salvage lessons from the same head that generated
+  // the conversation (private-reasoning models hide their CoT otherwise), and
+  // accept a one-time cache bust at the cliff. "remote" also summarizes locally
+  // here when no provider endpoint is wired (the endpoint path is future work).
+  const preferActiveModel = strategy === "companion" || strategy === "context-full" || strategy === "remote"
+  const summaryProvider = configuredSummaryProvider(preferActiveModel)
   if (!summaryProvider.model) {
     console.warn(`[context] ${phase}: no summary model available; skipping llm compaction`)
     return false
   }
 
   const beforeCount = state.conversation.length
+  const beforeMessages = state.conversation
   const agentContext = await loadAgentSummaryContext()
   const summarized = await summarizeConversationViaLLM(
     state.conversation,
@@ -252,8 +314,33 @@ async function applyLLMCompaction(state: LoopState, phase: "pre-turn" | "post-tu
     return false
   }
 
+  // Companion layers 1 + 3 wrap the summary that summarize.ts produced.
+  if (strategy === "companion") {
+    const summaryText = extractSummaryText(summarized)
+    // Layer 1 — journal-first: mirror the summary into durable memory before
+    // the raw middle is dropped. Best-effort; never blocks the burn.
+    if (summaryText) await journalCompactionSummary(summaryText)
+
+    // Layer 3 — deep archive: preserve the specifics the summary compressed.
+    const discarded = discardedMessages(beforeMessages, summarized)
+    const activeModel = modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel
+    const backend = resolveDeepArchiveBackend(activeModel?.provider)
+    const archived = await backend.archive(discarded).catch((err) => {
+      console.warn(`[context] deep archive (${backend.name}) failed: ${(err as Error)?.message ?? err}`)
+      return null
+    })
+    if (archived?.archiveMessage) {
+      // Insert the appendix right after the summary message so it reads as a
+      // reference block attached to the compacted history.
+      const idx = findSummaryMessageIndex(summarized)
+      if (idx >= 0) summarized.splice(idx + 1, 0, archived.archiveMessage)
+      else summarized.unshift(archived.archiveMessage)
+    }
+    if (archived) console.log(`[context] deep archive: ${archived.note}`)
+  }
+
   state.conversation = summarized
-  state.contextSize = afterEstimate
+  state.contextSize = estimatePromptTokens(summarized)
 
   const summaryIdx = findSummaryMessageIndex(state.conversation)
   const summaryMsg = summaryIdx >= 0 ? state.conversation[summaryIdx] : undefined
@@ -290,11 +377,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       return "rest"
     }
 
-    if (state.contextSize >= CONTEXT_COMPACT_TRIGGER_TOKENS) {
-      await applyLLMCompaction(state, "pre-turn")
-    } else {
-      await applyProactiveCompaction(state)
-    }
+    await applyCompaction(state, "pre-turn")
 
     const turnStart = state.conversation.length
     setWorking(true)

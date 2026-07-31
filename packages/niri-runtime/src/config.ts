@@ -208,6 +208,7 @@ const fallbackT = resolvePreset(merged.fallback, modelsT)
 const summaryT = resolvePreset(merged.summary, modelsT)
 const embeddingsT = resolvePreset(merged.embeddings, modelsT)
 const contextT = table(merged.context)
+const remoteCompactionT = table(contextT.remote_compaction)
 const runnerT = table(merged.runner)
 const imageToolT = table(merged.image_tool)
 const discordT = table(merged.discord)
@@ -246,9 +247,17 @@ const subagentConfigs: SubagentConfig[] = (() => {
 
 const toolChoices = ["required", "auto", "none"] as const
 const thinkingEfforts = ["minimal", "low", "medium", "high", "xhigh"] as const
+const compactionStrategies = ["companion", "context-full", "snapcompact", "remote", "off"] as const
 
 export type ToolChoice = (typeof toolChoices)[number]
 export type ThinkingEffort = (typeof thinkingEfforts)[number]
+export type CompactionStrategy = (typeof compactionStrategies)[number]
+
+/** Validate an enum-valued config string, falling back on unknown values. */
+function enumStr<T extends string>(value: TomlValue | undefined, allowed: readonly T[], fallback: T): T {
+  const raw = str(value, fallback).trim().toLowerCase()
+  return (allowed as readonly string[]).includes(raw) ? (raw as T) : fallback
+}
 
 export const config = {
   llm_bridge_url: str(merged.llm_bridge_url, "").trim(),
@@ -314,6 +323,21 @@ export const config = {
     title: str(embeddingsT.title, "").trim(),
   },
   context: {
+    // Which compaction pipeline runs when compact_trigger_tokens is hit.
+    //   companion    - journal-first -> same-model directed summary -> deep archive
+    //   context-full - same-model summary only (no journaling, no deep archive)
+    //   snapcompact  - image-archive only, no LLM summary (needs a vision model)
+    //   remote       - provider-native compaction (OpenAI remote endpoint;
+    //                  degrades to context-editing / summary on Anthropic)
+    //   off          - never compact; ride raw context until the limit
+    compaction_strategy: enumStr(contextT.compaction_strategy, compactionStrategies, "companion"),
+    // Layer 3 toggle: archive compressed-away specifics into snapcompact frames
+    // (Anthropic) or a remote snap payload (OpenAI). Independent of strategy so
+    // "companion" can run with or without frames.
+    deep_archive: bool(contextT.deep_archive, true),
+    // Run the journaling reflex over the span about to be burned before
+    // summarizing (layer 1). Only meaningful for the companion strategy.
+    journal_before_compaction: bool(contextT.journal_before_compaction, true),
     compact_target_tokens: int(contextT.compact_target_tokens, 65000),
     compact_trigger_tokens: int(contextT.compact_trigger_tokens, 90000),
     compact_recent_messages: int(contextT.compact_recent_messages, 80),
@@ -324,6 +348,13 @@ export const config = {
     tool_result_compaction_min_age_turns: int(contextT.tool_result_compaction_min_age_turns, 5),
     tool_result_compaction_min_chars: int(contextT.tool_result_compaction_min_chars, 2000),
     tool_result_compaction_min_context_percent: num(contextT.tool_result_compaction_min_context_percent, 50),
+    // Provider-native remote compaction (OpenAI). Empty endpoint disables it and
+    // the "remote" strategy degrades to a local same-model summary.
+    remote_compaction: {
+      endpoint: str(remoteCompactionT.endpoint, "").trim(),
+      model: str(remoteCompactionT.model, "").trim(),
+      streaming_endpoint: str(remoteCompactionT.streaming_endpoint, "").trim(),
+    },
   },
   runner: {
     max_turns: int(runnerT.max_turns, 120),

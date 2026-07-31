@@ -28,18 +28,35 @@ import {
 import type { CompletionTurnResult } from "./loop-shared"
 import type { Model } from "../llm"
 
-/**
- * Resolves the configured summary model pair.
- * When prompt-cache preservation is enabled, returns null so summaries cannot
- * invalidate the cached conversation prefix.
- */
-export function configuredSummaryProvider(): { model: Model | null; apiKey: string | undefined } {
-  if (modelState.preservePromptCache) return { model: null, apiKey: undefined }
-  if (modelState.summaryModel) return { model: modelState.summaryModel, apiKey: modelState.summaryApiKey }
+/** The currently active model pair (fallback when degraded, else primary). */
+export function activeModelProvider(): { model: Model | null; apiKey: string | undefined } {
   return {
     model: modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel,
     apiKey: modelState.useFallback ? modelState.fallbackApiKey : modelState.primaryApiKey,
   }
+}
+
+/**
+ * Resolves the summary model pair for a compaction pass.
+ *
+ * `preferActiveModel` (companion / context-full strategies) forces the model
+ * that actually generated the conversation, so the summary is written from the
+ * same head that holds the reasoning — the only way to salvage lessons from a
+ * provider that hides its chain-of-thought. Otherwise a configured `summary`
+ * preset is preferred (cheap dedicated summarizer), falling back to active.
+ *
+ * When prompt-cache preservation is on AND we are not explicitly preferring the
+ * active model, we return null so an incidental summary can't invalidate the
+ * cached prefix. An intentional cliff-defense compaction passes
+ * `preferActiveModel` and accepts the one-time cache bust.
+ */
+export function configuredSummaryProvider(
+  preferActiveModel = false,
+): { model: Model | null; apiKey: string | undefined } {
+  if (preferActiveModel) return activeModelProvider()
+  if (modelState.preservePromptCache) return { model: null, apiKey: undefined }
+  if (modelState.summaryModel) return { model: modelState.summaryModel, apiKey: modelState.summaryApiKey }
+  return activeModelProvider()
 }
 
 /**
