@@ -217,6 +217,7 @@ const toolsT = table(merged.tools)
 const llmBridgeT = table(merged.llm_bridge)
 const computerUseT = table(merged.computer_use)
 const prometheusT = table(merged.prometheus)
+const webSearchT = table(merged.web_search)
 
 // ── Subagent configs (array of tables) ────────────────────────────────────────
 
@@ -434,6 +435,11 @@ export const config = {
   prometheus: {
     port: int(prometheusT.port, 9100),
   },
+  web_search: {
+    // Exa API key. When present and non-empty, the web_search tool is enabled.
+    // Provisioned via the secrets TOML: [web_search] exa_api_key = "exa_..."
+    exa_api_key: str(webSearchT.exa_api_key, "").trim(),
+  },
 }
 
 /**
@@ -462,6 +468,7 @@ function collectSecrets(): SecretEntry[] {
     { label: "summary.api_key",    value: config.summary.api_key },
     { label: "embeddings.api_key", value: config.embeddings.api_key },
     { label: "discord.bot_token",  value: config.discord.bot_token },
+    { label: "web_search.exa_api_key", value: config.web_search.exa_api_key },
   ]
   return entries.filter((e) => e.value.length >= MIN_SECRET_LENGTH)
 }

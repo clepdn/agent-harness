@@ -234,3 +234,9 @@ retention_days = 3
 # Prometheus metrics exporter
 # [prometheus]
 # port = 9100
+
+# Web search via Exa (https://exa.ai). When exa_api_key is present and non-empty
+# the web_search tool is registered; otherwise it's omitted entirely. The key
+# belongs in the secrets file, not here.
+# [web_search]
+# exa_api_key = "exa_..."

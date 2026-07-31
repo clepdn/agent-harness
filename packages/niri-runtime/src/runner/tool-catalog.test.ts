@@ -19,3 +19,11 @@ test("Discord and client tools are independently gated", () => {
   assert.equal(names.includes("shell"), false)
   assert.equal(names.includes("discord_send"), true)
 })
+
+test("web_search is gated on the webSearch option", () => {
+  const off = createNiriToolCatalog({}).map((tool) => tool.function.name)
+  assert.equal(off.includes("web_search"), false)
+
+  const on = createNiriToolCatalog({ webSearch: true }).map((tool) => tool.function.name)
+  assert.equal(on.includes("web_search"), true)
+})

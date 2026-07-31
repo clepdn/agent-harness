@@ -18,6 +18,7 @@ import {
 } from "../discord/state"
 import { listAliases, removeAlias, searchMemories, setAlias } from "../memory"
 import { setCustomStatus } from "../discord/status-updater"
+import { webSearch } from "../web-search"
 import { emit } from "../stream"
 import type { ToolHandler } from "./loop-shared"
 import { checkGitUpstream } from "./git-upstream-check"
@@ -174,6 +175,27 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
             {
               query,
               results: await searchMemories(query as string, limit as number | undefined),
+            },
+            null,
+            2,
+          ),
+        emptyFallback: '{"query":"","results":[]}',
+      }),
+
+    web_search: (ctx) =>
+      runStandardTool(ctx, {
+        name: "web_search",
+        logArgKeys: ["query", "num_results", "include_text"] as const,
+        runArgKeys: ["query", "num_results", "include_text"] as const,
+        run: async (query, num_results, include_text) =>
+          JSON.stringify(
+            {
+              query,
+              results: await webSearch(
+                query as string,
+                num_results as number | undefined,
+                Boolean(include_text),
+              ),
             },
             null,
             2,

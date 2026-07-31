@@ -10,6 +10,7 @@ export type NiriToolCatalogOptions = {
   workspace?: WorkspaceDescriptor | null
   memory?: boolean
   discord?: boolean
+  webSearch?: boolean
 }
 
 const functionTool = (name: string, description: string, parameters: JsonSchema): ToolDefinition => ({
@@ -252,6 +253,25 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
             note: { type: "string" },
           },
           required: ["channel_id", "note"],
+        },
+      ),
+    )
+  }
+
+  if (options.webSearch) {
+    tools.push(
+      functionTool(
+        "web_search",
+        "Search the live web via Exa. Returns titles, URLs, and snippets. Use this to look up current information, verify facts, or research a topic you don't have in memory.",
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            query: { type: "string", description: "The search query." },
+            num_results: { type: "integer", minimum: 1, maximum: 25, description: "How many results to return (default 5)." },
+            include_text: { type: "boolean", description: "When true, pull short page-content highlights for each result, not just snippets. Default false." },
+          },
+          required: ["query"],
         },
       ),
     )

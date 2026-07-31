@@ -1,6 +1,7 @@
 import { buildBootstrap } from "../bootstrap"
 import { clientTools } from "../client"
 import { areDiscordToolsAvailable } from "../discord/availability"
+import { isWebSearchAvailable } from "../web-search"
 import { markDiscordItem } from "../discord/state"
 import { endConversation, logMessage, startConversation } from "../db"
 import { emit } from "../stream"
@@ -23,6 +24,7 @@ function currentToolCatalog() {
     workspace: clientTools.getWorkspace(),
     memory: true,
     discord: areDiscordToolsAvailable(),
+    webSearch: isWebSearchAvailable(),
   })
 }
 
