@@ -3,6 +3,7 @@ import { config } from "../config"
 import { normalizeTimeoutMs } from "../container/config"
 import type { ClientImageArtifact, ClientToolName } from "@mira/harness-protocol"
 import { AGENT_ID } from "../agent-config"
+import { grepMemory, listMemory, readMemory, writeMemory, writeSoul } from "../agent-state-tools"
 import { clientTools } from "../client"
 import { logMessage } from "../db"
 import {
@@ -24,6 +25,7 @@ import { GIT_UPSTREAM_NAG } from "./config"
 import { pushToolMessage, recordToolResult, runStandardTool, toolError } from "./loop-tool-runtime"
 import { findSubagent, runSubagent } from "./subagent"
 import { startJob } from "./jobs"
+import { describeContextSummary, expandContextSummary, grepContext } from "./context-store"
 import { saveRestSnapshot } from "./util"
 import { executeAction } from "./computer-use"
 
@@ -187,6 +189,88 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
           }
           return JSON.stringify({ ok: false, error: `unknown action: ${op}` })
         },
+      }),
+
+    memory_write: (ctx) =>
+      runStandardTool(ctx, {
+        name: "memory_write",
+        logArgKeys: ["path", "mode"] as const,
+        runArgKeys: ["path", "content", "mode", "target"] as const,
+        run: (path, content, mode, target) => writeMemory(path, content, mode, target),
+      }),
+
+    soul_write: (ctx) =>
+      runStandardTool(ctx, {
+        name: "soul_write",
+        logArgKeys: ["mode"] as const,
+        runArgKeys: ["content", "mode", "target"] as const,
+        run: (content, mode, target) => writeSoul(content, mode, target),
+      }),
+
+    memory_read: (ctx) =>
+      runStandardTool(ctx, {
+        name: "memory_read",
+        logArgKeys: ["path", "start_line", "end_line"] as const,
+        runArgKeys: ["path", "start_line", "end_line"] as const,
+        run: (path, startLine, endLine) => readMemory(path, startLine, endLine),
+      }),
+
+    memory_ls: (ctx) =>
+      runStandardTool(ctx, {
+        name: "memory_ls",
+        logArgKeys: [] as const,
+        runArgKeys: [] as const,
+        run: () => listMemory(),
+      }),
+
+    memory_grep: (ctx) =>
+      runStandardTool(ctx, {
+        name: "memory_grep",
+        logArgKeys: ["query", "case_insensitive"] as const,
+        runArgKeys: ["query", "case_insensitive"] as const,
+        run: (query, caseInsensitive) => grepMemory(query, caseInsensitive),
+      }),
+
+    lcm_describe: (ctx) =>
+      runStandardTool(ctx, {
+        name: "lcm_describe",
+        logArgKeys: ["id", "tokenCap"] as const,
+        runArgKeys: ["id", "tokenCap"] as const,
+        run: async (id, tokenCap) => {
+          const summaryId = String(id ?? "").trim()
+          return JSON.stringify(describeContextSummary(summaryId, tokenCap as number | undefined) ?? {
+            error: `unknown context summary: ${summaryId}`,
+            hint: "Use context_grep to find archived evidence, or check the summary id from the active context marker.",
+          }, null, 2)
+        },
+      }),
+
+    context_grep: (ctx) =>
+      runStandardTool(ctx, {
+        name: "context_grep",
+        logArgKeys: ["query", "summary_id", "limit"] as const,
+        runArgKeys: ["query", "limit", "summary_id"] as const,
+        run: async (query, limit, summaryId) =>
+          JSON.stringify({
+            query,
+            summaryId: summaryId ?? null,
+            results: grepContext(String(query ?? ""), limit as number | undefined, summaryId as string | undefined),
+          }, null, 2),
+      }),
+
+    context_expand: (ctx) =>
+      runStandardTool(ctx, {
+        name: "context_expand",
+        logArgKeys: ["summary_id", "offset", "limit"] as const,
+        runArgKeys: ["summary_id", "offset", "limit"] as const,
+        run: async (summaryId, offset, limit) =>
+          JSON.stringify(
+            expandContextSummary(String(summaryId ?? ""), offset as number | undefined, limit as number | undefined) ?? {
+              error: `unknown context summary: ${String(summaryId ?? "")}`,
+            },
+            null,
+            2,
+          ),
       }),
 
     image_tool: async ({ convId, state, call, args }) => {
