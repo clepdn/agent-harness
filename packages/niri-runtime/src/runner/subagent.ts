@@ -7,7 +7,7 @@
 import { stream } from "../llm"
 import type { AssistantMessage, ToolCall, Context, Model } from "../llm"
 import type { OpenAICompletionsOptions } from "../llm"
-import { config, type SubagentConfig } from "../config"
+import { config, getModelPreset, type SubagentConfig } from "../config"
 import { logMessage } from "../db"
 import { emit } from "../stream"
 import type { Message } from "../types"
@@ -44,6 +44,24 @@ function resolveSubagentModel(subagent: SubagentConfig): { model: Model; apiKey:
   }
 
   if (subagent.model) {
+    // Treat subagent.model as a preset key and resolve it the same way
+    // evaluateModelSwap does — extract provider/model/base_url/api_key from
+    // the [models.<name>] table rather than passing it as a raw model ID.
+    const preset = getModelPreset(subagent.model)
+    if (preset) {
+      const provider = typeof preset.provider === "string" ? preset.provider.trim() : MODEL_PROVIDER
+      const modelId = typeof preset.model === "string" ? preset.model.trim() : ""
+      const baseUrl = typeof preset.base_url === "string" ? preset.base_url.trim() : MODEL_BASE_URL || undefined
+      const apiKey = typeof preset.api_key === "string" ? preset.api_key.trim() : undefined
+      const contextWindow = typeof preset.context_window === "number" ? preset.context_window : undefined
+      if (modelId) {
+        const built = buildModel(provider, modelId, baseUrl || undefined, undefined, contextWindow)
+        if (built) {
+          return { model: built, apiKey: apiKey ?? modelState.primaryApiKey, toolChoice: modelState.primaryToolChoice }
+        }
+      }
+    }
+    // Fallback: treat subagent.model as a raw model string (legacy behavior)
     const built = buildModel(MODEL_PROVIDER, subagent.model, MODEL_BASE_URL || undefined)
     if (built) {
       return { model: built, apiKey: modelState.primaryApiKey, toolChoice: modelState.primaryToolChoice }
