@@ -1,0 +1,66 @@
+:root {
+  color-scheme: dark;
+  --bg: #000;
+  --panel: #0b0b0b;
+  --line: #262626;
+  --ink: #ededed;
+  --muted: #8a8a8a;
+  --quiet: #5f5f5f;
+  --green: #7ee787;
+  --cyan: #79c0ff;
+  --amber: #e5c07b;
+  --danger-ink: #ff8f9a;
+  --violet: #b18cff;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 3rem 1.5rem;
+  background: var(--bg);
+  color: var(--ink);
+  font: 14px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  display: flex;
+  justify-content: center;
+}
+
+#app { width: 100%; max-width: 640px; }
+h1 { font-size: 1.05rem; font-weight: 600; margin: 0 0 0.25rem; }
+.sub { color: var(--quiet); margin: 0 0 2rem; }
+.card {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 1rem 1.1rem;
+  margin-bottom: 0.85rem;
+}
+.card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 1rem; }
+.name { font-weight: 600; }
+.state { font-size: 0.82rem; }
+.on { color: var(--green); }
+.off { color: var(--quiet); }
+.bad { color: var(--danger-ink); }
+dl { display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 0.9rem; margin: 0.7rem 0 0; font-size: 0.82rem; }
+dt { color: var(--quiet); }
+dd { margin: 0; color: var(--muted); word-break: break-all; }
+.row { display: flex; gap: 0.5rem; margin-top: 0.9rem; flex-wrap: wrap; }
+button, input {
+  font: inherit;
+  background: #121212;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  padding: 0.4rem 0.8rem;
+}
+button { cursor: pointer; }
+button:hover:not(:disabled) { border-color: #555; }
+button:disabled { opacity: 0.45; cursor: default; }
+button.primary { border-color: var(--violet); color: var(--violet); }
+button.danger { border-color: #4a1d24; color: var(--danger-ink); }
+input { flex: 1; min-width: 14rem; }
+.flow { margin-top: 0.9rem; padding-top: 0.9rem; border-top: 1px solid var(--line); }
+.flow p { margin: 0 0 0.6rem; color: var(--muted); font-size: 0.85rem; }
+.usercode { font-size: 1.5rem; letter-spacing: 0.22em; color: var(--amber); padding: 0.5rem 0; user-select: all; }
+a { color: var(--cyan); }
+.err { color: var(--danger-ink); font-size: 0.85rem; margin-top: 0.6rem; }
+.gate { max-width: 26rem; }
+.gate p { color: var(--muted); }

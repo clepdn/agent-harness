@@ -11,7 +11,8 @@
 import type { FastifyInstance } from "fastify"
 import type { BridgeConfig } from "./config"
 import { authenticate, hasCap, type ApiKeyEntry } from "./auth"
-import { adminPage } from "./admin-page"
+import fastifyStatic from "@fastify/static"
+import { ADMIN_DIST_DIR, adminPage, hasAdminBuild } from "./admin-shell"
 import {
   cancelLogin,
   getSession,
@@ -66,9 +67,23 @@ export function registerAdminRoutes(
   const reaper = startSessionReaper()
   app.addHook("onClose", async () => clearInterval(reaper))
 
+  if (hasAdminBuild()) {
+    app.register(fastifyStatic, {
+      root: `${ADMIN_DIST_DIR}/assets`,
+      prefix: "/admin/assets/",
+      decorateReply: false,
+      cacheControl: false,
+    })
+  }
+
   // The shell is not secret — it holds no data and prompts for a key on load.
   // Everything under /admin/api is what actually needs guarding.
-  app.get("/admin", async (_req, reply) => reply.type("text/html; charset=utf-8").send(adminPage()))
+  app.get("/admin", async (_req, reply) => {
+    if (!hasAdminBuild()) {
+      return reply.code(503).send({ error: "admin UI is not built yet; run `npm run build:admin` first" })
+    }
+    return reply.type("text/html; charset=utf-8").send(adminPage())
+  })
 
   app.get("/admin/api/providers", async (req: any, reply: any) => {
     if (!requireAdmin(req, reply)) return
