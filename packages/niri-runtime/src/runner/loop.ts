@@ -12,6 +12,7 @@ import {
   meetsToolResultCompactionContextThreshold,
   CONTEXT_COMPACT_TRIGGER_TOKENS,
   COMPACTION_STRATEGY,
+  IDLE_COMPACTION_TIMEOUT_MS,
   estimatePromptTokens,
   findSummaryMessageIndex,
   loadAgentSummaryContext,
@@ -46,10 +47,34 @@ enum CycleOutcome {
 
 export type RunLoopExit = "rest"
 
-async function waitForNextEvent(convId: number, hooks: LoopHooks): Promise<void> {
-  const incoming = await hooks.waitForEvent()
-  if (!incoming) return
-  hooks.injectIncomingEvent(convId, incoming)
+async function waitForNextEvent(convId: number, state: LoopState, hooks: LoopHooks): Promise<void> {
+  // When idle compaction is disabled, just block until the next event.
+  if (IDLE_COMPACTION_TIMEOUT_MS <= 0) {
+    const incoming = await hooks.waitForEvent()
+    if (!incoming) return
+    hooks.injectIncomingEvent(convId, incoming)
+    return
+  }
+
+  // Otherwise wait with the idle timeout. Each time the timeout fires with no
+  // event, compact the idle conversation (summarize the middle so a long-lived
+  // session doesn't sit at full context forever) and keep waiting. Any real
+  // event — or a rest/shutdown request — breaks out immediately.
+  while (true) {
+    const incoming = await hooks.waitForEventWithTimeout(IDLE_COMPACTION_TIMEOUT_MS)
+    if (incoming) {
+      hooks.injectIncomingEvent(convId, incoming)
+      return
+    }
+    // Null means the timeout fired or the wait was interrupted for rest/
+    // shutdown. Bail out on rest/shutdown so the loop can handle it.
+    if (state.restRequested || hooks.shouldShutdown()) return
+
+    const compacted = await applyCompaction(state, "idle")
+    if (compacted) {
+      console.log("[runner] idle compaction ran while waiting for the next event")
+    }
+  }
 }
 
 async function applyLoopGuardNudge(state: LoopState, _hooks: LoopHooks, reason: string): Promise<void> {
@@ -246,7 +271,7 @@ function discardedMessages(before: Message[], after: Message[]): Message[] {
  * pipeline once the trigger threshold is crossed. Runs on every loop iteration;
  * cheap no-op below threshold.
  */
-async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn"): Promise<boolean> {
+async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn" | "idle"): Promise<boolean> {
   const strategy = COMPACTION_STRATEGY
   if (strategy === "off") return false
 
@@ -269,7 +294,7 @@ async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn"
 
 async function applyLLMCompaction(
   state: LoopState,
-  phase: "pre-turn" | "post-turn",
+  phase: "pre-turn" | "post-turn" | "idle",
   strategy: CompactionStrategy = COMPACTION_STRATEGY,
 ): Promise<boolean> {
   // Gate strictly on the model-reported prompt_tokens (state.contextSize).
@@ -435,7 +460,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       }
       setWorking(false)
       setPromWorking(false)
-      await waitForNextEvent(convId, hooks)
+      await waitForNextEvent(convId, state, hooks)
       continue
     }
 

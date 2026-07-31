@@ -175,14 +175,19 @@ test("waitForNextEvent waits for and injects the next external event", async () 
     raw: {},
   }
 
-  await __loopTest.waitForNextEvent(42, {
+  // Idle compaction defaults on (45min) in the test config, so the wait uses
+  // the timeout variant. Return the event immediately to exercise the inject.
+  await __loopTest.waitForNextEvent(42, makeState(), {
     clientTools: testClientTools,
     getTools: () => [],
     waitForEvent: async () => {
       calls.push("wait")
       return event
     },
-    waitForEventWithTimeout: async () => null,
+    waitForEventWithTimeout: async () => {
+      calls.push("wait")
+      return event
+    },
     injectIncomingEvent: (_convId, incoming) => {
       calls.push(`inject:${incoming.content}`)
       assert.equal(_convId, 42)
@@ -197,4 +202,34 @@ test("waitForNextEvent waits for and injects the next external event", async () 
   })
 
   assert.deepEqual(calls, ["wait", "inject:still here"])
+})
+
+test("waitForNextEvent bails out on shutdown instead of looping the idle timer", async () => {
+  const calls: string[] = []
+  let shuttingDown = false
+
+  await __loopTest.waitForNextEvent(7, makeState(), {
+    clientTools: testClientTools,
+    getTools: () => [],
+    waitForEvent: async () => null,
+    // First timeout returns null (no event); the loop should then see shutdown
+    // and return without ever injecting or looping again.
+    waitForEventWithTimeout: async () => {
+      calls.push("timeout")
+      shuttingDown = true
+      return null
+    },
+    injectIncomingEvent: () => {
+      calls.push("inject")
+    },
+    flushDeferredEvents: () => {},
+    clearSession: async () => {},
+    saveSession: async () => {},
+    saveShutdownSnapshot: async () => {},
+    shouldShutdown: () => shuttingDown,
+    resolveShutdown: () => {},
+  })
+
+  // Exactly one timeout, no inject, no infinite loop.
+  assert.deepEqual(calls, ["timeout"])
 })
