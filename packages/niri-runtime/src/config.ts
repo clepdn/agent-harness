@@ -260,6 +260,53 @@ function enumStr<T extends string>(value: TomlValue | undefined, allowed: readon
   return (allowed as readonly string[]).includes(raw) ? (raw as T) : fallback
 }
 
+// The primary model config is built first so [context] can mirror the
+// per-model values that moved onto the preset (compaction_strategy,
+// compact_trigger_tokens, deep_archive, respect_prompt_cache).
+const modelConfig = {
+  provider: str(modelT.provider, "").trim(),
+  model: str(modelT.model, "").trim(),
+  base_url: str(modelT.base_url, "").trim(),
+  api_key: str(modelT.api_key, "").trim(),
+  tool_choice: pickEnum(modelT.tool_choice, toolChoices, "required"),
+  enable_thinking: bool(modelT.enable_thinking, true),
+  thinking_effort: pickEnum(modelT.thinking_effort, thinkingEfforts, "low"),
+  vision: bool(modelT.vision, false),
+  nudge_on_no_tool: bool(modelT.nudge_on_no_tool, false),
+  // Minutes of session idle before a mid-session compaction pass runs. 0 = off.
+  // Per-model because it's really about that model's context/cache behavior;
+  // the global default stays 0 so it only turns on for presets that opt in.
+  idle_compaction_minutes: num(modelT.idle_compaction_minutes, 0),
+  // ── Per-model context behavior ──────────────────────────────────────────
+  // These four used to live under [context]. They're really functions of the
+  // model (its context window, its price cliffs, whether it does prompt
+  // caching), so they belong on the preset and swap with the model at runtime.
+  // Each falls back to the old [context] key for back-compat, then a default.
+  //   compaction_strategy   - which compaction pipeline runs at the trigger
+  //   compact_trigger_tokens- prompt-token count that fires compaction
+  //   deep_archive          - preserve compressed-away specifics out-of-band
+  //   respect_prompt_cache  - avoid history mutations that bust the prompt
+  //                           cache (was preserve_prompt_cache)
+  compaction_strategy: enumStr(
+    modelT.compaction_strategy ?? contextT.compaction_strategy,
+    compactionStrategies,
+    "companion",
+  ),
+  compact_trigger_tokens: int(
+    modelT.compact_trigger_tokens ?? contextT.compact_trigger_tokens,
+    90000,
+  ),
+  deep_archive: bool(modelT.deep_archive ?? contextT.deep_archive, true),
+  respect_prompt_cache: bool(
+    // new name wins; fall back to the legacy per-model or [context] key
+    modelT.respect_prompt_cache ??
+      modelT.preserve_prompt_cache ??
+      contextT.respect_prompt_cache ??
+      contextT.preserve_prompt_cache,
+    true,
+  ),
+}
+
 export const config = {
   llm_bridge_url: str(merged.llm_bridge_url, "").trim(),
   llm_bridge_api_key: str(merged.llm_bridge_api_key, "").trim(),
@@ -280,21 +327,7 @@ export const config = {
     target: str(sshT.target, "").trim(),
     identity: str(sshT.identity, "").trim(),
   },
-  model: {
-    provider: str(modelT.provider, "").trim(),
-    model: str(modelT.model, "").trim(),
-    base_url: str(modelT.base_url, "").trim(),
-    api_key: str(modelT.api_key, "").trim(),
-    tool_choice: pickEnum(modelT.tool_choice, toolChoices, "required"),
-    enable_thinking: bool(modelT.enable_thinking, true),
-    thinking_effort: pickEnum(modelT.thinking_effort, thinkingEfforts, "low"),
-    vision: bool(modelT.vision, false),
-    nudge_on_no_tool: bool(modelT.nudge_on_no_tool, false),
-    // Minutes of session idle before a mid-session compaction pass runs. 0 = off.
-    // Per-model because it's really about that model's context/cache behavior;
-    // the global default stays 0 so it only turns on for presets that opt in.
-    idle_compaction_minutes: num(modelT.idle_compaction_minutes, 0),
-  },
+  model: modelConfig,
   fallback: {
     provider: str(fallbackT.provider, "").trim(),
     model: str(fallbackT.model, "").trim() || "zai-org/glm-4.7-flash",
@@ -328,27 +361,26 @@ export const config = {
     title: str(embeddingsT.title, "").trim(),
   },
   context: {
-    // Which compaction pipeline runs when compact_trigger_tokens is hit.
-    //   companion    - journal-first -> same-model directed summary -> deep archive
-    //   context-full - same-model summary only (no journaling, no deep archive)
-    //   snapcompact  - image-archive only, no LLM summary (needs a vision model)
-    //   remote       - provider-native compaction (OpenAI remote endpoint;
-    //                  degrades to context-editing / summary on Anthropic)
-    //   off          - never compact; ride raw context until the limit
-    compaction_strategy: enumStr(contextT.compaction_strategy, compactionStrategies, "companion"),
+    // NOTE: compaction_strategy, compact_trigger_tokens, deep_archive and
+    // respect_prompt_cache moved to [model] (per-preset) — see config.model
+    // above. These entries mirror the resolved PRIMARY model's values so any
+    // consumer still reading config.context.* gets the effective primary value,
+    // and a bare [context] key still works as a back-compat fallback.
+    compaction_strategy: modelConfig.compaction_strategy,
     // Layer 3 toggle: archive compressed-away specifics into snapcompact frames
     // (Anthropic) or a remote snap payload (OpenAI). Independent of strategy so
     // "companion" can run with or without frames.
-    deep_archive: bool(contextT.deep_archive, true),
+    deep_archive: modelConfig.deep_archive,
     // Run the journaling reflex over the span about to be burned before
     // summarizing (layer 1). Only meaningful for the companion strategy.
     journal_before_compaction: bool(contextT.journal_before_compaction, true),
     compact_target_tokens: int(contextT.compact_target_tokens, 65000),
-    compact_trigger_tokens: int(contextT.compact_trigger_tokens, 90000),
+    compact_trigger_tokens: modelConfig.compact_trigger_tokens,
     compact_recent_messages: int(contextT.compact_recent_messages, 80),
     compact_chunk_messages: int(contextT.compact_chunk_messages, 32),
     compact_summary_max_chars: int(contextT.compact_summary_max_chars, 16000),
-    preserve_prompt_cache: bool(contextT.preserve_prompt_cache, true),
+    // Renamed from preserve_prompt_cache; mirrors the primary model's value.
+    respect_prompt_cache: modelConfig.respect_prompt_cache,
     tool_result_compaction_min_age_turns: int(contextT.tool_result_compaction_min_age_turns, 5),
     tool_result_compaction_min_chars: int(contextT.tool_result_compaction_min_chars, 2000),
     tool_result_compaction_min_context_percent: num(contextT.tool_result_compaction_min_context_percent, 50),

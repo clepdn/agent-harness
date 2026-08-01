@@ -11,7 +11,7 @@
  */
 
 import type { Model } from "../llm"
-import { getModelPreset, type ToolChoice, type ThinkingEffort } from "../config"
+import { getModelPreset, type ToolChoice, type ThinkingEffort, type CompactionStrategy } from "../config"
 import {
   buildModel,
   primaryModel as initPrimaryModel,
@@ -27,7 +27,10 @@ import {
   PRIMARY_VISION as initPrimaryVision,
   PRIMARY_NUDGE_ON_NO_TOOL as initPrimaryNudgeOnNoTool,
   PRIMARY_IDLE_COMPACTION_MS as initPrimaryIdleCompactionMs,
-  PRESERVE_PROMPT_CACHE as initPreservePromptCache,
+  RESPECT_PROMPT_CACHE as initRespectPromptCache,
+  COMPACTION_STRATEGY as initCompactionStrategy,
+  CONTEXT_COMPACT_TRIGGER_TOKENS as initCompactTriggerTokens,
+  DEEP_ARCHIVE_ENABLED as initDeepArchive,
   USE_FALLBACK as initUseFallback,
 } from "./config"
 
@@ -52,8 +55,11 @@ export interface RuntimeModelConfig {
   summaryModel: Model | null
   summaryApiKey: string | undefined
 
-  // Context behavior
-  preservePromptCache: boolean
+  // Context behavior (per-model preset options, swap with the model at runtime)
+  respectPromptCache: boolean
+  compactionStrategy: CompactionStrategy
+  compactTriggerTokens: number
+  deepArchive: boolean
 
   // Flags
   useFallback: boolean
@@ -78,7 +84,10 @@ export const modelState: RuntimeModelConfig = {
   summaryModel: initSummaryModel,
   summaryApiKey: initSummaryKey,
 
-  preservePromptCache: initPreservePromptCache,
+  respectPromptCache: initRespectPromptCache,
+  compactionStrategy: initCompactionStrategy,
+  compactTriggerTokens: initCompactTriggerTokens,
+  deepArchive: initDeepArchive,
   useFallback: initUseFallback,
 }
 
@@ -96,6 +105,10 @@ export type SwapDecision =
       vision: boolean
       nudgeOnNoTool: boolean
       idleCompactionMs: number
+      compactionStrategy: CompactionStrategy
+      compactTriggerTokens: number
+      deepArchive: boolean
+      respectPromptCache: boolean
     }
   | { action: "rest"; preset: string; reason: string }
 
@@ -151,13 +164,15 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
     throw new Error(`failed to build model from preset "${presetName}"`)
   }
 
-  // Compatibility check 1: preserving the current prompt cache means a model
-  // swap would invalidate its tokenizer/prefix. Must rest.
-  if (modelState.preservePromptCache) {
+  // Compatibility check 1: respecting the CURRENT model's prompt cache means a
+  // model swap would invalidate its tokenizer/prefix. Must rest. This reads the
+  // current runtime value (not the target preset) on purpose — it's the session
+  // we're protecting, not the model we're moving to.
+  if (modelState.respectPromptCache) {
     return {
       action: "rest",
       preset: presetName,
-      reason: `preserving the prompt cache requires a rest before swapping to "${presetName}"`,
+      reason: `respecting the prompt cache requires a rest before swapping to "${presetName}"`,
     }
   }
 
@@ -201,6 +216,31 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
         : 0
       : modelState.idleCompactionMs
 
+  // Per-model context behavior. Each falls back to the current runtime value
+  // when the target preset doesn't specify it, so a swap never silently resets
+  // a knob the new preset was quiet about.
+  const compactionStrategy: CompactionStrategy =
+    typeof preset.compaction_strategy === "string" &&
+    ["companion", "context-full", "snapcompact", "remote", "off"].includes(preset.compaction_strategy as string)
+      ? (preset.compaction_strategy as CompactionStrategy)
+      : modelState.compactionStrategy
+
+  const compactTriggerTokens =
+    typeof preset.compact_trigger_tokens === "number" && preset.compact_trigger_tokens > 0
+      ? preset.compact_trigger_tokens
+      : modelState.compactTriggerTokens
+
+  const deepArchive =
+    typeof preset.deep_archive === "boolean" ? preset.deep_archive : modelState.deepArchive
+
+  // New name wins; accept the legacy preserve_prompt_cache key too.
+  const respectPromptCache =
+    typeof preset.respect_prompt_cache === "boolean"
+      ? preset.respect_prompt_cache
+      : typeof preset.preserve_prompt_cache === "boolean"
+        ? preset.preserve_prompt_cache
+        : modelState.respectPromptCache
+
   return {
     action: "swap",
     preset: presetName,
@@ -212,6 +252,10 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
     vision,
     nudgeOnNoTool,
     idleCompactionMs,
+    compactionStrategy,
+    compactTriggerTokens,
+    deepArchive,
+    respectPromptCache,
   }
 }
 
@@ -226,6 +270,10 @@ export function applyModelSwap(decision: Extract<SwapDecision, { action: "swap" 
   modelState.primaryVision = decision.vision
   modelState.primaryNudgeOnNoTool = decision.nudgeOnNoTool
   modelState.idleCompactionMs = decision.idleCompactionMs
+  modelState.compactionStrategy = decision.compactionStrategy
+  modelState.compactTriggerTokens = decision.compactTriggerTokens
+  modelState.deepArchive = decision.deepArchive
+  modelState.respectPromptCache = decision.respectPromptCache
   modelState.enableThinking = decision.enableThinking
   modelState.thinkingEffort = decision.thinkingEffort
 

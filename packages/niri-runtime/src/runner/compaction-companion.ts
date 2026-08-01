@@ -27,11 +27,11 @@
 import { writeMemory } from "../agent-state-tools"
 import type { Message } from "../types"
 import {
-  DEEP_ARCHIVE_ENABLED,
   JOURNAL_BEFORE_COMPACTION,
   REMOTE_COMPACTION_ENDPOINT,
   REMOTE_COMPACTION_MODEL,
 } from "./config"
+import { modelState } from "./model-state"
 import { messageStringContent } from "./messages"
 
 /** UTC date stamp for the journal path (journal/YYYY-MM-DD.md). */
@@ -161,7 +161,8 @@ export class SnapcompactFramesArchive implements DeepArchiveBackend {
 
 /** Provider string → deep-archive backend. */
 export function resolveDeepArchiveBackend(provider: string | undefined): DeepArchiveBackend {
-  if (!DEEP_ARCHIVE_ENABLED) return new NoopArchive()
+  // Read from modelState so deep_archive swaps with the model preset at runtime.
+  if (!modelState.deepArchive) return new NoopArchive()
   const p = (provider ?? "").toLowerCase()
   if (p.includes("openai") && REMOTE_COMPACTION_ENDPOINT) return new OpenAiRemoteArchive()
   return new TextAppendixArchive()

@@ -3,10 +3,15 @@ import { config } from "../config"
 
 // ── Misc thresholds ───────────────────────────────────────────────────────────
 
-export const CONTEXT_COMPACT_TRIGGER_TOKENS = config.context.compact_trigger_tokens
-export const PRESERVE_PROMPT_CACHE = config.context.preserve_prompt_cache
-export const COMPACTION_STRATEGY = config.context.compaction_strategy
-export const DEEP_ARCHIVE_ENABLED = config.context.deep_archive
+// These four are per-model preset options (like idle_compaction_minutes). They
+// hold the initial value from the resolved primary preset; presets can override
+// them and they swap at runtime via modelState.* (see model-state.ts). Older
+// configs that still set them under [context] keep working: config.model.*
+// falls back to config.context.* during parse.
+export const CONTEXT_COMPACT_TRIGGER_TOKENS = config.model.compact_trigger_tokens
+export const RESPECT_PROMPT_CACHE = config.model.respect_prompt_cache
+export const COMPACTION_STRATEGY = config.model.compaction_strategy
+export const DEEP_ARCHIVE_ENABLED = config.model.deep_archive
 export const JOURNAL_BEFORE_COMPACTION = config.context.journal_before_compaction
 export const REMOTE_COMPACTION_ENDPOINT = config.context.remote_compaction.endpoint
 export const REMOTE_COMPACTION_MODEL = config.context.remote_compaction.model
@@ -196,5 +201,5 @@ console.log(
     (REMOTE_COMPACTION_ENDPOINT ? ` remote=${REMOTE_COMPACTION_ENDPOINT}` : ""),
 )
 console.log(
-  `[config] preserve_prompt_cache=${PRESERVE_PROMPT_CACHE} tool_result_compaction_min_age_turns=${TOOL_RESULT_COMPACTION_MIN_AGE_TURNS} tool_result_compaction_min_chars=${TOOL_RESULT_COMPACTION_MIN_CHARS} tool_result_compaction_min_context_percent=${TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT}`,
+  `[config] respect_prompt_cache=${RESPECT_PROMPT_CACHE} tool_result_compaction_min_age_turns=${TOOL_RESULT_COMPACTION_MIN_AGE_TURNS} tool_result_compaction_min_chars=${TOOL_RESULT_COMPACTION_MIN_CHARS} tool_result_compaction_min_context_percent=${TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT}`,
 )

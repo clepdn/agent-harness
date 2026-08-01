@@ -10,8 +10,6 @@ import {
   TOOL_RESULT_COMPACTION_MIN_AGE_TURNS,
   TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT,
   meetsToolResultCompactionContextThreshold,
-  CONTEXT_COMPACT_TRIGGER_TOKENS,
-  COMPACTION_STRATEGY,
   estimatePromptTokens,
   findSummaryMessageIndex,
   loadAgentSummaryContext,
@@ -197,7 +195,7 @@ function applyDiscordSendNudge(
  * model's context window is occupied.
  */
 async function applyProactiveCompaction(state: LoopState): Promise<boolean> {
-  if (modelState.preservePromptCache) return false
+  if (modelState.respectPromptCache) return false
 
   const activeModel = modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel
   if (
@@ -273,10 +271,11 @@ function discardedMessages(before: Message[], after: Message[]): Message[] {
  * cheap no-op below threshold.
  */
 async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn" | "idle"): Promise<boolean> {
-  const strategy = COMPACTION_STRATEGY
+  // Read from modelState so strategy + trigger swap with the model preset.
+  const strategy = modelState.compactionStrategy
   if (strategy === "off") return false
 
-  if (state.contextSize >= CONTEXT_COMPACT_TRIGGER_TOKENS) {
+  if (state.contextSize >= modelState.compactTriggerTokens) {
     // At/over the cliff: run the strategy's full burn.
     if (strategy === "snapcompact") {
       // Pure image-archive has no LLM summary; the renderer is not yet vendored,
@@ -296,7 +295,7 @@ async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn"
 async function applyLLMCompaction(
   state: LoopState,
   phase: "pre-turn" | "post-turn" | "idle" | "shutdown",
-  strategy: CompactionStrategy = COMPACTION_STRATEGY,
+  strategy: CompactionStrategy = modelState.compactionStrategy,
   force = false,
 ): Promise<boolean> {
   // Gate strictly on the model-reported prompt_tokens (state.contextSize).
@@ -304,7 +303,7 @@ async function applyLLMCompaction(
   // used to fire compaction at ~22-31k real tokens and produce nonsense summaries.
   // `force` bypasses the gate — used on a clean end_session so the goodbye
   // leaves a real summary behind even below the trigger.
-  if (!force && state.contextSize < CONTEXT_COMPACT_TRIGGER_TOKENS) return false
+  if (!force && state.contextSize < modelState.compactTriggerTokens) return false
   const beforeEstimate = estimatePromptTokens(state.conversation)
 
   // companion + context-full salvage lessons from the same head that generated
@@ -398,7 +397,7 @@ async function applyLLMCompaction(
  * Returns true if a summary was produced.
  */
 export async function compactForShutdown(state: LoopState): Promise<boolean> {
-  const strategy = COMPACTION_STRATEGY === "off" ? "companion" : COMPACTION_STRATEGY
+  const strategy = modelState.compactionStrategy === "off" ? "companion" : modelState.compactionStrategy
   if (strategy === "snapcompact") {
     return applyLLMCompaction(state, "shutdown", "context-full", true)
   }

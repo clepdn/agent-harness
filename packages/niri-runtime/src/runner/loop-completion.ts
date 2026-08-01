@@ -54,7 +54,7 @@ export function configuredSummaryProvider(
   preferActiveModel = false,
 ): { model: Model | null; apiKey: string | undefined } {
   if (preferActiveModel) return activeModelProvider()
-  if (modelState.preservePromptCache) return { model: null, apiKey: undefined }
+  if (modelState.respectPromptCache) return { model: null, apiKey: undefined }
   if (modelState.summaryModel) return { model: modelState.summaryModel, apiKey: modelState.summaryApiKey }
   return activeModelProvider()
 }

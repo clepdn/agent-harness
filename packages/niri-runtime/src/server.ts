@@ -334,7 +334,7 @@ export function createServer(options: { requestRestart?: (reason?: string) => vo
       ? { id: modelState.primaryModel.id, provider: modelState.primaryModel.provider, baseUrl: modelState.primaryModel.baseUrl }
       : null,
     fallback: { id: modelState.fallbackModel.id, provider: modelState.fallbackModel.provider, baseUrl: modelState.fallbackModel.baseUrl },
-    preservePromptCache: modelState.preservePromptCache,
+    respectPromptCache: modelState.respectPromptCache,
     useFallback: modelState.useFallback,
     enableThinking: modelState.enableThinking,
     thinkingEffort: modelState.thinkingEffort,

@@ -131,6 +131,24 @@ preset = "umans"
 # Per-model/preset because it depends on the model's context + cache behavior.
 # Set it on a [models.<name>] preset to have it swap with the model.
 # idle_compaction_minutes = 45
+#
+# ── Per-model context behavior (moved here from [context]) ──────────────────
+# These are really functions of the model — its context window, its price
+# cliffs, whether it does prompt caching — so they live on the preset and swap
+# with the model at runtime. Setting them under [context] still works as a
+# back-compat fallback. Set them on a [models.<name>] preset to make them swap.
+#
+# Which compaction pipeline runs at the trigger:
+#   companion | context-full | snapcompact | remote | off   (default companion)
+# compaction_strategy = "companion"
+# Prompt-token count that fires compaction (the price/limit cliff to defend):
+# compact_trigger_tokens = 90000
+# Preserve compressed-away specifics out-of-band (deep archive layer):
+# deep_archive = true
+# Avoid history mutations that bust the prompt cache. When true, disables all
+# LLM compaction and requires a rest before switching models. (Renamed from
+# preserve_prompt_cache; the old key is still accepted.)
+# respect_prompt_cache = true
 
 [fallback]
 # Used when the primary endpoint is unreachable or rate-limited (429/5xx).
@@ -146,15 +164,17 @@ preset = "gemini_embedding"
 
 [context]
 compact_target_tokens = 65000
-compact_trigger_tokens = 90000
 compact_recent_messages = 80
 compact_chunk_messages = 32
 compact_summary_max_chars = 16000
-# NOTE: idle_compaction_minutes moved to [model] (it's a per-model/preset option
-# now, since it's really about that model's context/cache behavior). Default 0.
-# Keep the conversation byte-for-byte stable for prompt caching. This disables
-# all LLM compaction and requires a rest before switching models.
-preserve_prompt_cache = true
+# NOTE: these moved to [model] (per-model/preset options now, since they're
+# really about the model's context/cache behavior). Setting them here still
+# works as a back-compat fallback, but prefer the preset:
+#   idle_compaction_minutes  (default 0)
+#   compaction_strategy      (default "companion")
+#   compact_trigger_tokens   (default 90000)
+#   deep_archive             (default true)
+#   respect_prompt_cache     (default true; was preserve_prompt_cache)
 # Proactive tool-result compaction requires all three thresholds below.
 tool_result_compaction_min_age_turns = 5
 tool_result_compaction_min_chars = 2000
