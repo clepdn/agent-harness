@@ -1,8 +1,14 @@
 // Config for the LLM bridge.
 // The bridge acts as our own OpenRouter — it routes requests to the best
 // available provider using pi-ai's model registry + custom providers.
+//
+// Provider credentials written by the admin UI live in the bridge service's
+// state directory. Startup restores the corresponding provider entries from
+// those files before model discovery.
 
 import fs from "node:fs"
+import path from "node:path"
+import { resolveCodexAuthPath } from "./codex"
 
 export interface CustomProvider {
   // name is derived from the providers.<name> key — not stored as a field.
@@ -121,6 +127,56 @@ function parseTomlFile(path: string): Record<string, unknown> {
   return root
 }
 
+export type SavedAuthProviderOptions = {
+  /** Override the systemd state root in focused tests. */
+  stateDirectory?: string
+  /** Override the Codex resolver only in focused tests. */
+  codexAuthPath?: string
+}
+
+function isRegularFile(filePath: string): boolean {
+  try {
+    return fs.statSync(filePath).isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Restore provider entries written by the admin UI. The UI mutates the
+ * in-memory config after login, so a restart needs to rebuild those entries
+ * before discovery. Automatic restoration is limited to an explicit service
+ * state root; an explicitly configured entry always wins, and an auth file is
+ * only enough to add the matching provider, never the other one.
+ *
+ * Anthropic's file is the pi-shaped map at state/auth/anthropic.json. Codex's
+ * file uses the CLI `tokens` shape and follows the same resolver used by the
+ * request handler and admin login.
+ */
+export function addSavedAuthProviders(
+  providers: Record<string, CustomProvider>,
+  options: SavedAuthProviderOptions = {},
+): Record<string, CustomProvider> {
+  const out = { ...providers }
+  const stateDirectory = options.stateDirectory === undefined
+    ? process.env.STATE_DIRECTORY?.split(":")[0]?.trim() || process.env.BRIDGE_STATE_DIR?.trim()
+    : options.stateDirectory.split(":")[0]?.trim()
+  if (!stateDirectory) return out
+
+  const anthropicAuthPath = path.join(stateDirectory, "auth", "anthropic.json")
+
+  if (!Object.prototype.hasOwnProperty.call(out, "anthropic-oauth") && isRegularFile(anthropicAuthPath)) {
+    out["anthropic-oauth"] = { auth_path: anthropicAuthPath }
+  }
+
+  const codexAuthPath = resolveCodexAuthPath(undefined, options.codexAuthPath)
+  if (!Object.prototype.hasOwnProperty.call(out, "codex") && isRegularFile(codexAuthPath)) {
+    out.codex = { auth_path: codexAuthPath }
+  }
+
+  return out
+}
+
 export function loadConfig(): BridgeConfig {
   // Check for --config flag
   const configArgIdx = process.argv.indexOf("--config")
@@ -169,6 +225,10 @@ export function loadConfig(): BridgeConfig {
       }
     }
   }
+
+  // Admin logins register providers only in memory; restore them from the
+  // persistent service state before the empty-provider guard and discovery.
+  providers = addSavedAuthProviders(providers)
 
   if (Object.keys(providers).length === 0) {
     throw new Error("[bridge] no providers configured. use --config <path> or set BRIDGE_PROVIDERS")

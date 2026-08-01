@@ -1,5 +1,6 @@
 import path from "path"
 import { config } from "../config"
+import { NIRI_HOME } from "../agent-config"
 
 const configuredContainerName = config.container.name
 const configuredContainerUser = config.container.user
@@ -26,15 +27,10 @@ if (USE_DOCKER_SHELL && USE_SSH) {
   )
 }
 
-/** Repository fallback home used when a local OS home is unavailable. */
-export const REPO_HOME_DIR = path.resolve(process.cwd(), "home")
-/** Harness home for soul, memories, and local databases. */
-export const HOME_DIR = (USE_DOCKER_SHELL || USE_SSH) ? REPO_HOME_DIR : path.resolve(process.env.HOME ?? REPO_HOME_DIR)
-
 /** Absolute image root allowed for `image_tool` operations. */
 export const IMAGE_ROOT = (() => {
   const configured = config.image_tool.root
-  const root = configured || (USE_DOCKER_SHELL ? `/home/${CONTAINER_USER}/images` : path.resolve(process.cwd(), "home", "images"))
+  const root = configured || (USE_DOCKER_SHELL ? `/home/${CONTAINER_USER}/images` : path.join(NIRI_HOME, "images"))
   if (!root.startsWith("/")) {
     throw new Error(`[image_tool].root must be an absolute path, got: ${root}`)
   }

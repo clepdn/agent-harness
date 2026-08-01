@@ -298,6 +298,7 @@
 				ExecStart        = "${pkgs.bash}/bin/bash -lc '${command}'";
 				Environment      = [
 				    "NIRI_MANAGED_WORKER=true"
+				    "NIRI_HOME=${cfg.homeDir}"
 				    "NIRI_CONTROL_HOME=${cfg.homeDir}/control"
 				];
 				Restart          = "always";

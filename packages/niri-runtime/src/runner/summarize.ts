@@ -2,7 +2,7 @@ import fs from "fs/promises"
 import path from "path"
 import { complete } from "../llm"
 import type { AssistantMessage, Context, Model, TextContent, ToolCall } from "../llm"
-import { HOME_DIR } from "../container/config"
+import { NIRI_HOME as HOME_DIR } from "../agent-config"
 import type { Message } from "../types"
 import {
   AGENT_NAME,

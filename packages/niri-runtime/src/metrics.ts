@@ -3,7 +3,7 @@ import fs from "fs"
 import path from "path"
 import type { AssistantMessage, Usage } from "./llm"
 import { config } from "./config"
-import { HOME_DIR } from "./container/config"
+import { NIRI_HOME } from "./agent-config"
 import { getDb } from "./db"
 import type { Message } from "./types"
 import type { MemorySearchResult } from "./memory/index"
@@ -153,7 +153,7 @@ interface MetricRow {
   createdAt: string
 }
 
-const DB_PATH = path.join(HOME_DIR, "metrics.db")
+const DB_PATH = path.join(NIRI_HOME, "metrics.db")
 
 let db: Database.Database
 const events: (MetricEvent & { id: number })[] = []
@@ -193,12 +193,12 @@ function pruneOldMetrics(days = metricsRetentionDays()): number {
 
 export function initMetricsDb(): void {
   try {
-    fs.mkdirSync(HOME_DIR, { recursive: true })
-    fs.accessSync(HOME_DIR, fs.constants.W_OK)
+    fs.mkdirSync(NIRI_HOME, { recursive: true })
+    fs.accessSync(NIRI_HOME, fs.constants.W_OK)
   } catch (err: any) {
     let owner = "unknown"
     try {
-      const st = fs.statSync(HOME_DIR)
+      const st = fs.statSync(NIRI_HOME)
       owner = `${st.uid}:${st.gid}`
     } catch {
       // ignore
@@ -208,7 +208,7 @@ export function initMetricsDb(): void {
     const who = uid !== undefined && gid !== undefined ? `${uid}:${gid}` : "current user"
     throw new Error(
       [
-        `[metrics] cannot write metrics.db under ${HOME_DIR}`,
+        `[metrics] cannot write metrics.db under ${NIRI_HOME}`,
         `- dir owner: ${owner}`,
         `- process uid:gid: ${who}`,
         "",

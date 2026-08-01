@@ -1,3 +1,4 @@
+import os from "node:os"
 import path from "path"
 import { fileURLToPath } from "node:url"
 import { config } from "./config"
@@ -10,9 +11,20 @@ import { config } from "./config"
  */
 export const AGENT_ID = (process.env.NIRI_AGENT_ID ?? process.env.AGENT_ID ?? config.agent.name).trim() || "niri"
 
-/** Repository fallback home used when a local OS home is unavailable. */
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..")
-export const REPO_HOME_DIR = path.resolve(process.env.NIRI_REPO_HOME ?? path.join(REPO_ROOT, "home"))
+
+/**
+ * Resolve durable agent state without ever deriving the default from the
+ * executable/source location. Managed workers set NIRI_HOME explicitly; local
+ * runs honor HOME and otherwise use the operating system's home directory.
+ */
+export function resolveNiriHome(
+  env: NodeJS.ProcessEnv = process.env,
+  osHome: string = os.homedir(),
+): string {
+  const configuredHome = env.NIRI_HOME?.trim() || env.HOME?.trim()
+  return path.resolve(configuredHome || osHome)
+}
 
 /**
  * Harness home for soul, memories, and local databases.
@@ -20,4 +32,4 @@ export const REPO_HOME_DIR = path.resolve(process.env.NIRI_REPO_HOME ?? path.joi
  * This is intentionally independent from where model-facing tools execute.
  * Set NIRI_HOME on each worker VM to give that agent her own persistent home.
  */
-export const NIRI_HOME = path.resolve(process.env.NIRI_HOME ?? process.env.HOME ?? REPO_HOME_DIR)
+export const NIRI_HOME = resolveNiriHome()

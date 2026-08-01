@@ -1,12 +1,18 @@
 import fs from "fs/promises"
 import path from "path"
 import type { Message } from "../types"
+import { NIRI_HOME } from "../agent-config"
 import { findSummaryMessageIndex, messageStringContent } from "./messages"
 
-// Store session data in working directory, not install location (Nix store is read-only)
-const DATA_DIR = process.cwd()
+// Session state belongs to the agent's durable home, never the executable or
+// source directory (which may be an immutable Nix store path).
+const DATA_DIR = NIRI_HOME
 const REST_SNAPSHOT_FILE = path.join(DATA_DIR, ".coral-rest-snapshot.json")
 const SESSION_FILE = path.join(DATA_DIR, "session.json")
+
+async function ensureDataDir(): Promise<void> {
+  await fs.mkdir(DATA_DIR, { recursive: true, mode: 0o700 })
+}
 
 // ── Rest snapshot ─────────────────────────────────────────────────────────────
 
@@ -28,6 +34,7 @@ export async function saveRestSnapshot(messages: Message[], note?: string): Prom
     ...(trimmedNote ? { note: trimmedNote } : {}),
     summary: restSummaryFromMessages(messages),
   }
+  await ensureDataDir()
   await fs.writeFile(REST_SNAPSHOT_FILE, JSON.stringify(snapshot, null, 2), { encoding: "utf-8", mode: 0o666 })
 }
 
@@ -57,6 +64,7 @@ export async function loadRestSnapshot(): Promise<RestSnapshot | null> {
 // ── Session persistence ───────────────────────────────────────────────────────
 
 export async function saveSession(messages: Message[]): Promise<void> {
+  await ensureDataDir()
   await fs.writeFile(SESSION_FILE, JSON.stringify(messages), { encoding: "utf-8", mode: 0o666 })
 }
 
