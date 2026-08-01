@@ -343,20 +343,6 @@ export function resolveDeepArchiveBackend(provider: string | undefined): DeepArc
   return new TextAppendixArchive()
 }
 
-/**
- * Whether snapcompact bitmap frames are the intended deep-archive path for the
- * current config — i.e. resolveDeepArchiveBackend would build a frames backend.
- * Mirrors that function's branching so startup validation and runtime routing
- * never drift. When true, the boot path calls initSnapcompactRenderer() and a
- * load failure crashes startup.
- */
-export function snapcompactFramesIntended(provider: string | undefined): boolean {
-  if (!modelState.deepArchive) return false
-  const p = (provider ?? "").toLowerCase()
-  if (p.includes("openai") && REMOTE_COMPACTION_ENDPOINT) return false
-  return modelState.primaryVision
-}
-
 /** Disabled deep archive. */
 export class NoopArchive implements DeepArchiveBackend {
   readonly name = "noop"

@@ -4,8 +4,9 @@ import { REPO_ROOT } from "./agent-config"
 import { createServer } from "./server"
 import { initDb } from "./db"
 import { initMetricsDb } from "./metrics"
-import { initSnapcompactRenderer, snapcompactFramesIntended } from "./runner/compaction-companion"
+import { initSnapcompactRenderer } from "./runner/compaction-companion"
 import { modelState } from "./runner/model-state"
+import { REMOTE_COMPACTION_ENDPOINT } from "./runner/config"
 import { shutdown, activate } from "./runner/index"
 import { initJobManager } from "./runner/jobs"
 import { startDiscordGateway } from "./discord/gateway"
@@ -61,9 +62,16 @@ async function main() {
   // native renderer eagerly now so a broken setup fails startup — loud, cheap —
   // instead of silently degrading to the text appendix later. Per-render
   // failures at runtime still degrade gracefully; only load failure is fatal.
+  // This mirrors resolveDeepArchiveBackend's branch that builds a frames backend:
+  // deep_archive on, not the openai-remote path, primary model vision-capable.
   {
     const activeModel = modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel
-    if (snapcompactFramesIntended(activeModel?.provider)) {
+    const provider = (activeModel?.provider ?? "").toLowerCase()
+    const framesIntended =
+      modelState.deepArchive &&
+      !(provider.includes("openai") && REMOTE_COMPACTION_ENDPOINT) &&
+      modelState.primaryVision
+    if (framesIntended) {
       await initSnapcompactRenderer()
     }
   }
