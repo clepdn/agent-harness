@@ -1,6 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
-import { oaiContentToText, oaiMessagesToContext } from "./translate"
+import { oaiContentToText, oaiMessagesToContext, oaiSseUsageChunk } from "./translate"
 import { __anthropicDirectTest } from "./anthropic-direct"
 
 const { oaiToAnthropicMessages, oaiContentToBlocks, applyCacheBreakpoints } = __anthropicDirectTest
@@ -111,4 +111,23 @@ test("umans/pi-ai: array-form user content survives translation to Context", () 
   assert.equal(ctx.systemPrompt, "sys")
   assert.equal(ctx.messages.length, 1)
   assert.deepEqual(ctx.messages[0]!.content, [{ type: "text", text: "question" }])
+})
+
+test("oaiSseUsageChunk emits a terminal chunk with empty choices and full usage", () => {
+  const raw = oaiSseUsageChunk("claude-opus-4-8", {
+    prompt_tokens: 46000,
+    completion_tokens: 200,
+    total_tokens: 46200,
+    prompt_tokens_details: { cached_tokens: 5000, cache_write_tokens: 40000 },
+  })
+  assert.ok(raw.startsWith("data: "), "must be an SSE data line")
+  const chunk = JSON.parse(raw.slice("data: ".length))
+  assert.equal(chunk.object, "chat.completion.chunk")
+  assert.deepEqual(chunk.choices, [], "usage chunk carries no choices")
+  // prompt_tokens must include cache reads AND writes so the client doesn't
+  // undercount / see zero tokens per turn.
+  assert.equal(chunk.usage.prompt_tokens, 46000)
+  assert.equal(chunk.usage.total_tokens, 46200)
+  assert.equal(chunk.usage.prompt_tokens_details.cached_tokens, 5000)
+  assert.equal(chunk.usage.prompt_tokens_details.cache_write_tokens, 40000)
 })

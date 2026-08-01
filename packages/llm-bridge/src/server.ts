@@ -3,7 +3,7 @@ import fs from "node:fs"
 import path from "node:path"
 import os from "node:os"
 import type { BridgeConfig, BridgeModelConfig } from "./config"
-import { oaiMessagesToContext, oaiSseChunk, oaiCompletionResponse } from "./translate"
+import { oaiMessagesToContext, oaiSseChunk, oaiSseUsageChunk, oaiCompletionResponse } from "./translate"
 import { buildModel, streamCompletion } from "./pi-ai"
 import { streamAnthropicDirect, createAnthropicClient } from "./anthropic-direct"
 import { authenticate, isModelAllowed, type ApiKeyEntry } from "./auth"
@@ -455,6 +455,31 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
             }, null))
           } else if (event.type === "done") {
             reply.raw.write(oaiSseChunk(modelId, {}, mapFinishReason(event.reason)))
+            // Emit the terminal usage chunk (stream_options.include_usage). The
+            // token counts only exist on the done event; without forwarding them
+            // the streaming client counts zero tokens per turn (+0 total=0),
+            // which mis-gates compaction and breaks context tracking.
+            const u = event.message.usage
+            const cacheRead = u.cacheRead ?? 0
+            const cacheWrite = u.cacheWrite ?? 0
+            const promptTokens = u.input + cacheRead + cacheWrite
+            const details =
+              cacheRead > 0 || cacheWrite > 0
+                ? {
+                    prompt_tokens_details: {
+                      ...(cacheRead > 0 ? { cached_tokens: cacheRead } : {}),
+                      ...(cacheWrite > 0 ? { cache_write_tokens: cacheWrite } : {}),
+                    },
+                  }
+                : {}
+            reply.raw.write(
+              oaiSseUsageChunk(modelId, {
+                prompt_tokens: promptTokens,
+                completion_tokens: u.output,
+                total_tokens: promptTokens + u.output,
+                ...details,
+              }),
+            )
           } else if (event.type === "error") {
             reply.raw.write(oaiSseChunk(modelId, {}, "error"))
           }
@@ -476,7 +501,7 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
         prompt_tokens: number
         completion_tokens: number
         total_tokens: number
-        prompt_tokens_details?: { cached_tokens: number }
+        prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number }
       } = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 }
 
       try {
@@ -500,7 +525,14 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
               completion_tokens: u.output,
               total_tokens: promptTokens + u.output,
               // Cached-token breakdown (Anthropic prompt caching); 0 for providers without it.
-              ...(cacheRead > 0 ? { prompt_tokens_details: { cached_tokens: cacheRead } } : {}),
+              ...(cacheRead > 0 || cacheWrite > 0
+                ? {
+                    prompt_tokens_details: {
+                      ...(cacheRead > 0 ? { cached_tokens: cacheRead } : {}),
+                      ...(cacheWrite > 0 ? { cache_write_tokens: cacheWrite } : {}),
+                    },
+                  }
+                : {}),
             }
           }
         }

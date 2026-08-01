@@ -101,8 +101,16 @@ export function applyUsage(
   timing: Pick<CompletionTurnResult, "elapsedMs" | "tokensPerSecond"> = {},
 ): void {
   state.tokenCount += usage.totalTokens
-  if (usage.input) {
-    state.contextSize = usage.input + usage.cacheRead
+  // contextSize is the prompt-side token count the model just processed — the
+  // size of the context window in use. ALL input-side tokens count: fresh input
+  // + cache reads + cache WRITES. cacheWrite was previously omitted, so on any
+  // turn that created/extended the prompt cache (i.e. whenever history grew) the
+  // bulk of the prompt landed in cache_creation and contextSize undercounted by
+  // that amount — swinging the number and mis-gating compaction. Output tokens
+  // are NOT part of the prompt size.
+  const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite
+  if (promptTokens > 0) {
+    state.contextSize = promptTokens
     setContextSize(state.contextSize)
   }
   const rate = typeof timing.tokensPerSecond === "number" ? ` ${timing.tokensPerSecond.toFixed(1)} tok/s` : ""

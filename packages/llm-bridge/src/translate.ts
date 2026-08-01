@@ -223,6 +223,32 @@ export function oaiSseChunk(
   return `data: ${JSON.stringify(chunk)}\n\n`
 }
 
+/**
+ * Final SSE usage chunk, emitted when the caller set stream_options.include_usage.
+ * Per the OpenAI streaming spec this is a terminal chunk with an empty choices
+ * array carrying the usage totals. Without it, streaming clients see zero tokens
+ * (the per-turn `+0 total=0` bug) because the token counts only exist here.
+ */
+export function oaiSseUsageChunk(
+  model: string,
+  usage: {
+    prompt_tokens: number
+    completion_tokens: number
+    total_tokens: number
+    prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number }
+  },
+): string {
+  const chunk = {
+    id: `chatcmpl-${Date.now()}`,
+    object: "chat.completion.chunk" as const,
+    created: Math.floor(Date.now() / 1000),
+    model,
+    choices: [] as unknown[],
+    usage,
+  }
+  return `data: ${JSON.stringify(chunk)}\n\n`
+}
+
 export function oaiCompletionResponse(
   model: string,
   content: string,

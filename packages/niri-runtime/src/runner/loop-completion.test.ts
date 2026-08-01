@@ -3,6 +3,7 @@ import test from "node:test"
 import type { AssistantMessage } from "../llm"
 import { assistantContentText } from "./loop-content"
 import { messageStringContent } from "./messages"
+import { applyUsage } from "./loop-completion"
 
 // Pi AssistantMessage is the native format now — no conversion needed.
 // These tests verify helper functions that work on pi types directly.
@@ -52,4 +53,26 @@ test("messageStringContent returns text content for toolResult messages", () => 
   }
 
   assert.equal(messageStringContent(msg), "hello from tool")
+})
+
+test("applyUsage counts cacheWrite tokens toward contextSize (regression)", () => {
+  // Regression: contextSize was `input + cacheRead`, omitting cacheWrite. On any
+  // turn that created/extended the prompt cache, the bulk of the prompt lands in
+  // cache_creation (cacheWrite), so contextSize undercounted badly. It must be
+  // input + cacheRead + cacheWrite (the full prompt-side token count).
+  const state = {
+    tokenCount: 0,
+    contextSize: 0,
+    conversation: [],
+  } as unknown as import("./types").LoopState
+  const usage = {
+    input: 1000,
+    output: 200,
+    cacheRead: 5000,
+    cacheWrite: 40000,
+    totalTokens: 46200,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+  }
+  applyUsage(state, usage)
+  assert.equal(state.contextSize, 46000, "contextSize must be input + cacheRead + cacheWrite (not output)")
 })
