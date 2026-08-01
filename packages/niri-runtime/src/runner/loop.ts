@@ -278,9 +278,13 @@ async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn"
   if (state.contextSize >= modelState.compactTriggerTokens) {
     // At/over the cliff: run the strategy's full burn.
     if (strategy === "snapcompact") {
-      // Pure image-archive has no LLM summary; the renderer is not yet vendored,
-      // so degrade to context-full rather than silently skipping the burn.
-      console.warn("[context] snapcompact strategy requested but frame renderer is not vendored; using context-full")
+      // The bitmap renderer is available now (via deep_archive frames in the
+      // companion path), but the *pure* image-only strategy - drop the middle
+      // with no LLM summary at all - is a distinct pipeline that isn't wired
+      // yet, so degrade to context-full rather than silently skipping the burn.
+      // To get real frames today, use compaction_strategy="companion" with
+      // deep_archive=true on a vision model.
+      console.warn("[context] standalone snapcompact strategy not wired yet; using context-full (companion+deep_archive gives frames)")
       return applyLLMCompaction(state, phase, "context-full")
     }
     return applyLLMCompaction(state, phase, strategy)

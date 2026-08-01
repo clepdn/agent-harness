@@ -24,6 +24,7 @@
  * invoked by the loop; this module wraps it with layers 1 and 3.
  */
 
+import { readFileSync } from "node:fs"
 import { writeMemory } from "../agent-state-tools"
 import type { Message } from "../types"
 import {
@@ -143,18 +144,167 @@ export class OpenAiRemoteArchive implements DeepArchiveBackend {
   }
 }
 
+// ── snapcompact native renderer loader ──────────────────────────────────────
+// @oh-my-pi/pi-natives ships the rasterizer as a native (napi) addon whose
+// binary comes from a platform-specific optionalDependency. Load it lazily and
+// fail closed: if the module or its native binary is absent (e.g. the optional
+// dep didn't install for this platform), the backend degrades to the text
+// appendix instead of crashing the runtime at import time.
+
+type RenderSnapcompactPng = (
+  text: string,
+  options: { size: number; font?: string; variant?: string; lineRepeat?: number; columns?: number },
+) => Promise<string>
+
+let snapcompactRendererCache: RenderSnapcompactPng | null | undefined
+let snapcompactLoadWarned = false
+
+/**
+ * Load the native renderer, tolerating @oh-my-pi/pi-natives' Bun-targeted
+ * loader. Its index.js runs `loadNative()` at import time using
+ * `import.meta.dir`, which is a Bun-ism and `undefined` on Node — so a plain
+ * `import("@oh-my-pi/pi-natives")` throws under Node. We try that first (it
+ * works on Bun / future Node-compat releases), then fall back to requiring the
+ * prebuilt platform addon directly, picking baseline vs modern by AVX2 support
+ * exactly like the package's own loader does. Fails closed to null.
+ */
+async function loadSnapcompactRenderer(): Promise<RenderSnapcompactPng | null> {
+  if (snapcompactRendererCache !== undefined) return snapcompactRendererCache
+
+  // Path 1: the package's normal entry (works on Bun).
+  try {
+    const mod = (await import("@oh-my-pi/pi-natives")) as {
+      renderSnapcompactPng?: RenderSnapcompactPng
+    }
+    if (typeof mod.renderSnapcompactPng === "function") {
+      snapcompactRendererCache = mod.renderSnapcompactPng
+      return snapcompactRendererCache
+    }
+  } catch {
+    // fall through to the direct-addon path
+  }
+
+  // Path 2: require the prebuilt platform binary directly, bypassing the
+  // Bun-only loader. Only wired for linux-x64 (this container); other platforms
+  // fall through to null and the text appendix.
+  try {
+    if (process.platform === "linux" && process.arch === "x64") {
+      const { createRequire } = await import("node:module")
+      const req = createRequire(import.meta.url)
+      const variant = detectAvx2() ? "modern" : "baseline"
+      const order =
+        variant === "modern"
+          ? ["pi_natives.linux-x64-modern.node", "pi_natives.linux-x64-baseline.node"]
+          : ["pi_natives.linux-x64-baseline.node"]
+      let addon: { renderSnapcompactPng?: RenderSnapcompactPng } | null = null
+      for (const file of order) {
+        try {
+          addon = req(`@oh-my-pi/pi-natives-linux-x64/${file}`)
+          break
+        } catch {
+          // try the next variant
+        }
+      }
+      if (addon && typeof addon.renderSnapcompactPng === "function") {
+        snapcompactRendererCache = addon.renderSnapcompactPng
+        return snapcompactRendererCache
+      }
+    }
+    throw new Error("no compatible prebuilt addon for this platform")
+  } catch (err) {
+    snapcompactRendererCache = null
+    if (!snapcompactLoadWarned) {
+      snapcompactLoadWarned = true
+      console.warn(
+        "[compaction] @oh-my-pi/pi-natives snapcompact renderer unavailable " +
+          `(${(err as Error)?.message ?? err}); deep archive falls back to text appendix.`,
+      )
+    }
+  }
+  return snapcompactRendererCache
+}
+
+/** Detect AVX2 support to pick the modern vs baseline prebuilt binary. */
+function detectAvx2(): boolean {
+  try {
+    if (process.platform === "linux") {
+      const cpuinfo = readFileSync("/proc/cpuinfo", "utf8")
+      return /\bavx2\b/i.test(cpuinfo)
+    }
+  } catch {
+    // conservative default below
+  }
+  return false
+}
+
+/** Frame width in px; height auto-hugs the rows the text uses. */
+const SNAPCOMPACT_FRAME_SIZE = 1024
+
 /**
  * The snapcompact bitmap backend — pixel-font frames a vision model reads back.
- * Not yet available: it depends on oh-my-pi's native rasterizer
- * (renderSnapcompactPng) which has not been vendored into this tree.
+ * Renders the discarded transcript into a compact indexed-PNG frame via
+ * @oh-my-pi/pi-natives' renderSnapcompactPng and appends it as an image message
+ * the vision model can consult. If the native renderer isn't available it
+ * declines (returns null) so the caller falls back to the next backend.
  */
 export class SnapcompactFramesArchive implements DeepArchiveBackend {
   readonly name = "snapcompact-frames"
-  async archive(_discarded: Message[]): Promise<DeepArchiveResult | null> {
-    console.warn(
-      "[compaction] snapcompact-frames backend requested but the native renderer is not vendored; " +
-        "falling back to no deep archive. Vendor @oh-my-pi/pi-natives to enable bitmap frames.",
-    )
+  async archive(discarded: Message[]): Promise<DeepArchiveResult | null> {
+    if (discarded.length === 0) return null
+    const render = await loadSnapcompactRenderer()
+    if (!render) return null
+
+    const { text, truncated } = serializeDiscarded(discarded, DEEP_ARCHIVE_MAX_CHARS)
+    if (!text) return null
+
+    let pngBase64: string
+    try {
+      // renderSnapcompactPng returns the PNG as a base64 string.
+      pngBase64 = await render(text, { size: SNAPCOMPACT_FRAME_SIZE, font: "5x8", variant: "sent" })
+    } catch (err) {
+      console.warn(`[compaction] snapcompact render failed (${(err as Error)?.message ?? err}); declining`)
+      return null
+    }
+    if (!pngBase64) return null
+
+    const note = `snapcompact-frames archive of ${discarded.length} msg(s)` +
+      (truncated > 0 ? ` (${truncated.toLocaleString()} chars elided)` : "")
+    const archiveMessage: Message = {
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text:
+            "[deep archive] A rendered frame of older turns that the summary above compressed. " +
+            "Read it only when an exact detail matters; do not re-narrate it.",
+        },
+        { type: "image", data: pngBase64, mimeType: "image/png" },
+      ],
+      timestamp: Date.now(),
+    }
+    return { note, archiveMessage }
+  }
+}
+
+/**
+ * Tries each backend in order and returns the first that produces a result.
+ * Used to prefer bitmap snapcompact frames on a vision model while keeping the
+ * text appendix as a guaranteed fallback (e.g. if the native renderer is
+ * unavailable or rendering fails).
+ */
+export class FirstAvailableArchive implements DeepArchiveBackend {
+  readonly name: string
+  constructor(private readonly backends: DeepArchiveBackend[]) {
+    this.name = `first-available[${backends.map((b) => b.name).join(",")}]`
+  }
+  async archive(discarded: Message[]): Promise<DeepArchiveResult | null> {
+    for (const backend of this.backends) {
+      const result = await backend.archive(discarded).catch((err) => {
+        console.warn(`[compaction] deep archive (${backend.name}) errored: ${(err as Error)?.message ?? err}`)
+        return null
+      })
+      if (result) return result
+    }
     return null
   }
 }
@@ -165,6 +315,12 @@ export function resolveDeepArchiveBackend(provider: string | undefined): DeepArc
   if (!modelState.deepArchive) return new NoopArchive()
   const p = (provider ?? "").toLowerCase()
   if (p.includes("openai") && REMOTE_COMPACTION_ENDPOINT) return new OpenAiRemoteArchive()
+  // On a vision-capable model, prefer bitmap snapcompact frames (a rendered
+  // frame is denser than text and the model can read it back), falling back to
+  // the text appendix when the native renderer is unavailable or declines.
+  if (modelState.primaryVision) {
+    return new FirstAvailableArchive([new SnapcompactFramesArchive(), new TextAppendixArchive()])
+  }
   return new TextAppendixArchive()
 }
 
