@@ -146,10 +146,18 @@ export class OpenAiRemoteArchive implements DeepArchiveBackend {
 
 // ── snapcompact native renderer loader ──────────────────────────────────────
 // @oh-my-pi/pi-natives ships the rasterizer as a native (napi) addon whose
-// binary comes from a platform-specific optionalDependency. Load it lazily and
-// fail closed: if the module or its native binary is absent (e.g. the optional
-// dep didn't install for this platform), the backend degrades to the text
-// appendix instead of crashing the runtime at import time.
+// binary comes from a platform-specific optionalDependency.
+//
+// Failure policy (deliberate — see the design discussion):
+//   • LOAD failure is a startup concern. If snapcompact frames are the
+//     configured deep-archive path, initSnapcompactRenderer() is called during
+//     boot and THROWS if the addon won't load — the service fails to start,
+//     loud, at the cheap time. We never limp along silently masking a broken
+//     setup by pretending the text appendix was intended.
+//   • Per-RENDER failure is a runtime, hot-path concern. A single
+//     renderSnapcompactPng() throwing mid-compaction degrades that one burn to
+//     null (the summary already ran; the frame is gravy). Crashing a live
+//     session over one bad frame would be backwards.
 
 type RenderSnapcompactPng = (
   text: string,
@@ -157,18 +165,20 @@ type RenderSnapcompactPng = (
 ) => Promise<string>
 
 let snapcompactRendererCache: RenderSnapcompactPng | null | undefined
-let snapcompactLoadWarned = false
 
 /**
- * Load the native renderer, tolerating @oh-my-pi/pi-natives' Bun-targeted
+ * Resolve the native renderer, tolerating @oh-my-pi/pi-natives' Bun-targeted
  * loader. Its index.js runs `loadNative()` at import time using
  * `import.meta.dir`, which is a Bun-ism and `undefined` on Node — so a plain
  * `import("@oh-my-pi/pi-natives")` throws under Node. We try that first (it
  * works on Bun / future Node-compat releases), then fall back to requiring the
  * prebuilt platform addon directly, picking baseline vs modern by AVX2 support
- * exactly like the package's own loader does. Fails closed to null.
+ * exactly like the package's own loader does.
+ *
+ * Returns the render fn, or null if it can't be loaded. Callers decide whether
+ * null is fatal (startup) or tolerable (per-render). The result is cached.
  */
-async function loadSnapcompactRenderer(): Promise<RenderSnapcompactPng | null> {
+async function resolveSnapcompactRenderer(): Promise<RenderSnapcompactPng | null> {
   if (snapcompactRendererCache !== undefined) return snapcompactRendererCache
 
   // Path 1: the package's normal entry (works on Bun).
@@ -185,43 +195,49 @@ async function loadSnapcompactRenderer(): Promise<RenderSnapcompactPng | null> {
   }
 
   // Path 2: require the prebuilt platform binary directly, bypassing the
-  // Bun-only loader. Only wired for linux-x64 (this container); other platforms
-  // fall through to null and the text appendix.
-  try {
-    if (process.platform === "linux" && process.arch === "x64") {
-      const { createRequire } = await import("node:module")
-      const req = createRequire(import.meta.url)
-      const variant = detectAvx2() ? "modern" : "baseline"
-      const order =
-        variant === "modern"
-          ? ["pi_natives.linux-x64-modern.node", "pi_natives.linux-x64-baseline.node"]
-          : ["pi_natives.linux-x64-baseline.node"]
-      let addon: { renderSnapcompactPng?: RenderSnapcompactPng } | null = null
-      for (const file of order) {
-        try {
-          addon = req(`@oh-my-pi/pi-natives-linux-x64/${file}`)
-          break
-        } catch {
-          // try the next variant
+  // Bun-only loader. Only wired for linux-x64 (this container).
+  if (process.platform === "linux" && process.arch === "x64") {
+    const { createRequire } = await import("node:module")
+    const req = createRequire(import.meta.url)
+    const variant = detectAvx2() ? "modern" : "baseline"
+    const order =
+      variant === "modern"
+        ? ["pi_natives.linux-x64-modern.node", "pi_natives.linux-x64-baseline.node"]
+        : ["pi_natives.linux-x64-baseline.node"]
+    for (const file of order) {
+      try {
+        const addon = req(`@oh-my-pi/pi-natives-linux-x64/${file}`) as {
+          renderSnapcompactPng?: RenderSnapcompactPng
         }
+        if (typeof addon.renderSnapcompactPng === "function") {
+          snapcompactRendererCache = addon.renderSnapcompactPng
+          return snapcompactRendererCache
+        }
+      } catch {
+        // try the next variant
       }
-      if (addon && typeof addon.renderSnapcompactPng === "function") {
-        snapcompactRendererCache = addon.renderSnapcompactPng
-        return snapcompactRendererCache
-      }
-    }
-    throw new Error("no compatible prebuilt addon for this platform")
-  } catch (err) {
-    snapcompactRendererCache = null
-    if (!snapcompactLoadWarned) {
-      snapcompactLoadWarned = true
-      console.warn(
-        "[compaction] @oh-my-pi/pi-natives snapcompact renderer unavailable " +
-          `(${(err as Error)?.message ?? err}); deep archive falls back to text appendix.`,
-      )
     }
   }
+
+  snapcompactRendererCache = null
   return snapcompactRendererCache
+}
+
+/**
+ * Eager startup init. Call during boot when snapcompact frames are the intended
+ * deep-archive path. THROWS if the native renderer can't be loaded, so a broken
+ * setup fails the service at startup rather than silently degrading later.
+ */
+export async function initSnapcompactRenderer(): Promise<void> {
+  const render = await resolveSnapcompactRenderer()
+  if (!render) {
+    throw new Error(
+      "snapcompact frames are enabled but the @oh-my-pi/pi-natives native renderer " +
+        "could not be loaded (missing/incompatible prebuilt addon for " +
+        `${process.platform}-${process.arch}). Fix the dependency or disable frame archiving.`,
+    )
+  }
+  console.log("[compaction] snapcompact native renderer loaded")
 }
 
 /** Detect AVX2 support to pick the modern vs baseline prebuilt binary. */
@@ -251,7 +267,10 @@ export class SnapcompactFramesArchive implements DeepArchiveBackend {
   readonly name = "snapcompact-frames"
   async archive(discarded: Message[]): Promise<DeepArchiveResult | null> {
     if (discarded.length === 0) return null
-    const render = await loadSnapcompactRenderer()
+    // Per-render path: tolerate a missing renderer (degrade to null → text
+    // appendix). A genuinely broken setup would already have crashed at startup
+    // via initSnapcompactRenderer(); this null here means "not the frames path".
+    const render = await resolveSnapcompactRenderer()
     if (!render) return null
 
     const { text, truncated } = serializeDiscarded(discarded, DEEP_ARCHIVE_MAX_CHARS)
@@ -322,6 +341,20 @@ export function resolveDeepArchiveBackend(provider: string | undefined): DeepArc
     return new FirstAvailableArchive([new SnapcompactFramesArchive(), new TextAppendixArchive()])
   }
   return new TextAppendixArchive()
+}
+
+/**
+ * Whether snapcompact bitmap frames are the intended deep-archive path for the
+ * current config — i.e. resolveDeepArchiveBackend would build a frames backend.
+ * Mirrors that function's branching so startup validation and runtime routing
+ * never drift. When true, the boot path calls initSnapcompactRenderer() and a
+ * load failure crashes startup.
+ */
+export function snapcompactFramesIntended(provider: string | undefined): boolean {
+  if (!modelState.deepArchive) return false
+  const p = (provider ?? "").toLowerCase()
+  if (p.includes("openai") && REMOTE_COMPACTION_ENDPOINT) return false
+  return modelState.primaryVision
 }
 
 /** Disabled deep archive. */

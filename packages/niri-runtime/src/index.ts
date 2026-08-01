@@ -4,6 +4,8 @@ import { REPO_ROOT } from "./agent-config"
 import { createServer } from "./server"
 import { initDb } from "./db"
 import { initMetricsDb } from "./metrics"
+import { initSnapcompactRenderer, snapcompactFramesIntended } from "./runner/compaction-companion"
+import { modelState } from "./runner/model-state"
 import { shutdown, activate } from "./runner/index"
 import { initJobManager } from "./runner/jobs"
 import { startDiscordGateway } from "./discord/gateway"
@@ -54,6 +56,17 @@ async function main() {
   await ensureSoulFilePlacement()
   initDb()
   initMetricsDb()
+
+  // If snapcompact bitmap frames are the configured deep-archive path, load the
+  // native renderer eagerly now so a broken setup fails startup — loud, cheap —
+  // instead of silently degrading to the text appendix later. Per-render
+  // failures at runtime still degrade gracefully; only load failure is fatal.
+  {
+    const activeModel = modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel
+    if (snapcompactFramesIntended(activeModel?.provider)) {
+      await initSnapcompactRenderer()
+    }
+  }
 
   // Wire background jobs (e.g. subagents) to wake/steer the runner on completion.
   // Without this, deliver stays null and completed-job notifications are silently dropped.

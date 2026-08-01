@@ -6,6 +6,7 @@ import {
   SnapcompactFramesArchive,
   TextAppendixArchive,
   resolveDeepArchiveBackend,
+  initSnapcompactRenderer,
 } from "./compaction-companion"
 
 function userMsg(content: string): Message {
@@ -69,6 +70,18 @@ test("snapcompact-frames renders a PNG image message when the native renderer is
   const buf = Buffer.from(img!.data ?? "", "base64")
   // PNG magic number.
   assert.equal(buf.subarray(0, 8).toString("hex"), "89504e470d0a1a0a")
+})
+
+test("initSnapcompactRenderer resolves when the native renderer is available (else throws)", async () => {
+  // @oh-my-pi/pi-natives is a dependency, so in a normal test env the renderer
+  // loads and init resolves without throwing. On a platform without a prebuilt
+  // addon it would throw — which is the intended startup-crash behavior.
+  try {
+    await initSnapcompactRenderer()
+  } catch (err) {
+    assert.match(String((err as Error).message), /native renderer could not be loaded/)
+    console.warn("[test] native renderer unavailable in this env; init threw as designed")
+  }
 })
 
 test("first-available archive returns the first backend that produces a result", async () => {
