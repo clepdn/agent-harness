@@ -1,0 +1,24 @@
+{
+  "name": "@niri/tui",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "nano-tui": "src/index.ts"
+  },
+  "scripts": {
+    "prestart": "npm run build --workspace @mira/harness-protocol && npm run build --workspace @mira/harness-core && npm run build --workspace @mira/harness-server && npm run build --workspace @mira/harness-client-node && npm run build --workspace @niri/protocol && npm run build --workspace @niri/chat-client",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@mira/harness-client-node": "*",
+    "@niri/chat-client": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}

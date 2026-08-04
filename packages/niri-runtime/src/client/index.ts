@@ -5,6 +5,7 @@ import { HttpToolClient, type HttpToolClientStatus } from "@mira/harness-server"
 import type { ClientToolName, ClientToolResult, ToolCapability, ToolInvocation, WorkspaceDescriptor } from "@mira/harness-protocol"
 import { AGENT_ID, REPO_ROOT } from "../agent-config"
 import { config } from "../config"
+import { SwitchableToolClient } from "./switchable"
 
 export type ConfiguredToolClient = ClientToolExecutor & {
   start(): Promise<void>
@@ -79,6 +80,12 @@ class LocalToolClient implements ConfiguredToolClient {
 
 const client = process.env.NIRI_CLIENT?.trim() || "local"
 
-export const clientTools: ConfiguredToolClient = client === "local"
+const baseClient: ConfiguredToolClient = client === "local"
   ? new LocalToolClient(AGENT_ID)
   : new HttpToolClient({ agentId: AGENT_ID, endpoint: client })
+
+// The exported client is switchable: it serves `baseClient` by default but a
+// client running from the operator's own `pwd` can mount its executor at
+// runtime via the /client/connect handshake (see server.ts). This is the
+// direct-connection / pwd-mount feature.
+export const clientTools: SwitchableToolClient = new SwitchableToolClient(AGENT_ID, baseClient)

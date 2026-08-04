@@ -36,7 +36,7 @@
     "build:packages": "npm run build:harness && npm run build:niri-toml && npm run build:niri-protocol && npm run build:chat-client && npm run build --workspace @niri/llm-bridge",
     "build": "npm run build:packages && npm run build:web",
     "pretypecheck": "npm run build:packages",
-    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspace @mira/harness-protocol && npm run typecheck --workspace @mira/harness-core && npm run typecheck --workspace @mira/harness-server && npm run typecheck --workspace @mira/harness-client-node && npm run typecheck --workspace @niri/toml && npm run typecheck --workspace @niri/protocol && npm run typecheck --workspace @niri/chat-client && npm run typecheck --workspace @niri/runtime && npm run typecheck --workspace @niri/server && npm run typecheck --workspace @niri/tool-client && npm run typecheck --workspace @niri/web && npm run typecheck --workspace @niri/llm-bridge",
+    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck --workspace @mira/harness-protocol && npm run typecheck --workspace @mira/harness-core && npm run typecheck --workspace @mira/harness-server && npm run typecheck --workspace @mira/harness-client-node && npm run typecheck --workspace @niri/toml && npm run typecheck --workspace @niri/protocol && npm run typecheck --workspace @niri/chat-client && npm run typecheck --workspace @niri/runtime && npm run typecheck --workspace @niri/server && npm run typecheck --workspace @niri/tool-client && npm run typecheck --workspace @niri/tui && npm run typecheck --workspace @niri/web && npm run typecheck --workspace @niri/llm-bridge",
     "postinstall": "node packages/harness-client-node/postinstall.mjs",
     "build:niri-toml": "npm run build --workspace @niri/toml"
   },

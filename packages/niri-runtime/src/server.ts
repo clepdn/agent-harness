@@ -18,6 +18,7 @@ import { parseChannelIds } from "./discord/parse"
 import { queryChannelMessages, queryChannels } from "./discord/db"
 import type { MetricListType } from "./metrics"
 import type { UserMessage } from "./types"
+import type { ToolCapability, WorkspaceDescriptor } from "@mira/harness-protocol"
 
 const DISCORD_BATCH_INTERVAL_MS = Math.max(1_000, config.discord.batch_interval_ms)
 const DISCORD_BATCH_MAX_MESSAGES = Math.max(5, Math.min(200, config.discord.batch_max_messages))
@@ -148,6 +149,50 @@ export function createServer(options: { requestRestart?: (reason?: string) => vo
   }))
 
   app.get("/awp/client/status", async () => clientTools.status())
+
+  // Handshake: a client running from the operator's own working directory
+  // connects out to this control plane and mounts its executor (pointed at its
+  // pwd) as the active tool target. Tools then run directly against the
+  // operator's files with no upload/abstraction step. Reverted on disconnect.
+  app.post("/client/connect", async (req, reply) => {
+    const body = (req.body ?? {}) as {
+      endpoint?: unknown
+      workspace?: unknown
+      capabilities?: unknown
+    }
+    if (typeof body.endpoint !== "string" || !body.endpoint.trim()) {
+      return reply.code(400).send({ error: "endpoint is required" })
+    }
+    const capabilities = Array.isArray(body.capabilities)
+      ? body.capabilities.filter((c): c is ToolCapability => typeof c === "string")
+      : undefined
+    const workspace =
+      body.workspace && typeof body.workspace === "object"
+        ? (body.workspace as WorkspaceDescriptor)
+        : undefined
+    try {
+      const info = await clientTools.connect({
+        endpoint: body.endpoint.trim(),
+        ...(workspace ? { workspace } : {}),
+        ...(capabilities ? { capabilities } : {}),
+      })
+      return reply.send({
+        ok: true,
+        agentId: AGENT_ID,
+        client: info,
+        status: clientTools.status(),
+      })
+    } catch (error) {
+      return reply.code(502).send({
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  })
+
+  app.post("/client/disconnect", async (_req, reply) => {
+    const info = await clientTools.disconnect()
+    return reply.send({ ok: true, agentId: AGENT_ID, client: info })
+  })
 
   app.post("/awp/events", async (req, reply) => {
     const body =
