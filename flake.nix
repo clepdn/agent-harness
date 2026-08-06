@@ -154,6 +154,12 @@
 			default = "/home/nano";
 		    };
 
+		    stateDir = lib.mkOption {
+			type    = lib.types.str;
+			default = "/var/lib/nano";
+			description = "Durable state root for the control plane (memories, soul, nano.db, control). Used as the agent home when hardened.";
+		    };
+
 		    settings = lib.mkOption {
 			type    = settingsType;
 			default = {};
@@ -257,75 +263,121 @@
 		    };
 		};
 
-		config = lib.mkIf cfg.enable {
-		    environment.systemPackages = with pkgs; [
-			xdotool
-			imagemagick
-		    ];
+config = lib.mkIf cfg.enable (
+    let controlPlane = cfg.agents != {}; in
+    lib.mkMerge [
 
-		    users = {
-			users.${cfg.user} = {
-			    isNormalUser = true;
-			    group        = cfg.group;
-			    extraGroups  = [ "wheel" ];
-			};
-			groups.${cfg.group} = {};
-		    };
+    # ── Standalone worker / executor-style deploy (permissive) ──────────
+    # Keeps the historical permission model: a login user with sudo, a
+    # home dir, and the desktop tools. This is the shape the EXECUTOR
+    # reuses (it runs shell/file/computer tools).
+    (lib.mkIf (!controlPlane) {
+environment.systemPackages = with pkgs; [ xdotool imagemagick ];
+users = {
+    users.${cfg.user} = {
+isNormalUser = true;
+group        = cfg.group;
+extraGroups  = [ "wheel" ];
+    };
+    groups.${cfg.group} = {};
+};
+security.sudo = { enable = true; wheelNeedsPassword = false; };
+    })
 
-		    security.sudo = {
-			enable             = true;
-			wheelNeedsPassword = false;
-		    };
+    # ── Control plane (hardened, no tools) ──────────────────────────────
+    # The brain: LLM loop / session / memory. Runs NO tools, so it is
+    # sandboxed hard. Dedicated system user, no sudo/wheel, state confined
+    # to StateDirectory (/var/lib/nano by default).
+    (lib.mkIf controlPlane {
+users = {
+    users.${cfg.user} = {
+isSystemUser = true;
+group        = cfg.group;
+home         = cfg.stateDir;
+    };
+    groups.${cfg.group} = {};
+};
+    })
 
-		    systemd.services.nano =
-			let
-			    configFlag  = lib.optionalString (cfg.configFile  != null) " --config ${lib.escapeShellArg cfg.configFile}";
-			    secretsFlag = lib.optionalString (cfg.secretsFile != null) " --secrets ${lib.escapeShellArg cfg.secretsFile}";
+    # ── Common service definition ───────────────────────────────────────
+    {
+    systemd.services.nano =
+let
+    configFlag  = lib.optionalString (cfg.configFile  != null) " --config ${lib.escapeShellArg cfg.configFile}";
+    secretsFlag = lib.optionalString (cfg.secretsFile != null) " --secrets ${lib.escapeShellArg cfg.secretsFile}";
 
-			    # Every agent inherits the shared config and secrets; anything
-			    # the agent declares itself wins. Homes must land outside the
-			    # read-only store, so they default under the service home.
-			    agentFile = id: agent: settingsFormat.generate "nano-agent-${id}.toml" ({
-				home      = "${cfg.homeDir}/agents/${id}";
-				workspace = cfg.homeDir;
-			    }
-			    // lib.optionalAttrs (cfg.configFile  != null) { config  = [ cfg.configFile ]; }
-			    // lib.optionalAttrs (cfg.secretsFile != null) { secrets = cfg.secretsFile; }
-			    // agent);
+    # Control-plane agents are homed under the state dir; standalone
+    # workers keep the login home.
+    agentHome = if controlPlane then cfg.stateDir else cfg.homeDir;
 
-			    agentDirectory = pkgs.linkFarm "nano-agents" (lib.mapAttrsToList (id: agent: {
-				name = "${id}.toml";
-				path = agentFile id agent;
-			    }) cfg.agents);
+    agentFile = id: agent: settingsFormat.generate "nano-agent-${id}.toml" ({
+home      = "${agentHome}/agents/${id}";
+workspace = agentHome;
+    }
+    // lib.optionalAttrs (cfg.configFile  != null) { config  = [ cfg.configFile ]; }
+    // lib.optionalAttrs (cfg.secretsFile != null) { secrets = cfg.secretsFile; }
+    // agent);
 
-			    controlPlane = cfg.agents != {};
-			    command =
-				if controlPlane
-				then "${cfg.package}/bin/nano-server --port ${toString cfg.controlPort} --agents ${agentDirectory}"
-				else "${cfg.package}/bin/nano${configFlag}${secretsFlag}";
-			in {
-			    description = if controlPlane then "Nano control plane" else "Nano harness runner";
-			    after    = [ "multi-user.target" ];
-			    wants    = [ "multi-user.target" ];
-			    wantedBy = [ "multi-user.target" ];
+    agentDirectory = pkgs.linkFarm "nano-agents" (lib.mapAttrsToList (id: agent: {
+name = "${id}.toml";
+path = agentFile id agent;
+    }) cfg.agents);
 
-			    serviceConfig = {
-				User             = cfg.user;
-				Group            = cfg.group;
-				WorkingDirectory = cfg.homeDir;
-				ExecStart        = "${pkgs.bash}/bin/bash -lc '${command}'";
-				Environment      = [
-				    "NANO_MANAGED_WORKER=true"
-				    "NANO_HOME=${cfg.homeDir}"
-				    "NANO_CONTROL_HOME=${cfg.homeDir}/control"
-				]
-				++ lib.optional (cfg.executorTokenFile != null)
-				    "NANO_EXECUTOR_TOKEN_FILE=${cfg.executorTokenFile}";
-				Restart          = "always";
-				RestartSec       = "10s";
-			    };
-			};
-		};
+    command =
+if controlPlane
+then "${cfg.package}/bin/nano-server --port ${toString cfg.controlPort} --agents ${agentDirectory}"
+else "${cfg.package}/bin/nano${configFlag}${secretsFlag}";
+
+    workDir = if controlPlane then cfg.stateDir else cfg.homeDir;
+
+    # Hardening applied only to the control plane (it runs no tools).
+    hardening = lib.optionalAttrs controlPlane {
+DynamicUser           = false;
+StateDirectory        = "nano";
+StateDirectoryMode    = "0700";
+NoNewPrivileges       = true;
+ProtectSystem         = "strict";
+ProtectHome           = true;
+ReadWritePaths        = [ cfg.stateDir ];
+PrivateTmp            = true;
+PrivateDevices        = true;
+ProtectKernelTunables = true;
+ProtectKernelModules  = true;
+ProtectControlGroups  = true;
+ProtectClock          = true;
+ProtectHostname       = true;
+RestrictSUIDSGID      = true;
+RestrictRealtime      = true;
+LockPersonality       = true;
+RemoveIPC             = true;
+CapabilityBoundingSet = "";
+SystemCallArchitectures = "native";
+RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+    };
+in {
+    description = if controlPlane then "Nano control plane" else "Nano harness runner";
+    after    = [ "multi-user.target" ];
+    wants    = [ "multi-user.target" ];
+    wantedBy = [ "multi-user.target" ];
+
+    serviceConfig = {
+User             = cfg.user;
+Group            = cfg.group;
+WorkingDirectory = workDir;
+ExecStart        = "${pkgs.bash}/bin/bash -lc '${command}'";
+Environment      = [
+    "NANO_MANAGED_WORKER=true"
+    "NANO_HOME=${agentHome}"
+    "NANO_CONTROL_HOME=${agentHome}/control"
+]
+++ lib.optional (cfg.executorTokenFile != null)
+    "NANO_EXECUTOR_TOKEN_FILE=${cfg.executorTokenFile}";
+Restart          = "always";
+RestartSec       = "10s";
+    } // hardening;
+};
+    }
+    ]);
 	    };
 
 nixosModules.nano-executor = { config, pkgs, lib, ... }:
