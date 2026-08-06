@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import { randomUUID } from "node:crypto"
 import { NodeToolHost } from "@mira/harness-client-node"
 import type { ClientToolExecutor } from "@mira/harness-core"
@@ -80,9 +81,25 @@ class LocalToolClient implements ConfiguredToolClient {
 
 const client = process.env.NIRI_CLIENT?.trim() || "local"
 
+// Shared bearer token for the remote executor. Prefer a file path (agenix
+// secret) via NIRI_EXECUTOR_TOKEN_FILE, fall back to the raw NIRI_EXECUTOR_TOKEN.
+function resolveExecutorToken(): string | undefined {
+  const file = process.env.NIRI_EXECUTOR_TOKEN_FILE?.trim()
+  if (file) {
+    try {
+      return readFileSync(file, "utf8").trim() || undefined
+    } catch (error) {
+      console.error(`[client] failed to read NIRI_EXECUTOR_TOKEN_FILE (${file}):`, error)
+      return undefined
+    }
+  }
+  return process.env.NIRI_EXECUTOR_TOKEN?.trim() || undefined
+}
+
+const executorToken = resolveExecutorToken()
 const baseClient: ConfiguredToolClient = client === "local"
   ? new LocalToolClient(AGENT_ID)
-  : new HttpToolClient({ agentId: AGENT_ID, endpoint: client })
+  : new HttpToolClient({ agentId: AGENT_ID, endpoint: client, ...(executorToken ? { authToken: executorToken } : {}) })
 
 // The exported client is switchable: it serves `baseClient` by default but a
 // client running from the operator's own `pwd` can mount its executor at

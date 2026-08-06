@@ -49,3 +49,27 @@ test("client serves health and tools without authentication", async () => {
     await server.stop()
   }
 })
+
+test("client with authToken rejects requests missing or mismatching the bearer token", async () => {
+  const server = new ToolClientHttpServer({ host: new FakeHost(), listenHost: "127.0.0.1", port: 0, authToken: "s3cret" })
+  const address = await server.start()
+  try {
+    // no header
+    const noHeader = await fetch(`${address.url}/health`)
+    assert.equal(noHeader.status, 401)
+
+    // wrong scheme
+    const basic = await fetch(`${address.url}/health`, { headers: { authorization: "Basic s3cret" } })
+    assert.equal(basic.status, 401)
+
+    // wrong token
+    const wrong = await fetch(`${address.url}/health`, { headers: { authorization: "Bearer nope" } })
+    assert.equal(wrong.status, 401)
+
+    // correct token
+    const ok = await fetch(`${address.url}/health`, { headers: { authorization: "Bearer s3cret" } })
+    assert.equal(ok.status, 200)
+  } finally {
+    await server.stop()
+  }
+})

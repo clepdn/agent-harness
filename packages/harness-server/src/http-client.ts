@@ -16,6 +16,8 @@ export type HttpToolClientOptions = {
   capabilities?: Iterable<ToolCapability>
   workspace?: WorkspaceDescriptor | null
   fetchImpl?: typeof fetch
+  /** Shared bearer token sent as `Authorization: Bearer <token>` on every request. */
+  authToken?: string
 }
 
 export type HttpToolClientStatus = {
@@ -56,6 +58,7 @@ export class HttpToolClient implements ClientToolExecutor {
   private readonly agentId: string
   private readonly endpoint: string
   private readonly fetchImpl: typeof fetch
+  private readonly authHeaders: Record<string, string>
   private capabilities: ToolCapability[]
   private workspace: WorkspaceDescriptor | null
   private connected = false
@@ -67,13 +70,15 @@ export class HttpToolClient implements ClientToolExecutor {
     if (!this.agentId) throw new Error("agent id is required")
     this.endpoint = normalizeEndpoint(options.endpoint)
     this.fetchImpl = options.fetchImpl ?? fetch
+    const token = options.authToken?.trim()
+    this.authHeaders = token ? { authorization: `Bearer ${token}` } : {}
     this.capabilities = [...new Set(options.capabilities ?? CLIENT_TOOL_NAMES)]
     this.workspace = options.workspace ? { ...options.workspace } : null
   }
 
   async start(): Promise<void> {
     try {
-      const response = await this.fetchImpl(`${this.endpoint}/health`, { signal: AbortSignal.timeout(2_000) })
+      const response = await this.fetchImpl(`${this.endpoint}/health`, { headers: this.authHeaders, signal: AbortSignal.timeout(2_000) })
       if (!response.ok) return
       const body = await response.json() as { capabilities?: unknown; workspace?: unknown }
       if (Array.isArray(body.capabilities)) {
@@ -140,7 +145,7 @@ export class HttpToolClient implements ClientToolExecutor {
     try {
       const response = await this.fetchImpl(`${this.endpoint}/tools/${encodeURIComponent(input.tool)}`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", ...this.authHeaders },
         body: JSON.stringify(invocation),
         signal: AbortSignal.timeout(timeoutMs + 1_000),
       })

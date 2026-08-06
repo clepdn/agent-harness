@@ -59,6 +59,12 @@
 			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
 			    --add-flags "$out/lib/coral/apps/server/src/index.ts"
 
+			# Executor — the tool-execution client. Runs shell/file/image
+			# tools over an authenticated HTTP boundary. No LLM, no session.
+			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/coral-executor \
+			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
+			    --add-flags "$out/lib/coral/apps/client/src/index.ts"
+
 			# Bridge — same source, different entry point
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/llm-bridge \
 			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
@@ -237,6 +243,18 @@
 			    they declare a `port` of their own.
 			'';
 		    };
+
+		    executorTokenFile = lib.mkOption {
+			type    = lib.types.nullOr lib.types.str;
+			default = null;
+			description = ''
+			    Path to a file holding the shared bearer token used to
+			    authenticate to a remote executor (services.coral-executor).
+			    Exposed to workers as NIRI_EXECUTOR_TOKEN_FILE; the worker
+			    sends it as `Authorization: Bearer <token>` when its agent
+			    `client` points at an http(s):// executor. Null = local-only.
+			'';
+		    };
 		};
 
 		config = lib.mkIf cfg.enable {
@@ -300,13 +318,145 @@
 				    "NIRI_MANAGED_WORKER=true"
 				    "NIRI_HOME=${cfg.homeDir}"
 				    "NIRI_CONTROL_HOME=${cfg.homeDir}/control"
-				];
+				]
+				++ lib.optional (cfg.executorTokenFile != null)
+				    "NIRI_EXECUTOR_TOKEN_FILE=${cfg.executorTokenFile}";
 				Restart          = "always";
 				RestartSec       = "10s";
 			    };
 			};
 		};
 	    };
+
+nixosModules.coral-executor = { config, pkgs, lib, ... }:
+    let
+cfg = config.services.coral-executor;
+    in {
+options.services.coral-executor = {
+    enable = lib.mkEnableOption "coral executor (remote tool-execution client)";
+
+    package = lib.mkOption {
+type        = lib.types.package;
+default     = self.packages.${pkgs.system}.coral;
+defaultText = lib.literalExpression "self.packages.\${pkgs.system}.coral";
+description = "The coral package providing the coral-executor binary.";
+    };
+
+    user = lib.mkOption {
+type    = lib.types.str;
+default = "coral";
+description = "User the executor runs as. Tools execute with this user's privileges.";
+    };
+    group = lib.mkOption {
+type    = lib.types.str;
+default = "users";
+    };
+
+    workspace = lib.mkOption {
+type    = lib.types.str;
+default = "/home/coral";
+description = "Root directory the executor mounts for file/shell tools.";
+    };
+
+    listenAddress = lib.mkOption {
+type    = lib.types.str;
+default = "0.0.0.0";
+description = ''
+    Address the executor's HTTP server binds. Defaults to all
+    interfaces; restrict to the control-plane-facing address in
+    production (the network layer is managed externally).
+'';
+    };
+
+    port = lib.mkOption {
+type    = lib.types.port;
+default = 3002;
+description = "Port the executor's HTTP tool server listens on.";
+    };
+
+    tokenFile = lib.mkOption {
+type    = lib.types.nullOr lib.types.str;
+default = null;
+description = ''
+    Path to a file containing the shared bearer token (e.g. an
+    agenix secret). When set, every request must present
+    `Authorization: Bearer <token>` or it is rejected with 401.
+    Leave null only for trusted-loopback dev — a remote executor
+    without a token is an open shell.
+'';
+    };
+
+    capabilities = lib.mkOption {
+type    = lib.types.nullOr (lib.types.listOf lib.types.str);
+default = null;
+example = lib.literalExpression ''[ "shell" "file" "image" ]'';
+description = "Tool capabilities the executor exposes. Null = all built-in client tools.";
+    };
+
+    hashline = lib.mkOption {
+type    = lib.types.bool;
+default = false;
+description = "Enable hashline-annotated file reads/edits.";
+    };
+
+    extraGroups = lib.mkOption {
+type    = lib.types.listOf lib.types.str;
+default = [ "wheel" ];
+description = "Supplementary groups for the executor user (wheel = passwordless sudo for shell tools).";
+    };
+};
+
+config = lib.mkIf cfg.enable {
+    assertions = [
+{
+    assertion = cfg.tokenFile != null || cfg.listenAddress == "127.0.0.1" || cfg.listenAddress == "localhost";
+    message = "services.coral-executor: refusing to bind a tokenless executor to a non-loopback address (${cfg.listenAddress}). Set tokenFile or bind to 127.0.0.1.";
+}
+    ];
+
+    environment.systemPackages = with pkgs; [ xdotool imagemagick ];
+
+    users = {
+users.${cfg.user} = {
+    isNormalUser = true;
+    group        = cfg.group;
+    extraGroups  = cfg.extraGroups;
+};
+groups.${cfg.group} = {};
+    };
+
+    security.sudo = {
+enable             = true;
+wheelNeedsPassword = false;
+    };
+
+    systemd.services.coral-executor =
+let
+    capsFlag  = lib.optionalString (cfg.capabilities != null) " --capabilities ${lib.escapeShellArg (lib.concatStringsSep "," cfg.capabilities)}";
+    tokenFlag = lib.optionalString (cfg.tokenFile != null) " --token-file ${lib.escapeShellArg cfg.tokenFile}";
+    hashFlag  = lib.optionalString cfg.hashline " --hashline";
+    command   = "${cfg.package}/bin/coral-executor"
++ " --workspace ${lib.escapeShellArg cfg.workspace}"
++ " --host ${lib.escapeShellArg cfg.listenAddress}"
++ " --port ${toString cfg.port}"
++ capsFlag + tokenFlag + hashFlag;
+in {
+    description = "Coral executor (remote tool-execution client)";
+    after    = [ "network.target" ];
+    wants    = [ "network.target" ];
+    wantedBy = [ "multi-user.target" ];
+
+    serviceConfig = {
+User             = cfg.user;
+Group            = cfg.group;
+WorkingDirectory = cfg.workspace;
+ExecStart        = "${pkgs.bash}/bin/bash -lc '${command}'";
+Restart          = "always";
+RestartSec       = "10s";
+    };
+};
+};
+    };
 
 	nixosModules.llm-bridge = { config, pkgs, lib, ... }:
 	    let

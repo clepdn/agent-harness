@@ -1,4 +1,5 @@
 import http from "node:http"
+import { timingSafeEqual } from "node:crypto"
 import type { AddressInfo } from "node:net"
 import type { ClientToolHost } from "@mira/harness-core"
 import { isClientToolName, parseToolInvocation } from "@mira/harness-protocol"
@@ -8,6 +9,12 @@ export type ToolClientHttpServerOptions = {
   listenHost?: string
   port?: number
   bodyLimitBytes?: number
+  /**
+   * Optional shared bearer token. When set, every request must present
+   * `Authorization: Bearer <token>` or it is rejected with 401. This is the
+   * auth boundary for cross-machine control-plane -> executor calls.
+   */
+  authToken?: string
 }
 
 export type ToolClientHttpServerAddress = {
@@ -43,6 +50,7 @@ export class ToolClientHttpServer {
   private readonly listenHost: string
   private readonly port: number
   private readonly bodyLimitBytes: number
+  private readonly authToken: string | null
   private readonly server: http.Server
   private address: ToolClientHttpServerAddress | null = null
 
@@ -51,6 +59,7 @@ export class ToolClientHttpServer {
     this.listenHost = options.listenHost?.trim() || "0.0.0.0"
     this.port = options.port ?? 3002
     this.bodyLimitBytes = Math.max(1_024, options.bodyLimitBytes ?? 2_000_000)
+    this.authToken = options.authToken?.trim() || null
     this.server = http.createServer((request, response) => void this.handle(request, response))
   }
 
@@ -80,8 +89,23 @@ export class ToolClientHttpServer {
     await this.toolHost.stop()
   }
 
+  private authorized(request: http.IncomingMessage): boolean {
+    if (!this.authToken) return true
+    const header = request.headers.authorization ?? ""
+    const prefix = "Bearer "
+    if (!header.startsWith(prefix)) return false
+    const presented = Buffer.from(header.slice(prefix.length))
+    const expected = Buffer.from(this.authToken)
+    // timingSafeEqual throws on length mismatch; guard first.
+    return presented.length === expected.length && timingSafeEqual(presented, expected)
+  }
+
   private async handle(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     try {
+      if (!this.authorized(request)) {
+        sendJson(response, 401, { error: "unauthorized" })
+        return
+      }
       const url = new URL(request.url ?? "/", "http://client")
       if (request.method === "GET" && url.pathname === "/health") {
         sendJson(response, 200, {
