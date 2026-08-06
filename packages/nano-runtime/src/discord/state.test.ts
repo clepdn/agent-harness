@@ -9,8 +9,7 @@ import { config } from "../config"
 
 test("discord dm whitelist tests", () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "nano-test-state-"))
-  const originalHome = process.env.NANO_HOME
-  process.env.NANO_HOME = tempDir
+  const testDbPath = path.join(tempDir, "nano.db")
 
   // The whitelist and bot identity are [discord] config, not environment.
   const discord = config.discord as { dm_whitelist: string[]; bot_user_id: string }
@@ -18,22 +17,22 @@ test("discord dm whitelist tests", () => {
   const originalBotId = discord.bot_user_id
 
   try {
-    initDb()
+    initDb(testDbPath)
 
-    discord.bot_user_id = "bot123"
+    discord.bot_user_id = "930000000000000001"
 
     // 1. Whitelist not set - DM from userA should be ingested
     discord.dm_whitelist = []
     const dmFromUserA = {
       message: {
-        id: "msg_dm_1",
-        channel_id: "chan_dm_1",
+        id: "900000000000000001",
+        channel_id: "910000000000000001",
         content: "hello",
         timestamp: "2026-06-15T12:00:00.000Z",
-        author: { id: "userA", username: "alice" },
+        author: { id: "920000000000000001", username: "alice" },
       },
       channel: {
-        id: "chan_dm_1",
+        id: "910000000000000001",
         type: 1,
       },
     }
@@ -42,17 +41,17 @@ test("discord dm whitelist tests", () => {
     assert.equal(res1.bucket, "dm")
 
     // 2. Whitelist is set (userA, userB) - DM from userA should be ingested
-    discord.dm_whitelist = ["userA", "userB"]
+    discord.dm_whitelist = ["920000000000000001", "920000000000000002"]
     const dmFromUserA_2 = {
       message: {
-        id: "msg_dm_2",
-        channel_id: "chan_dm_1",
+        id: "900000000000000002",
+        channel_id: "910000000000000001",
         content: "hello again",
         timestamp: "2026-06-15T12:01:00.000Z",
-        author: { id: "userA", username: "alice" },
+        author: { id: "920000000000000001", username: "alice" },
       },
       channel: {
-        id: "chan_dm_1",
+        id: "910000000000000001",
         type: 1,
       },
     }
@@ -63,14 +62,14 @@ test("discord dm whitelist tests", () => {
     // 3. Whitelist is set (userA, userB) - DM from userC should be ignored
     const dmFromUserC = {
       message: {
-        id: "msg_dm_3",
-        channel_id: "chan_dm_2",
+        id: "900000000000000003",
+        channel_id: "910000000000000002",
         content: "hey",
         timestamp: "2026-06-15T12:02:00.000Z",
-        author: { id: "userC", username: "charlie" },
+        author: { id: "920000000000000003", username: "charlie" },
       },
       channel: {
-        id: "chan_dm_2",
+        id: "910000000000000002",
         type: 1,
       },
     }
@@ -81,14 +80,14 @@ test("discord dm whitelist tests", () => {
     // 4. Whitelist is set (userA, userB) - DM from bot itself (self) should still be stored (for history)
     const dmFromSelf = {
       message: {
-        id: "msg_dm_4",
-        channel_id: "chan_dm_1",
+        id: "900000000000000004",
+        channel_id: "910000000000000001",
         content: "bot reply",
         timestamp: "2026-06-15T12:03:00.000Z",
-        author: { id: "bot123", username: "mybot" },
+        author: { id: "930000000000000001", username: "mybot" },
       },
       channel: {
-        id: "chan_dm_1",
+        id: "910000000000000001",
         type: 1,
       },
     }
@@ -99,24 +98,23 @@ test("discord dm whitelist tests", () => {
     // 5. Channel message (non-DM) from non-whitelisted user should still be stored/ingested normally
     const channelMsgFromUserC = {
       message: {
-        id: "msg_chan_1",
-        channel_id: "chan_guild_1",
-        guild_id: "guild123",
+        id: "900000000000000005",
+        channel_id: "910000000000000003",
+        guild_id: "940000000000000001",
         content: "public text",
         timestamp: "2026-06-15T12:04:00.000Z",
-        author: { id: "userC", username: "charlie" },
+        author: { id: "920000000000000003", username: "charlie" },
       },
       channel: {
-        id: "chan_guild_1",
+        id: "910000000000000003",
         type: 0,
-        guild_id: "guild123",
+        guild_id: "940000000000000001",
       },
     }
     const res5 = ingestDiscordEvent(channelMsgFromUserC)
     assert.equal(res5.stored, true, "Should store non-DM channel messages even if sender is not whitelisted")
 
   } finally {
-    process.env.NANO_HOME = originalHome
     discord.dm_whitelist = originalWhitelist
     discord.bot_user_id = originalBotId
     try {

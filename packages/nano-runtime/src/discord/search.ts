@@ -158,6 +158,31 @@ function cleanupDiscordEmbeddingOrphans(): void {
  * Repeated calls continue through the backlog. This is deliberately batch-based
  * for checkpointing; the startup backfill loop calls it continuously.
  */
+/**
+ * True for errors where retrying the same request can never succeed without
+ * operator intervention (bad/disabled key, quota exhausted). These must halt
+ * the worker rather than trigger batch subdivision, which only multiplies spend.
+ */
+function isFatalEmbeddingError(err: unknown): boolean {
+  const status = (err as { status?: number; code?: number })?.status ?? (err as { code?: number })?.code
+  if (status === 401 || status === 403 || status === 429) return true
+  const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
+  return (
+    msg.includes("user not found") ||
+    msg.includes("unauthorized") ||
+    msg.includes("invalid api key") ||
+    msg.includes("quota") ||
+    msg.includes("insufficient")
+  )
+}
+
+export class FatalEmbeddingError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause))
+    this.name = "FatalEmbeddingError"
+  }
+}
+
 export async function syncDiscordMessageEmbeddingsBatch(params?: {
   channelId?: string
   limit?: number
@@ -181,6 +206,7 @@ export async function syncDiscordMessageEmbeddingsBatch(params?: {
        left join discord_channels c on c.channel_id = m.channel_id
        left join discord_message_embedding_meta e on e.message_id = m.message_id
        where (? = '' or m.channel_id = ?)
+         and m.message_id not glob '*[^0-9]*'
          and (
            e.message_id is null
            or e.model != ?
@@ -217,33 +243,75 @@ export async function syncDiscordMessageEmbeddingsBatch(params?: {
   const upsertVector = db.prepare("insert or replace into discord_message_vec(rowid, embedding) values (?, ?)")
 
   let embedded = 0
+  let quarantined = 0
   const embedPendingRows = async (batch: PendingDiscordEmbeddingRow[]): Promise<void> => {
+    let vectors: number[][]
     try {
-      const vectors = await embedTexts(batch.map((row) => row.embedding_text))
-      db.transaction(() => {
-        batch.forEach((row, index) => {
-          const vector = vectors[index]
-          if (!vector) return
-          if (vector.length !== MEMORY_EMBEDDING_DIMENSIONS) {
-            throw new Error(`embedding dimension mismatch: got ${vector.length}, expected ${MEMORY_EMBEDDING_DIMENSIONS}`)
-          }
-          upsertVector.run(BigInt(row.message_id), vectorParam(vector))
-          upsertMeta.run(row.message_id, EMBEDDING_MODEL, MEMORY_EMBEDDING_DIMENSIONS, row.next_hash)
-          embedded += 1
-        })
-      })()
+      vectors = await embedTexts(batch.map((row) => row.embedding_text))
     } catch (err) {
+      // The embedTexts call itself failed. This is a per-REQUEST error (auth,
+      // quota, network), never a per-row problem — subdividing just multiplies
+      // the cost of a guaranteed failure, so bail hard on fatal errors and let
+      // transient ones bubble to the tick's retry backoff.
+      if (isFatalEmbeddingError(err)) throw err
       if (batch.length <= 1) throw err
       const midpoint = Math.ceil(batch.length / 2)
       console.warn(
-        `[discord embeddings] batch of ${batch.length} failed; retrying as ${midpoint}+${batch.length - midpoint}: ${err instanceof Error ? err.message : String(err)}`,
+        `[discord embeddings] embed call for batch of ${batch.length} failed; retrying as ${midpoint}+${batch.length - midpoint}: ${err instanceof Error ? err.message : String(err)}`,
       )
       await embedPendingRows(batch.slice(0, midpoint))
       await embedPendingRows(batch.slice(midpoint))
+      return
     }
+
+    // Persistence is per-row robust: a single malformed row (non-numeric id,
+    // wrong-dimension vector, missing vector) is quarantined and quarantined, never
+    // allowed to roll back the whole batch. This is what previously let 4 test
+    // fixtures perpetually poison every other message's embedding.
+    db.transaction(() => {
+      batch.forEach((row, index) => {
+        const vector = vectors[index]
+        if (!vector) {
+          quarantined += 1
+          return
+        }
+        // Quarantine a row that cannot be embedded: record meta so it is not
+        // re-selected forever, but skip the vector. Prevents a permanent loop
+        // (which is the non-crashing form of the same poison-row bug).
+        const quarantine = (reason: string) => {
+          console.warn(`[discord embeddings] skipping message ${row.message_id}: ${reason}`)
+          try {
+            upsertMeta.run(row.message_id, EMBEDDING_MODEL, MEMORY_EMBEDDING_DIMENSIONS, row.next_hash)
+          } catch {
+            // meta write for a malformed id can also fail; nothing more to do
+          }
+          quarantined += 1
+        }
+        if (vector.length !== MEMORY_EMBEDDING_DIMENSIONS) {
+          quarantine(`dimension ${vector.length} != ${MEMORY_EMBEDDING_DIMENSIONS}`)
+          return
+        }
+        if (!/^[0-9]+$/.test(row.message_id)) {
+          quarantine("non-numeric message id")
+          return
+        }
+        try {
+          upsertVector.run(BigInt(row.message_id), vectorParam(vector))
+          upsertMeta.run(row.message_id, EMBEDDING_MODEL, MEMORY_EMBEDDING_DIMENSIONS, row.next_hash)
+          embedded += 1
+        } catch (rowErr) {
+          quarantine(rowErr instanceof Error ? rowErr.message : String(rowErr))
+        }
+      })
+    })()
   }
 
-  await embedPendingRows(pending)
+  try {
+    await embedPendingRows(pending)
+  } catch (err) {
+    if (isFatalEmbeddingError(err)) throw new FatalEmbeddingError(err)
+    throw err
+  }
 
   return { embedded, selected: rows.length }
 }
@@ -301,6 +369,14 @@ export function startDiscordEmbeddingBackfill(): DiscordEmbeddingBackfillHandle 
       }
       schedule(DISCORD_EMBEDDING_IDLE_MS)
     } catch (err) {
+      if (err instanceof FatalEmbeddingError) {
+        console.error(
+          `[discord embeddings] fatal error, halting backfill (no auto-retry until service restart): ${err.message}`,
+        )
+        stopped = true
+        if (timer) clearTimeout(timer)
+        return
+      }
       console.warn(`[discord embeddings] backfill failed: ${err instanceof Error ? err.message : String(err)}`)
       schedule(DISCORD_EMBEDDING_RETRY_MS)
     } finally {

@@ -44,10 +44,17 @@ function ensureWritableDirOrThrow(dirPath: string, purpose: string): void {
   }
 }
 
-export function initDb(): void {
-  ensureWritableDirOrThrow(HOME_DIR, "nano.db")
-  db = new Database(DB_PATH)
-  fs.chmodSync(DB_PATH, 0o600)
+export function initDb(dbPathOverride?: string): void {
+  // Resolve at call time (not import time) so tests can point at a temp db.
+  // The old code froze HOME at import, so a test setting process.env afterward
+  // was silently ignored and wrote into the real database.
+  const dbPath = dbPathOverride?.trim() || process.env.NANO_DB_PATH?.trim() || DB_PATH
+  const inMemory = dbPath === ":memory:"
+  if (!inMemory) {
+    ensureWritableDirOrThrow(path.dirname(dbPath), "nano.db")
+  }
+  db = new Database(dbPath)
+  if (!inMemory) fs.chmodSync(dbPath, 0o600)
 
   db.pragma("journal_mode = WAL")
   db.pragma("foreign_keys = ON")
