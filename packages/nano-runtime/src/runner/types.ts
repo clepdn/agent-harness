@@ -25,6 +25,8 @@ export interface LoopState {
   restRequested: boolean
   /** Reason for the programmatic rest (e.g. model swap). */
   restReason: string
+  /** When true, force a compaction pass at the next idle wait, regardless of token count. */
+  compactionRequested?: boolean
 }
 
 /** Lifecycle hooks injected by the runner orchestrator into the loop. */
@@ -54,4 +56,5 @@ export interface RunnerStateInternal extends RunnerState {
   deferredEvents: Array<{ event: UserMessage; priority: boolean }>
   restRequested: boolean
   restReason: string
+  compactionRequested?: boolean
 }

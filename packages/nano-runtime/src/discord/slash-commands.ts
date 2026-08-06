@@ -8,7 +8,7 @@
 import type { Client, ChatInputCommandInteraction, AutocompleteInteraction } from "discord.js"
 import { SlashCommandBuilder } from "discord.js"
 import { config, listModelPresets } from "../config"
-import { getRunnerStatus, isRunning, isWaitingForEvent, requestRest } from "../runner/index"
+import { getRunnerStatus, isRunning, isWaitingForEvent, requestRest, requestCompaction } from "../runner/index"
 import { modelState, evaluateModelSwap, applyModelSwap } from "../runner/model-state"
 import { startActivityTrace, getRecentActivity, formatActivityTrace } from "./activity-trace"
 
@@ -47,6 +47,10 @@ const commands = [
   new SlashCommandBuilder()
     .setName("restart")
     .setDescription("Restart the harness process")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("compact")
+    .setDescription("Force a compaction pass now, regardless of token count")
     .toJSON(),
   new SlashCommandBuilder()
     .setName("model")
@@ -105,6 +109,9 @@ export async function handleInteraction(
       break
     case "restart":
       await handleRestart(interaction)
+      break
+    case "compact":
+      await handleCompact(interaction)
       break
     case "model":
       switch (subcommand) {
@@ -179,6 +186,25 @@ async function handleRestart(interaction: ChatInputCommandInteraction): Promise<
 
   await interaction.reply({ content: "restarting...", ephemeral: true })
   gatewayCallbacks.requestRestart("discord slash command /restart")
+}
+
+async function handleCompact(interaction: ChatInputCommandInteraction): Promise<void> {
+  if (!isRunning()) {
+    await interaction.reply({ content: "not running - nothing to compact", ephemeral: true })
+    return
+  }
+  const idle = isWaitingForEvent()
+  const ok = requestCompaction()
+  if (!ok) {
+    await interaction.reply({ content: "couldn't request compaction", ephemeral: true })
+    return
+  }
+  await interaction.reply({
+    content: idle
+      ? "compacting now (was idle)"
+      : "compaction queued - will run at the next idle wait",
+    ephemeral: true,
+  })
 }
 
 async function handleModelInfo(interaction: ChatInputCommandInteraction): Promise<void> {

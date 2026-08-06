@@ -66,12 +66,22 @@ async function waitForNextEvent(convId: number, state: LoopState, hooks: LoopHoo
       return
     }
     // Null means the timeout fired or the wait was interrupted for rest/
-    // shutdown. Bail out on rest/shutdown so the loop can handle it.
+    // shutdown or a manual compaction request. Bail out on rest/shutdown so
+    // the loop can handle it.
     if (state.restRequested || hooks.shouldShutdown()) return
+
+    // A manual /compact request interrupts the wait; run a forced pass and
+    // clear the flag so we don't loop on it.
+    const manual = state.compactionRequested === true
+    if (manual) state.compactionRequested = false
 
     const compacted = await applyCompaction(state, "idle")
     if (compacted) {
-      console.log("[runner] idle compaction ran while waiting for the next event")
+      console.log(
+        `[runner] idle compaction ran while waiting for the next event${manual ? " (manual /compact)" : ""}`,
+      )
+    } else if (manual) {
+      console.log("[runner] manual /compact requested but nothing to compact (summary not smaller)")
     }
   }
 }
@@ -274,6 +284,15 @@ async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn"
   // Read from modelState so strategy + trigger swap with the model preset.
   const strategy = modelState.compactionStrategy
   if (strategy === "off") return false
+
+  // Idle is special: we compact NO MATTER WHAT the token count is, so the next
+  // event doesn't pay to prefill a fat raw conversation. Force through the LLM
+  // path (same as compactForShutdown). The afterEstimate<beforeEstimate guard
+  // inside applyLLMCompaction still protects against a summary that isn't smaller.
+  if (phase === "idle") {
+    const idleStrategy = strategy === "snapcompact" ? "context-full" : strategy
+    return applyLLMCompaction(state, phase, idleStrategy, true)
+  }
 
   if (state.contextSize >= modelState.compactTriggerTokens) {
     // At/over the cliff: run the strategy's full burn.
@@ -514,4 +533,5 @@ export const __loopTest = {
   applyDiscordSendNudge,
   hasDiscordInputForTurn,
   waitForNextEvent,
+  applyCompaction,
 }

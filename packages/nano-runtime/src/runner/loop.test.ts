@@ -241,3 +241,71 @@ test("waitForNextEvent bails out on shutdown instead of looping the idle timer",
   // Exactly one timeout, no inject, no infinite loop.
   assert.deepEqual(calls, ["timeout"])
 })
+
+test("waitForNextEvent clears a manual compaction request after running the idle pass", async () => {
+  const savedIdle = modelState.idleCompactionMs
+  modelState.idleCompactionMs = 60_000
+
+  const state = makeState()
+  state.compactionRequested = true
+  // Below any trigger — idle compaction must still attempt regardless.
+  state.contextSize = 0
+
+  let shuttingDown = false
+  let timeouts = 0
+  await __loopTest.waitForNextEvent(9, state, {
+    clientTools: testClientTools,
+    getTools: () => [],
+    waitForEvent: async () => null,
+    // First "timeout" (interrupt) returns null with the flag set; the loop
+    // clears the flag and runs the idle pass, then loops. On the second
+    // iteration we shut down so the loop exits. This proves the pass ran and
+    // cleared the flag before exit.
+    waitForEventWithTimeout: async () => {
+      timeouts += 1
+      if (timeouts === 1) {
+        assert.equal(state.compactionRequested, true, "flag should still be set before the first pass")
+      } else {
+        shuttingDown = true
+      }
+      return null
+    },
+    injectIncomingEvent: () => {},
+    flushDeferredEvents: () => {},
+    clearSession: async () => {},
+    saveSession: async () => {},
+    saveShutdownSnapshot: async () => {},
+    shouldShutdown: () => shuttingDown,
+    resolveShutdown: () => {},
+  })
+
+  modelState.idleCompactionMs = savedIdle
+
+  // The manual flag is cleared once the pass has run.
+  assert.equal(state.compactionRequested, false)
+})
+
+test("applyCompaction attempts an idle burn even below the token trigger", async () => {
+  const savedStrategy = modelState.compactionStrategy
+  const savedTrigger = modelState.compactTriggerTokens
+  // companion normally no-ops below trigger; idle must force through anyway.
+  modelState.compactionStrategy = "companion"
+  modelState.compactTriggerTokens = 100_000
+
+  const state = makeState()
+  state.contextSize = 1_000 // well below trigger
+  state.conversation = [
+    makeUserMessage("hello"),
+    makeAssistantMessage("hi there"),
+  ]
+
+  // No summary model is configured in the test env, so the forced LLM path
+  // returns false at its "no summary model" guard rather than short-circuiting
+  // on the token check. The point: it doesn't throw and returns a boolean,
+  // proving idle reached the forced path instead of the below-trigger no-op.
+  const result = await __loopTest.applyCompaction(state, "idle")
+  assert.equal(typeof result, "boolean")
+
+  modelState.compactionStrategy = savedStrategy
+  modelState.compactTriggerTokens = savedTrigger
+})

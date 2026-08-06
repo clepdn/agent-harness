@@ -75,6 +75,18 @@ export function requestRest(reason: string): boolean {
   return true
 }
 
+/**
+ * Requests a forced compaction pass at the next idle wait, regardless of the
+ * token trigger. If the runner is idle (waiting for events), interrupts the
+ * wait so the compaction runs immediately. Returns false if not running.
+ */
+export function requestCompaction(): boolean {
+  if (!state.running) return false
+  state.compactionRequested = true
+  interruptEventWaiters()
+  return true
+}
+
 export function getRunnerStatus(): {
   running: boolean
   idle: boolean
