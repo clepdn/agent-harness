@@ -1,8 +1,8 @@
-# Example coral config. Copy to config.toml and tweak.
+# Example nano config. Copy to config.toml and tweak.
 # Secrets belong in secrets.toml.env, not here.
 #
 # Launch with:
-#   coral --config /path/to/config.toml --secrets /path/to/secrets.toml.env
+#   nano --config /path/to/config.toml --secrets /path/to/secrets.toml.env
 
 # ── Model presets ────────────────────────────────────────────────────────────
 # Define named model configurations once, then reference them from [model],
@@ -68,7 +68,7 @@ title = ""
 # Access needs a key in the --keys file carrying the "admin" cap:
 #
 #   [
-#     { "key": "<uuid>", "name": "coral", "allowedModels": ["*"] },
+#     { "key": "<uuid>", "name": "nano", "allowedModels": ["*"] },
 #     { "key": "<uuid>", "name": "me", "allowedModels": [], "caps": ["admin"] }
 #   ]
 #
@@ -82,7 +82,7 @@ title = ""
 # override. API keys stay immutable in agenix; only OAuth credentials move.
 
 # ── Remote bridge client ─────────────────────────────────────────────────────
-# When a model preset sets `bridge = true`, coral routes that model through a
+# When a model preset sets `bridge = true`, nano routes that model through a
 # bridge reachable at llm_bridge_url as an OpenAI-compatible endpoint, using
 # llm_bridge_api_key for auth. Use this to talk to a bridge running on another
 # host instead of spawning one locally via [llm_bridge].
@@ -94,7 +94,7 @@ title = ""
 #   3. llm_bridge_api_key_file - path to a file whose contents are the key.
 #      Intended for the NixOS/agenix "path to a secret" pattern; the path
 #      itself is not secret, so it can live in this config. If the file is set
-#      but unreadable, coral fails to start rather than running unauthenticated.
+#      but unreadable, nano fails to start rather than running unauthenticated.
 # llm_bridge_api_key_file = "/run/agenix/bridge-client-key"
 
 [server]
@@ -102,7 +102,7 @@ port = 3000
 
 [agent]
 # Display name used in summarizer prompt and grounding context.
-name = "niri"
+name = "nano"
 # Set to "local" to skip the primary model and route everything through the fallback.
 env = "default"
 # Boredom wake: if > 0, wake the agent after this many minutes of inactivity.

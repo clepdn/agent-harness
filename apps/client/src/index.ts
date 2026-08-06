@@ -1,7 +1,7 @@
 import path from "node:path"
 import os from "node:os"
 import fs from "node:fs"
-import { NodeToolHost, ToolClientHttpServer, parseToolCapabilities } from "@mira/harness-client-node"
+import { NodeToolHost, ToolClientHttpServer, parseToolCapabilities } from "@nano/harness-client-node"
 
 function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name)
@@ -16,13 +16,13 @@ async function main(): Promise<void> {
     ...(process.argv.includes("--hashline") ? { hashline: true } : {}),
   })
   // Auth token: prefer --token-file (an agenix secret path), fall back to
-  // NIRI_EXECUTOR_TOKEN env. Absent = open server (dev/local only).
+  // NANO_EXECUTOR_TOKEN env. Absent = open server (dev/local only).
   const tokenFile = argument("--token-file")
   const authToken = tokenFile
     ? fs.readFileSync(tokenFile, "utf8").trim()
-    : process.env.NIRI_EXECUTOR_TOKEN?.trim()
+    : process.env.NANO_EXECUTOR_TOKEN?.trim()
   if (!authToken) {
-    console.warn("[tool-client] WARNING: no auth token set — server is open. Set --token-file or NIRI_EXECUTOR_TOKEN for cross-machine use.")
+    console.warn("[tool-client] WARNING: no auth token set — server is open. Set --token-file or NANO_EXECUTOR_TOKEN for cross-machine use.")
   }
   const client = new ToolClientHttpServer({
     host,

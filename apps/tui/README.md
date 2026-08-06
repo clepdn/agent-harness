@@ -1,4 +1,4 @@
-# @niri/tui — direct terminal chat client
+# @nano/tui — direct terminal chat client
 
 A Claude-Code-style terminal chat client that connects **directly** to the nano
 control plane, bypassing Discord. It mounts your current working directory into
@@ -36,7 +36,7 @@ against your files — no upload, no catbox, no abstraction.
 
 ```sh
 # from the directory you want nano to work in:
-npm run start --workspace @niri/tui -- --control http://<control-host>:3001
+npm run start --workspace @nano/tui -- --control http://<control-host>:3001
 
 # common flags
 --control <url>       control plane base URL (env NANO_CONTROL_URL)
@@ -73,5 +73,5 @@ The control plane exposes:
 - `GET /awp/client/status` — current active client status.
 
 Routing is handled by `SwitchableToolClient`
-(`packages/niri-runtime/src/client/switchable.ts`), which delegates to the
+(`packages/nano-runtime/src/client/switchable.ts`), which delegates to the
 default client until a remote one connects.

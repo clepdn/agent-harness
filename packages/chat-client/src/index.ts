@@ -1,6 +1,6 @@
-import type { StreamEvent } from "@niri/protocol"
+import type { StreamEvent } from "@nano/protocol"
 
-export type { StreamEvent } from "@niri/protocol"
+export type { StreamEvent } from "@nano/protocol"
 
 export type FetchLike = (input: URL | RequestInfo, init?: RequestInit) => Promise<Response>
 

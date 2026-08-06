@@ -1,5 +1,5 @@
 {
-  "name": "@mira/harness-client-node",
+  "name": "@nano/harness-client-node",
   "version": "0.1.0",
   "description": "Zero-config HTTP host for shell, filesystem, and image tools.",
   "license": "MIT",
@@ -27,8 +27,8 @@
     "postinstall": "node postinstall.mjs"
   },
   "dependencies": {
-    "@mira/harness-core": "0.1.0",
-    "@mira/harness-protocol": "0.1.0",
+    "@nano/harness-core": "0.1.0",
+    "@nano/harness-protocol": "0.1.0",
     "node-pty": "^1.1.0",
     "xxhashjs": "^0.2.2"
   },

@@ -113,8 +113,8 @@ type ChatLine = {
   detail?: string
 }
 
-const PANEL_COOKIE = "niri_control_panels"
-const NOTES_WIDTH_STORAGE_KEY = "niri_notes_width"
+const PANEL_COOKIE = "nano_control_panels"
+const NOTES_WIDTH_STORAGE_KEY = "nano_notes_width"
 const NOTES_WIDTH_MIN = 220
 const NOTES_WIDTH_MAX = 520
 
@@ -962,7 +962,7 @@ export function App() {
     <main className="place" style={{ "--notes-width": `${notesWidth}px` } as React.CSSProperties}>
       <aside className="connections" aria-label="control panels">
         <header>
-          <h1>niri</h1>
+          <h1>nano</h1>
           <button type="button" onClick={() => void loadAgents()}>
             refresh
           </button>

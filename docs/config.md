@@ -1,10 +1,10 @@
 # Configuration
 
-All runtime configuration for niri lives in two TOML files passed on the
+All runtime configuration for nano lives in two TOML files passed on the
 command line:
 
 ```
-coral --config /path/to/config.toml --secrets /path/to/secrets.toml.env
+nano --config /path/to/config.toml --secrets /path/to/secrets.toml.env
 ```
 
 Both flags are optional. When omitted, the values below fall back to their
@@ -19,10 +19,10 @@ so a key declared in both resolves to the secrets value.
 The systemd module (`flake.nix`) exposes matching options:
 
 ```nix
-services.coral = {
+services.nano = {
   enable      = true;
-  configFile  = "/etc/coral/config.toml";
-  secretsFile = "/etc/coral/secrets.toml.env";
+  configFile  = "/etc/nano/config.toml";
+  secretsFile = "/etc/nano/secrets.toml.env";
 };
 ```
 
@@ -40,7 +40,7 @@ Both are nullable; when set, they're appended to the service's `ExecStart`.
 
 | Key | Default | Description |
 |---|---|---|
-| `name` | `"niri"` | Display name injected into the summarizer prompt and system grounding. |
+| `name` | `"nano"` | Display name injected into the summarizer prompt and system grounding. |
 | `env` | `"default"` | Runtime tag. Set to `"local"` to skip the primary model entirely and run on the fallback only. |
 
 ---

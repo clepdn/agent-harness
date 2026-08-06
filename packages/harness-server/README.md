@@ -1,9 +1,9 @@
-# @mira/harness-server
+# @nano/harness-server
 
 Direct HTTP caller for a remote harness tool client.
 
 ```ts
-import { HttpToolClient } from "@mira/harness-server"
+import { HttpToolClient } from "@nano/harness-server"
 
 const tools = new HttpToolClient({
   agentId: "mira",

@@ -305,7 +305,7 @@ export async function handleCodexCompletion(
     "x-codex-window-id": windowId,
     "x-codex-turn-metadata": turnMetadata,
     "x-client-request-id": sessionId,
-    "user-agent": "codex_exec/0.142.3 (Mac OS; arm64) niri-codex-bridge/1.0",
+    "user-agent": "codex_exec/0.142.3 (Mac OS; arm64) nano-codex-bridge/1.0",
   }
   if (accountId) headers["chatgpt-account-id"] = accountId
   const upstream = await fetchImpl(CODEX_URL, { method: "POST", headers, body: JSON.stringify(upstreamBody) })
@@ -405,7 +405,7 @@ export function createCodexBridgeServer(options: BridgeOptions = {}): FastifyIns
       "x-codex-window-id": windowId,
       "x-codex-turn-metadata": turnMetadata,
       "x-client-request-id": sessionId,
-      "user-agent": "codex_exec/0.142.3 (Mac OS; arm64) niri-codex-bridge/1.0",
+      "user-agent": "codex_exec/0.142.3 (Mac OS; arm64) nano-codex-bridge/1.0",
     }
     if (accountId) headers["chatgpt-account-id"] = accountId
     const upstream = await fetchImpl(CODEX_URL, { method: "POST", headers, body: JSON.stringify(upstreamBody) })

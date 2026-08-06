@@ -15,9 +15,9 @@ config.toml
 session.json
 primary-failover.json
 rest-snapshot.json
-.niri-client/
+.nano-client/
 /data/
-niri.db
+nano.db
 
 # agent home — ignore everything except the example file
 home/*

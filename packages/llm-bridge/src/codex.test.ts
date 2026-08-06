@@ -29,7 +29,7 @@ test("maps chat content arrays to Codex Responses content types", () => {
 })
 
 test("bridge uses Codex credentials and translates a completion", async () => {
-  const dir = fs.mkdtempSync("/tmp/niri-codex-bridge-")
+  const dir = fs.mkdtempSync("/tmp/nano-codex-bridge-")
   const authPath = `${dir}/auth.json`
   fs.writeFileSync(authPath, JSON.stringify({ tokens: { access_token: "header.payload.signature", account_id: "acct_test" } }))
   let observed: { url?: string; init?: RequestInit } = {}
@@ -71,7 +71,7 @@ test("bridge uses Codex credentials and translates a completion", async () => {
 })
 
 test("bridge forwards cached and cache-write token usage in streaming mode", async () => {
-  const dir = fs.mkdtempSync("/tmp/niri-codex-bridge-usage-")
+  const dir = fs.mkdtempSync("/tmp/nano-codex-bridge-usage-")
   const authPath = `${dir}/auth.json`
   fs.writeFileSync(authPath, JSON.stringify({ tokens: { access_token: "header.payload.signature" } }))
   const fetchImpl = (async () => {
@@ -113,7 +113,7 @@ test("bridge forwards cached and cache-write token usage in streaming mode", asy
 })
 
 test("bridge accepts conversations larger than Fastify's default one megabyte limit", async () => {
-  const dir = fs.mkdtempSync("/tmp/niri-codex-bridge-large-")
+  const dir = fs.mkdtempSync("/tmp/nano-codex-bridge-large-")
   const authPath = `${dir}/auth.json`
   fs.writeFileSync(authPath, JSON.stringify({ tokens: { access_token: "header.payload.signature" } }))
   let upstreamBytes = 0

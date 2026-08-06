@@ -1,17 +1,17 @@
 {
-  "name": "@niri/tool-client",
+  "name": "@nano/tool-client",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "npm run build --workspace @mira/harness-protocol && npm run build --workspace @mira/harness-core && npm run build --workspace @mira/harness-client-node",
-    "prestart": "npm run build --workspace @mira/harness-protocol && npm run build --workspace @mira/harness-core && npm run build --workspace @mira/harness-client-node",
+    "predev": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-client-node",
+    "prestart": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-client-node",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@mira/harness-client-node": "*"
+    "@nano/harness-client-node": "*"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

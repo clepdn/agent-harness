@@ -3,7 +3,7 @@ import { createCodexBridgeServer } from "../packages/llm-bridge/src/codex"
 
 const port = Number.parseInt(process.env.CODEX_CACHE_PROBE_PORT ?? "8811", 10)
 const model = process.env.CODEX_CACHE_PROBE_MODEL?.trim() || "gpt-5.6-terra"
-const cacheKey = process.env.CODEX_CACHE_PROBE_KEY?.trim() || "niri:cache-probe:terra-low"
+const cacheKey = process.env.CODEX_CACHE_PROBE_KEY?.trim() || "nano:cache-probe:terra-low"
 const bridge = createCodexBridgeServer()
 
 type Message = OpenAI.Chat.ChatCompletionMessageParam

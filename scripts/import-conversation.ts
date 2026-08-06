@@ -2,7 +2,7 @@ import Database from "better-sqlite3"
 import { readFileSync } from "fs"
 import path from "path"
 
-const DB_PATH = path.resolve(import.meta.dirname, "../home/niri.db")
+const DB_PATH = path.resolve(import.meta.dirname, "../home/nano.db")
 const JSONL_PATH = path.resolve(import.meta.dirname, "../first-conversation.jsonl")
 
 const db = new Database(DB_PATH)

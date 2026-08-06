@@ -1,12 +1,12 @@
 import readline from "readline"
-import { createChatClient, type StreamEvent } from "@niri/chat-client"
+import { createChatClient, type StreamEvent } from "@nano/chat-client"
 import { renderMarkdownAnsi } from "./terminal-markdown"
 
-const HOST = process.env.NIRI_HOST ?? "http://localhost"
-const directWorker = process.env.NIRI_CHAT_DIRECT_WORKER?.trim().toLowerCase() === "true"
-const controlAgentId = directWorker ? undefined : (process.env.NIRI_AGENT_ID ?? "niri").trim() || "niri"
+const HOST = process.env.NANO_HOST ?? "http://localhost"
+const directWorker = process.env.NANO_CHAT_DIRECT_WORKER?.trim().toLowerCase() === "true"
+const controlAgentId = directWorker ? undefined : (process.env.NANO_AGENT_ID ?? "nano").trim() || "nano"
 const PORT = directWorker ? process.env.PORT ?? "3000" : process.env.CONTROL_PORT ?? process.env.PORT ?? "3000"
-const BASE = process.env.NIRI_SERVER_URL?.replace(/\/+$/, "") || `${HOST}:${PORT}`
+const BASE = process.env.NANO_SERVER_URL?.replace(/\/+$/, "") || `${HOST}:${PORT}`
 
 const c = {
   gray: (s: string) => `\x1b[90m${s}\x1b[0m`,
@@ -136,7 +136,7 @@ const clearPromptLine = () => {
 
 const renderActiveStream = (): string | null => {
   if (!activeStreamKind) return null
-  if (activeStreamKind === "text") return `${c.magentaBright("niri: ")}${activeStreamText}`
+  if (activeStreamKind === "text") return `${c.magentaBright("nano: ")}${activeStreamText}`
   if (activeStreamMuted) return c.gray("⟨ thinking ⟩")
   return c.gray(`⟨ thinking ⟩ ${activeStreamText}`)
 }
@@ -187,7 +187,7 @@ const startActiveStream = (kind: "text" | "thinking") => {
   }
 
   if (kind === "text") {
-    process.stdout.write(c.magentaBright("niri: "))
+    process.stdout.write(c.magentaBright("nano: "))
   } else if (activeStreamMuted) {
     process.stdout.write(c.gray("⟨ thinking ⟩"))
   } else {
@@ -295,7 +295,7 @@ print(c.gray("tips: /v toggle tool output · /t toggle thinking · /status · /q
 client
   .getStatus()
   .then((status) => {
-    print(c.gray(status.running ? "niri is awake" : "niri is sleeping — your message will wake her"))
+    print(c.gray(status.running ? "nano is awake" : "nano is sleeping — your message will wake her"))
   })
   .catch((err) => print(c.red(err instanceof Error ? err.message : String(err))))
 
@@ -326,7 +326,7 @@ rl.on("line", async (line) => {
   if (trimmed === "/status") {
     try {
       const status = await client.getStatus()
-      print(c.gray(status.running ? "niri is awake" : "niri is sleeping — your message will wake her"))
+      print(c.gray(status.running ? "nano is awake" : "nano is sleeping — your message will wake her"))
     } catch (err) {
       print(c.red(err instanceof Error ? err.message : String(err)))
     }

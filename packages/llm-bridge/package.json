@@ -1,5 +1,5 @@
 {
-  "name": "@niri/llm-bridge",
+  "name": "@nano/llm-bridge",
   "version": "0.1.0",
   "private": true,
   "type": "module",

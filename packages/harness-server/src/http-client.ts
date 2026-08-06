@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto"
-import type { ClientToolExecutor } from "@mira/harness-core"
+import type { ClientToolExecutor } from "@nano/harness-core"
 import {
   CLIENT_TOOL_NAMES,
   parseClientToolResult,
@@ -8,7 +8,7 @@ import {
   type ToolCapability,
   type ToolInvocation,
   type WorkspaceDescriptor,
-} from "@mira/harness-protocol"
+} from "@nano/harness-protocol"
 
 export type HttpToolClientOptions = {
   agentId: string

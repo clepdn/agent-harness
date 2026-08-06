@@ -3,17 +3,17 @@ services:
     build:
       context: .
       args:
-        AGENT_USER: ${NIRI_USER:-niri}
+        AGENT_USER: ${NANO_USER:-nano}
         AGENT_UID: ${AGENT_UID:-1000}
         AGENT_GID: ${AGENT_GID:-1000}
-    container_name: ${NIRI_CONTAINER:-niri}
+    container_name: ${NANO_CONTAINER:-nano}
     restart: unless-stopped
     ports:
       - "3001:3001"
     user: "${AGENT_UID:-1000}:${AGENT_GID:-1000}"
     working_dir: /workspace
     volumes:
-      - ./home:/home/${NIRI_USER:-niri}
+      - ./home:/home/${NANO_USER:-nano}
       - .:/workspace
       - agent_node_modules:/workspace/node_modules
     environment:

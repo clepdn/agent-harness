@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
-import type { ClientImageArtifact } from "@mira/harness-protocol"
+import type { ClientImageArtifact } from "@nano/harness-protocol"
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
   DEFAULT_FILE_TIMEOUT_MS,

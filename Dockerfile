@@ -8,7 +8,7 @@ RUN apt-get update && apt-get install -y \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-ARG AGENT_USER=niri
+ARG AGENT_USER=nano
 ARG AGENT_UID=1000
 ARG AGENT_GID=1000
 RUN set -eux; \

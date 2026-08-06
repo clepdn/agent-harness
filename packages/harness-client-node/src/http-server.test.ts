@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import type { ClientToolHost } from "@mira/harness-core"
-import type { ClientToolResult, ToolCapability, ToolInvocation, WorkspaceDescriptor } from "@mira/harness-protocol"
+import type { ClientToolHost } from "@nano/harness-core"
+import type { ClientToolResult, ToolCapability, ToolInvocation, WorkspaceDescriptor } from "@nano/harness-protocol"
 import { ToolClientHttpServer } from "./http-server.js"
 
 class FakeHost implements ClientToolHost {

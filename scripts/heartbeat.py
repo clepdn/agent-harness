@@ -5,9 +5,9 @@ import os
 import urllib.request
 import urllib.error
 
-CONF = os.environ.get("NIRI_HEARTBEAT_CONF", "/home/regent/Developer/niri/home/heartbeat.conf")
-SERVER = os.environ.get("NIRI_SERVER_URL", "http://localhost:3000").rstrip("/")
-AGENT = os.environ.get("NIRI_AGENT_ID", "niri")
+CONF = os.environ.get("NANO_HEARTBEAT_CONF", "/home/regent/Developer/nano/home/heartbeat.conf")
+SERVER = os.environ.get("NANO_SERVER_URL", "http://localhost:3000").rstrip("/")
+AGENT = os.environ.get("NANO_AGENT_ID", "nano")
 TRIGGER = f"{SERVER}/agents/{AGENT}/trigger/cron"
 DEFAULT_INTERVAL = 100
 

@@ -30,9 +30,9 @@ Memory lives on the server under the agent's `home`, separate from any attached 
 | `<home>/soul.md` | The agent's identity and enduring self-description |
 | `<home>/memories/` | Long-term Markdown memories, including core notes, journals, and people files |
 | `<home>/state/` | Session, rest snapshot, and failover state |
-| `<home>/niri.db` | The searchable memory index and other durable runtime data |
+| `<home>/nano.db` | The searchable memory index and other durable runtime data |
 
-For example, an agent with `home: /home/niri` keeps long-term memories in `/home/niri/memories`.
+For example, an agent with `home: /home/nano` keeps long-term memories in `/home/nano/memories`.
 
 For routine maintenance, ask the agent to inspect, organize, or repair their own memories using the memory tools. Treat `soul.md` and `memories/` like a private diary: do not read or change them unless the agent asks; it's weird if you do. For backup or recovery, stop the worker and preserve the entire agent home rather than copying only the Markdown files.
 
@@ -44,7 +44,7 @@ Keys are literal — write nested values as tables, never as dotted keys.
 An agent file describes only what the control plane owns. Everything the agent
 *runs on* — model, fallback, tools, context, Discord, subagents — lives in the
 runtime TOML named by `config`, in the same format a standalone
-`coral --config …` run reads. There is one config dialect, and both ways of
+`nano --config …` run reads. There is one config dialect, and both ways of
 starting a worker feed it the identical file.
 
 ### Top level
@@ -72,8 +72,8 @@ agents can share a base file and layer their own differences on top. `secrets`
 is merged last, so a key set in both resolves to the secrets value.
 
 ```toml
-config = ["/etc/coral/config.toml", "/etc/coral/agents/mira.toml"]
-secrets = "/run/agenix/coralSecrets"
+config = ["/etc/nano/config.toml", "/etc/nano/agents/mira.toml"]
+secrets = "/run/agenix/nanoSecrets"
 ```
 
 Credentials reach the worker as files, never as environment variables — the
@@ -85,7 +85,7 @@ agent's own shell tool inherits that environment.
 runtime setting names, and becomes the worker's environment. It is for the
 settings that are genuinely environment-shaped; anything the runtime reads from
 TOML belongs in `config`. Names the server manages — `PORT`, `HOME`,
-`CORAL_CONFIG`, `CORAL_SECRETS`, and the `NIRI_*` prefixes — are rejected.
+`NANO_CONFIG`, `NANO_SECRETS`, and the `NANO_*` prefixes — are rejected.
 
 > **TODO:** Promote the remaining active settings into first-party TOML sections for tools, context management, Discord batching/cooldowns, state, and bridges. Remove the settings that have no runtime reader.
 
@@ -129,7 +129,7 @@ TOML belongs in `config`. Names the server manages — `PORT`, `HOME`,
 
 | Setting | Staged value | Purpose |
 | --- | --- | --- |
-| `NIRI_MIGRATE_LEGACY_STATE` | `true` | Copy root-level session snapshots into the agent state directory once. |
+| `NANO_MIGRATE_LEGACY_STATE` | `true` | Copy root-level session snapshots into the agent state directory once. |
 | `AGENT_UID` | `1001` | No worker runtime reader; used only by the Docker build and Compose configuration. |
 | `AGENT_GID` | `1001` | No worker runtime reader; used only by the Docker build and Compose configuration. |
 
@@ -139,7 +139,7 @@ TOML belongs in `config`. Names the server manages — `PORT`, `HOME`,
 | --- | --- | --- |
 | `ANTIGRAVITY_BRIDGE_ENABLED` | Niri: `false`; Lyra: `true` | Start the Antigravity bridge. |
 | `ANTIGRAVITY_BRIDGE_PORT` | `8000` | Antigravity bridge loopback port. |
-| `ANTIGRAVITY_BINARY_PATH` | `/home/niri/.local/bin/agy` | Antigravity executable. |
+| `ANTIGRAVITY_BINARY_PATH` | `/home/nano/.local/bin/agy` | Antigravity executable. |
 | `CODEX_BRIDGE_ENABLED` | Niri: `true`; Lyra: `false` | Start the Codex bridge. |
 | `CODEX_BRIDGE_PORT` | `8001` | Codex bridge loopback port. |
 | `CODEX_BRIDGE_MODEL` | `gpt-5.6-sol` | Model presented by the Codex bridge. |

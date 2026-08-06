@@ -53,8 +53,8 @@ test("explicit provider entries win over saved auth discovery", () => {
     writeAuthFile(anthropicPath, { anthropic: { type: "oauth", refresh: "refresh" } })
     writeAuthFile(codexPath, { tokens: { access_token: "access" } })
     const explicit = {
-      "anthropic-oauth": { auth_path: "/etc/coral/anthropic.json", base_url: "https://anthropic.example" },
-      codex: { auth_path: "/etc/coral/codex.json", model: "custom-codex" },
+      "anthropic-oauth": { auth_path: "/etc/nano/anthropic.json", base_url: "https://anthropic.example" },
+      codex: { auth_path: "/etc/nano/codex.json", model: "custom-codex" },
       umans: { base_url: "https://api.example", api_key_file: "/run/agenix/umans" },
     }
 

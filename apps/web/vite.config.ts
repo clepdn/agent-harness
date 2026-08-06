@@ -9,7 +9,7 @@ const REPO_ROOT = path.resolve(WEB_DIR, "../..")
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, REPO_ROOT, "")
   const backendPort = env.PORT ?? "3000"
-  const backendTarget = env.NIRI_PROXY_TARGET ?? `http://127.0.0.1:${backendPort}`
+  const backendTarget = env.NANO_PROXY_TARGET ?? `http://127.0.0.1:${backendPort}`
 
   return {
     envDir: REPO_ROOT,

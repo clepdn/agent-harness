@@ -1,6 +1,6 @@
 #!/usr/bin/env -S npx tsx
 import readline from "node:readline"
-import { createChatClient, type StreamEvent } from "@niri/chat-client"
+import { createChatClient, type StreamEvent } from "@nano/chat-client"
 import { parseArgs, HELP } from "./args.js"
 import { startExecutor, type RunningExecutor } from "./executor.js"
 import {

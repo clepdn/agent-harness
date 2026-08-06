@@ -1,4 +1,4 @@
-/** Hashline configuration — simplified for niri-runtime (no pi-coding-agent dep). */
+/** Hashline configuration — simplified for nano-runtime (no pi-coding-agent dep). */
 
 export type HashlineConfig = {
 	hashLength: 2 | 3 | 4;

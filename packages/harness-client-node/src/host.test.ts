@@ -4,7 +4,7 @@ import os from "node:os"
 import path from "node:path"
 import test from "node:test"
 import { NodeToolHost } from "./host.js"
-import type { ClientToolName, ToolInvocation } from "@mira/harness-protocol"
+import type { ClientToolName, ToolInvocation } from "@nano/harness-protocol"
 
 function invocation(tool: ClientToolName, args: Record<string, unknown>): ToolInvocation {
   return {

@@ -1,11 +1,11 @@
 import fs from "node:fs"
 import path from "node:path"
-import { deepMerge, parseToml, type TomlTable } from "@niri/toml"
+import { deepMerge, parseToml, type TomlTable } from "@nano/toml"
 
 /**
  * An agent file describes what the control plane owns — identity, port, home,
  * which tool client to attach — and then points at the same runtime TOML a
- * standalone `coral --config` invocation would read. Model, fallback, discord,
+ * standalone `nano --config` invocation would read. Model, fallback, discord,
  * tools and the rest are deliberately absent: duplicating that schema here is
  * what let the two surfaces drift apart in the first place.
  */
@@ -49,21 +49,21 @@ const AGENT_KEYS = new Set([
 const RESERVED_SETTINGS = new Set([
   "AGENT_ID",
   "AGENT_NAME",
-  "CORAL_CONFIG",
-  "CORAL_SECRETS",
+  "NANO_CONFIG",
+  "NANO_SECRETS",
   "HOME",
-  "NIRI_AGENT_ID",
-  "NIRI_AGENT_STATE_DIR",
-  "NIRI_CLIENT",
-  "NIRI_CLIENT_WORKSPACE",
-  "NIRI_CONTROL_DB",
-  "NIRI_CONTROL_HOME",
-  "NIRI_HOME",
-  "NIRI_MANAGED_WORKER",
-  "NIRI_RESTART_COMMAND",
-  "NIRI_RESTART_CWD",
-  "NIRI_WORKER_HOST",
-  "NIRI_WORKER_INSTANCE_ID",
+  "NANO_AGENT_ID",
+  "NANO_AGENT_STATE_DIR",
+  "NANO_CLIENT",
+  "NANO_CLIENT_WORKSPACE",
+  "NANO_CONTROL_DB",
+  "NANO_CONTROL_HOME",
+  "NANO_HOME",
+  "NANO_MANAGED_WORKER",
+  "NANO_RESTART_COMMAND",
+  "NANO_RESTART_CWD",
+  "NANO_WORKER_HOST",
+  "NANO_WORKER_INSTANCE_ID",
   "PORT",
 ])
 
@@ -115,10 +115,10 @@ function parseSettings(value: unknown, label: string): Record<string, string | n
     if (!/^[A-Z][A-Z0-9_]*$/.test(key)) throw new Error(`${label}.${key} must use an uppercase runtime setting name`)
     if (
       RESERVED_SETTINGS.has(key) ||
-      key.startsWith("NIRI_CLIENT_") ||
-      key.startsWith("NIRI_CONTROL_") ||
-      key.startsWith("NIRI_TOOL_CLIENT_") ||
-      key.startsWith("NIRI_WORKER_")
+      key.startsWith("NANO_CLIENT_") ||
+      key.startsWith("NANO_CONTROL_") ||
+      key.startsWith("NANO_TOOL_CLIENT_") ||
+      key.startsWith("NANO_WORKER_")
     ) {
       throw new Error(`${label}.${key} is managed by the server`)
     }
@@ -311,14 +311,14 @@ export function buildWorkerEnvironment(parentEnv: NodeJS.ProcessEnv, agent: Reso
   }
   Object.assign(env, agent.settings, {
     HOME: agent.home,
-    NIRI_AGENT_ID: agent.id,
-    NIRI_HOME: agent.home,
-    NIRI_CLIENT: agent.client,
-    ...(agent.workspace ? { NIRI_CLIENT_WORKSPACE: agent.workspace } : {}),
+    NANO_AGENT_ID: agent.id,
+    NANO_HOME: agent.home,
+    NANO_CLIENT: agent.client,
+    ...(agent.workspace ? { NANO_CLIENT_WORKSPACE: agent.workspace } : {}),
     PORT: String(agent.port),
-    NIRI_WORKER_HOST: "127.0.0.1",
-    NIRI_MANAGED_WORKER: "true",
-    NIRI_MIGRATE_LEGACY_STATE: agent.settings.NIRI_MIGRATE_LEGACY_STATE ?? "false",
+    NANO_WORKER_HOST: "127.0.0.1",
+    NANO_MANAGED_WORKER: "true",
+    NANO_MIGRATE_LEGACY_STATE: agent.settings.NANO_MIGRATE_LEGACY_STATE ?? "false",
   })
   return env
 }

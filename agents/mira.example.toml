@@ -4,7 +4,7 @@
 # This file covers only what the control plane owns. Everything the agent
 # itself runs on — model, fallback, tools, context, discord, subagents — lives
 # in the runtime TOML referenced by `config` below, in exactly the format a
-# standalone `coral --config ...` run reads. See config.example.toml.
+# standalone `nano --config ...` run reads. See config.example.toml.
 
 id = "mira"
 name = "Mira"
@@ -21,10 +21,10 @@ client = "http://mira-macbook.local:3002"
 # The worker's runtime configuration. A single path, or a list whose later
 # entries deep-merge over earlier ones — share a base file across agents and
 # layer each agent's differences on top.
-config = ["/etc/coral/config.toml", "/etc/coral/agents/mira.toml"]
+config = ["/etc/nano/config.toml", "/etc/nano/agents/mira.toml"]
 
 # Credentials, deep-merged over `config` last. Keep this mode 0400.
-secrets = "/run/agenix/coralSecrets"
+secrets = "/run/agenix/nanoSecrets"
 
 # Worker port. Defaults to the control port plus this file's sorted position.
 # port = 4301
@@ -32,7 +32,7 @@ secrets = "/run/agenix/coralSecrets"
 # Environment variables for the worker process. For runtime settings that are
 # genuinely environment-shaped only — anything the runtime reads from TOML
 # belongs in the `config` file instead, where it cannot leak into the agent's
-# own shell. Names the server manages (NIRI_*, PORT, CORAL_CONFIG, ...) are
+# own shell. Names the server manages (NANO_*, PORT, NANO_CONFIG, ...) are
 # rejected here.
 [settings]
-NIRI_DISABLE_DISCORD_TOOLS = "false"
+NANO_DISABLE_DISCORD_TOOLS = "false"

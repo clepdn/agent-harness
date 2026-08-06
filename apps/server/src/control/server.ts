@@ -13,7 +13,7 @@ import {
   recordWorkerEvent,
   updateAgentStatus,
 } from "./db"
-import type { ControlCommand, UserMessage, WorkerEvent } from "@niri/protocol"
+import type { ControlCommand, UserMessage, WorkerEvent } from "@nano/protocol"
 
 const SRC_DIR = dirname(fileURLToPath(import.meta.url))
 const WEB_DIST_DIR = join(SRC_DIR, "..", "..", "..", "web", "dist")

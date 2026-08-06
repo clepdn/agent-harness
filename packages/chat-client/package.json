@@ -1,5 +1,5 @@
 {
-  "name": "@niri/chat-client",
+  "name": "@nano/chat-client",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -20,7 +20,7 @@
     "test": "node --import tsx --test 'src/**/*.test.ts'"
   },
   "dependencies": {
-    "@niri/protocol": "*"
+    "@nano/protocol": "*"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

@@ -3,9 +3,9 @@
   "configVersion": 0,
   "workspaces": {
     "": {
-      "name": "niri",
+      "name": "nano",
       "dependencies": {
-        "@niri/chat-client": "*",
+        "@nano/chat-client": "*",
       },
       "devDependencies": {
         "@types/better-sqlite3": "^7.6.13",
@@ -15,10 +15,10 @@
       },
     },
     "apps/client": {
-      "name": "@niri/tool-client",
+      "name": "@nano/tool-client",
       "version": "0.1.0",
       "dependencies": {
-        "@mira/harness-client-node": "*",
+        "@nano/harness-client-node": "*",
       },
       "devDependencies": {
         "@types/node": "^25.5.0",
@@ -27,11 +27,11 @@
       },
     },
     "apps/server": {
-      "name": "@niri/server",
+      "name": "@nano/server",
       "version": "0.1.0",
       "dependencies": {
         "@fastify/static": "^9.1.3",
-        "@niri/protocol": "*",
+        "@nano/protocol": "*",
         "better-sqlite3": "^12.8.0",
         "fastify": "^5.8.4",
         "yaml": "^2.8.2",
@@ -44,10 +44,10 @@
       },
     },
     "apps/web": {
-      "name": "@niri/web",
+      "name": "@nano/web",
       "version": "0.1.0",
       "dependencies": {
-        "@niri/chat-client": "*",
+        "@nano/chat-client": "*",
         "highlight.js": "^11.11.1",
         "react": "^19.2.0",
         "react-dom": "^19.2.0",
@@ -64,10 +64,10 @@
       },
     },
     "packages/chat-client": {
-      "name": "@niri/chat-client",
+      "name": "@nano/chat-client",
       "version": "0.1.0",
       "dependencies": {
-        "@niri/protocol": "*",
+        "@nano/protocol": "*",
       },
       "devDependencies": {
         "@types/node": "^25.5.0",
@@ -76,14 +76,14 @@
       },
     },
     "packages/harness-client-node": {
-      "name": "@mira/harness-client-node",
+      "name": "@nano/harness-client-node",
       "version": "0.1.0",
       "bin": {
         "harness-tool-client": "./dist/cli.js",
       },
       "dependencies": {
-        "@mira/harness-core": "0.1.0",
-        "@mira/harness-protocol": "0.1.0",
+        "@nano/harness-core": "0.1.0",
+        "@nano/harness-protocol": "0.1.0",
         "node-pty": "^1.1.0",
       },
       "devDependencies": {
@@ -93,10 +93,10 @@
       },
     },
     "packages/harness-core": {
-      "name": "@mira/harness-core",
+      "name": "@nano/harness-core",
       "version": "0.1.0",
       "dependencies": {
-        "@mira/harness-protocol": "0.1.0",
+        "@nano/harness-protocol": "0.1.0",
       },
       "devDependencies": {
         "@types/node": "^25.5.0",
@@ -105,7 +105,7 @@
       },
     },
     "packages/harness-protocol": {
-      "name": "@mira/harness-protocol",
+      "name": "@nano/harness-protocol",
       "version": "0.1.0",
       "devDependencies": {
         "@types/node": "^25.5.0",
@@ -114,11 +114,11 @@
       },
     },
     "packages/harness-server": {
-      "name": "@mira/harness-server",
+      "name": "@nano/harness-server",
       "version": "0.1.0",
       "dependencies": {
-        "@mira/harness-core": "0.1.0",
-        "@mira/harness-protocol": "0.1.0",
+        "@nano/harness-core": "0.1.0",
+        "@nano/harness-protocol": "0.1.0",
       },
       "devDependencies": {
         "@types/node": "^25.5.0",
@@ -126,23 +126,23 @@
         "typescript": "^6.0.2",
       },
     },
-    "packages/niri-protocol": {
-      "name": "@niri/protocol",
+    "packages/nano-protocol": {
+      "name": "@nano/protocol",
       "version": "0.1.0",
       "devDependencies": {
         "typescript": "^6.0.2",
       },
     },
-    "packages/niri-runtime": {
-      "name": "@niri/runtime",
+    "packages/nano-runtime": {
+      "name": "@nano/runtime",
       "version": "0.1.0",
       "dependencies": {
         "@anthropic-ai/sdk": "^0.100.1",
-        "@mira/harness-client-node": "*",
-        "@mira/harness-core": "*",
-        "@mira/harness-protocol": "*",
-        "@mira/harness-server": "*",
-        "@niri/protocol": "*",
+        "@nano/harness-client-node": "*",
+        "@nano/harness-core": "*",
+        "@nano/harness-protocol": "*",
+        "@nano/harness-server": "*",
+        "@nano/protocol": "*",
         "@openrouter/sdk": "^0.12.21",
         "better-sqlite3": "^12.8.0",
         "discord.js": "^14.25.1",
@@ -295,25 +295,25 @@
 
     "@lukeed/ms": ["@lukeed/ms@2.0.2", "", {}, "sha512-9I2Zn6+NJLfaGoz9jN3lpwDgAYvfGeNYdbAIjJOqzs4Tpc+VU3Jqq4IofSUBKajiDS8k9fZIg18/z13mpk1bsA=="],
 
-    "@mira/harness-client-node": ["@mira/harness-client-node@workspace:packages/harness-client-node"],
+    "@nano/harness-client-node": ["@nano/harness-client-node@workspace:packages/harness-client-node"],
 
-    "@mira/harness-core": ["@mira/harness-core@workspace:packages/harness-core"],
+    "@nano/harness-core": ["@nano/harness-core@workspace:packages/harness-core"],
 
-    "@mira/harness-protocol": ["@mira/harness-protocol@workspace:packages/harness-protocol"],
+    "@nano/harness-protocol": ["@nano/harness-protocol@workspace:packages/harness-protocol"],
 
-    "@mira/harness-server": ["@mira/harness-server@workspace:packages/harness-server"],
+    "@nano/harness-server": ["@nano/harness-server@workspace:packages/harness-server"],
 
-    "@niri/chat-client": ["@niri/chat-client@workspace:packages/chat-client"],
+    "@nano/chat-client": ["@nano/chat-client@workspace:packages/chat-client"],
 
-    "@niri/protocol": ["@niri/protocol@workspace:packages/niri-protocol"],
+    "@nano/protocol": ["@nano/protocol@workspace:packages/nano-protocol"],
 
-    "@niri/runtime": ["@niri/runtime@workspace:packages/niri-runtime"],
+    "@nano/runtime": ["@nano/runtime@workspace:packages/nano-runtime"],
 
-    "@niri/server": ["@niri/server@workspace:apps/server"],
+    "@nano/server": ["@nano/server@workspace:apps/server"],
 
-    "@niri/tool-client": ["@niri/tool-client@workspace:apps/client"],
+    "@nano/tool-client": ["@nano/tool-client@workspace:apps/client"],
 
-    "@niri/web": ["@niri/web@workspace:apps/web"],
+    "@nano/web": ["@nano/web@workspace:apps/web"],
 
     "@openrouter/sdk": ["@openrouter/sdk@0.12.21", "", { "dependencies": { "zod": "^3.25.0 || ^4.0.0" } }, "sha512-iKAlh0RbWzV6KphuE6NZFwsSjKJr6SsK5145LbxDB87Wa92imB5I9mpbv3hGHmacdnz/zCY/gokFSJXAxuO2/A=="],
 

@@ -19,7 +19,7 @@ function argument(name: string): string | undefined {
 const controlPort = Number.parseInt(argument("--port") ?? "3000", 10)
 const controlHost = argument("--host") ?? "127.0.0.1"
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..")
-const workerEntry = path.join(repoRoot, "packages", "niri-runtime", "src", "index.ts")
+const workerEntry = path.join(repoRoot, "packages", "nano-runtime", "src", "index.ts")
 const agentDirectory = path.resolve(argument("--agents") ?? path.join(repoRoot, "agents"))
 
 async function main(): Promise<void> {

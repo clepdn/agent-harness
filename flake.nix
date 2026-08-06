@@ -11,8 +11,8 @@
 	systemOutputs = flake-utils.lib.eachDefaultSystem (system:
 	    let pkgs = nixpkgs.legacyPackages.${system};
 	    in {
-		packages.coral = pkgs.buildNpmPackage {
-		    pname   = "coral";
+		packages.nano = pkgs.buildNpmPackage {
+		    pname   = "nano";
 		    version = "1.0.0";
 		    src     = self;
 
@@ -38,46 +38,46 @@
 		    ];
 
 		    # The app entry runs from src via tsx, but the workspace library packages
-		    # (@mira/harness-*, @niri/*) are consumed through their package.json exports,
+		    # (@nano/harness-*, @nano/*) are consumed through their package.json exports,
 		    # which point at dist/. Compile those to dist so the runtime can import them.
 		    npmBuildScript = "build:packages";
 
 		    installPhase = ''
 			runHook preInstall
 
-			mkdir -p $out/lib/coral
+			mkdir -p $out/lib/nano
 			cp -r packages apps node_modules package.json tsconfig.json tsconfig.base.json \
-			    $out/lib/coral/
+			    $out/lib/nano/
 
 			# Worker — one process per agent, reads its TOML from --config
-			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/coral \
-			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
-			    --add-flags "$out/lib/coral/packages/niri-runtime/src/index.ts"
+			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/nano \
+			    --add-flags "$out/lib/nano/node_modules/.bin/tsx" \
+			    --add-flags "$out/lib/nano/packages/nano-runtime/src/index.ts"
 
 			# Control plane — spawns one worker per agent file
-			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/coral-server \
-			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
-			    --add-flags "$out/lib/coral/apps/server/src/index.ts"
+			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/nano-server \
+			    --add-flags "$out/lib/nano/node_modules/.bin/tsx" \
+			    --add-flags "$out/lib/nano/apps/server/src/index.ts"
 
 			# Executor — the tool-execution client. Runs shell/file/image
 			# tools over an authenticated HTTP boundary. No LLM, no session.
-			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/coral-executor \
-			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
-			    --add-flags "$out/lib/coral/apps/client/src/index.ts"
+			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/nano-executor \
+			    --add-flags "$out/lib/nano/node_modules/.bin/tsx" \
+			    --add-flags "$out/lib/nano/apps/client/src/index.ts"
 
 			# Bridge — same source, different entry point
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/llm-bridge \
-			    --add-flags "$out/lib/coral/node_modules/.bin/tsx" \
-			    --add-flags "$out/lib/coral/packages/llm-bridge/src/index.ts"
+			    --add-flags "$out/lib/nano/node_modules/.bin/tsx" \
+			    --add-flags "$out/lib/nano/packages/llm-bridge/src/index.ts"
 
 			runHook postInstall
 		    '';
 		};
 	    });
 
-	nixosModules.coral = { config, pkgs, lib, ... }:
+	nixosModules.nano = { config, pkgs, lib, ... }:
 	    let
-		cfg            = config.services.coral;
+		cfg            = config.services.nano;
 		settingsFormat = pkgs.formats.toml {};
 		oldContextSettings = [
 		    "respect_cache"
@@ -132,18 +132,18 @@
 			context = contextSettings;
 		    };
 	    in {
-		options.services.coral = {
-		    enable = lib.mkEnableOption "coral";
+		options.services.nano = {
+		    enable = lib.mkEnableOption "nano";
 
 		    package = lib.mkOption {
 			type        = lib.types.package;
-			default     = self.packages.${pkgs.system}.coral;
-			defaultText = lib.literalExpression "self.packages.\${pkgs.system}.coral";
+			default     = self.packages.${pkgs.system}.nano;
+			defaultText = lib.literalExpression "self.packages.\${pkgs.system}.nano";
 		    };
 
 		    user = lib.mkOption {
 			type    = lib.types.str;
-			default = "coral";
+			default = "nano";
 		    };
 		    group = lib.mkOption {
 			type    = lib.types.str;
@@ -151,7 +151,7 @@
 		    };
 		    homeDir = lib.mkOption {
 			type    = lib.types.str;
-			default = "/home/coral";
+			default = "/home/nano";
 		    };
 
 		    settings = lib.mkOption {
@@ -161,7 +161,7 @@
 			    {
 				server.port = 3000;
 				agent = {
-				    name = "niri";
+				    name = "nano";
 				    env  = "default";
 				};
 				discord = {
@@ -174,7 +174,7 @@
 			description = ''
 			    Freeform TOML settings serialized to config.toml and passed via --config.
 			    Keys map directly to TOML — use snake_case throughout (e.g. `discord.gateway_enabled`).
-			    See config.example.toml in the coral repo for the full schema.
+			    See config.example.toml in the nano repo for the full schema.
 
 			    Ignored if `configFile` is set explicitly.
 			'';
@@ -185,7 +185,7 @@
 			default =
 			    if settingsForToml == {}
 			    then null
-			    else settingsFormat.generate "coral-config.toml" settingsForToml;
+			    else settingsFormat.generate "nano-config.toml" settingsForToml;
 			defaultText = lib.literalExpression ''
 			    null when normalized settings are empty; otherwise generated TOML
 			'';
@@ -204,17 +204,17 @@
 			default = {};
 			example = lib.literalExpression ''
 			    {
-				coral = { client = "local"; };
+				nano = { client = "local"; };
 				mira  = {
 				    client = "http://mira-macbook.local:3002";
-				    config = [ "/etc/coral/mira-overrides.toml" ];
+				    config = [ "/etc/nano/mira-overrides.toml" ];
 				};
 			    }
 			'';
 			description = ''
 			    Agents supervised by the control plane, keyed by agent id. Each
 			    value is a freeform agent TOML file — see "Agent TOML
-			    specification" in the coral README.
+			    specification" in the nano README.
 
 			    `config`, `secrets`, `home`, and `workspace` are filled in from
 			    this module unless the agent sets them, so every agent shares
@@ -225,7 +225,7 @@
 			    `home` defaults to `''${homeDir}/agents/''${id}`. A single-agent
 			    deployment migrating from the standalone worker was using
 			    `homeDir` itself, so set `home = homeDir` for that agent (or
-			    move its soul, memories, state, and niri.db) — otherwise it
+			    move its soul, memories, state, and nano.db) — otherwise it
 			    wakes up with an empty home.
 
 			    Leaving this empty runs a single standalone worker instead of
@@ -249,8 +249,8 @@
 			default = null;
 			description = ''
 			    Path to a file holding the shared bearer token used to
-			    authenticate to a remote executor (services.coral-executor).
-			    Exposed to workers as NIRI_EXECUTOR_TOKEN_FILE; the worker
+			    authenticate to a remote executor (services.nano-executor).
+			    Exposed to workers as NANO_EXECUTOR_TOKEN_FILE; the worker
 			    sends it as `Authorization: Bearer <token>` when its agent
 			    `client` points at an http(s):// executor. Null = local-only.
 			'';
@@ -277,7 +277,7 @@
 			wheelNeedsPassword = false;
 		    };
 
-		    systemd.services.coral =
+		    systemd.services.nano =
 			let
 			    configFlag  = lib.optionalString (cfg.configFile  != null) " --config ${lib.escapeShellArg cfg.configFile}";
 			    secretsFlag = lib.optionalString (cfg.secretsFile != null) " --secrets ${lib.escapeShellArg cfg.secretsFile}";
@@ -285,7 +285,7 @@
 			    # Every agent inherits the shared config and secrets; anything
 			    # the agent declares itself wins. Homes must land outside the
 			    # read-only store, so they default under the service home.
-			    agentFile = id: agent: settingsFormat.generate "coral-agent-${id}.toml" ({
+			    agentFile = id: agent: settingsFormat.generate "nano-agent-${id}.toml" ({
 				home      = "${cfg.homeDir}/agents/${id}";
 				workspace = cfg.homeDir;
 			    }
@@ -293,7 +293,7 @@
 			    // lib.optionalAttrs (cfg.secretsFile != null) { secrets = cfg.secretsFile; }
 			    // agent);
 
-			    agentDirectory = pkgs.linkFarm "coral-agents" (lib.mapAttrsToList (id: agent: {
+			    agentDirectory = pkgs.linkFarm "nano-agents" (lib.mapAttrsToList (id: agent: {
 				name = "${id}.toml";
 				path = agentFile id agent;
 			    }) cfg.agents);
@@ -301,10 +301,10 @@
 			    controlPlane = cfg.agents != {};
 			    command =
 				if controlPlane
-				then "${cfg.package}/bin/coral-server --port ${toString cfg.controlPort} --agents ${agentDirectory}"
-				else "${cfg.package}/bin/coral${configFlag}${secretsFlag}";
+				then "${cfg.package}/bin/nano-server --port ${toString cfg.controlPort} --agents ${agentDirectory}"
+				else "${cfg.package}/bin/nano${configFlag}${secretsFlag}";
 			in {
-			    description = if controlPlane then "Coral control plane" else "Coral harness runner";
+			    description = if controlPlane then "Nano control plane" else "Nano harness runner";
 			    after    = [ "multi-user.target" ];
 			    wants    = [ "multi-user.target" ];
 			    wantedBy = [ "multi-user.target" ];
@@ -315,12 +315,12 @@
 				WorkingDirectory = cfg.homeDir;
 				ExecStart        = "${pkgs.bash}/bin/bash -lc '${command}'";
 				Environment      = [
-				    "NIRI_MANAGED_WORKER=true"
-				    "NIRI_HOME=${cfg.homeDir}"
-				    "NIRI_CONTROL_HOME=${cfg.homeDir}/control"
+				    "NANO_MANAGED_WORKER=true"
+				    "NANO_HOME=${cfg.homeDir}"
+				    "NANO_CONTROL_HOME=${cfg.homeDir}/control"
 				]
 				++ lib.optional (cfg.executorTokenFile != null)
-				    "NIRI_EXECUTOR_TOKEN_FILE=${cfg.executorTokenFile}";
+				    "NANO_EXECUTOR_TOKEN_FILE=${cfg.executorTokenFile}";
 				Restart          = "always";
 				RestartSec       = "10s";
 			    };
@@ -328,23 +328,23 @@
 		};
 	    };
 
-nixosModules.coral-executor = { config, pkgs, lib, ... }:
+nixosModules.nano-executor = { config, pkgs, lib, ... }:
     let
-cfg = config.services.coral-executor;
+cfg = config.services.nano-executor;
     in {
-options.services.coral-executor = {
-    enable = lib.mkEnableOption "coral executor (remote tool-execution client)";
+options.services.nano-executor = {
+    enable = lib.mkEnableOption "nano executor (remote tool-execution client)";
 
     package = lib.mkOption {
 type        = lib.types.package;
-default     = self.packages.${pkgs.system}.coral;
-defaultText = lib.literalExpression "self.packages.\${pkgs.system}.coral";
-description = "The coral package providing the coral-executor binary.";
+default     = self.packages.${pkgs.system}.nano;
+defaultText = lib.literalExpression "self.packages.\${pkgs.system}.nano";
+description = "The nano package providing the nano-executor binary.";
     };
 
     user = lib.mkOption {
 type    = lib.types.str;
-default = "coral";
+default = "nano";
 description = "User the executor runs as. Tools execute with this user's privileges.";
     };
     group = lib.mkOption {
@@ -354,7 +354,7 @@ default = "users";
 
     workspace = lib.mkOption {
 type    = lib.types.str;
-default = "/home/coral";
+default = "/home/nano";
 description = "Root directory the executor mounts for file/shell tools.";
     };
 
@@ -410,7 +410,7 @@ config = lib.mkIf cfg.enable {
     assertions = [
 {
     assertion = cfg.tokenFile != null || cfg.listenAddress == "127.0.0.1" || cfg.listenAddress == "localhost";
-    message = "services.coral-executor: refusing to bind a tokenless executor to a non-loopback address (${cfg.listenAddress}). Set tokenFile or bind to 127.0.0.1.";
+    message = "services.nano-executor: refusing to bind a tokenless executor to a non-loopback address (${cfg.listenAddress}). Set tokenFile or bind to 127.0.0.1.";
 }
     ];
 
@@ -430,18 +430,18 @@ enable             = true;
 wheelNeedsPassword = false;
     };
 
-    systemd.services.coral-executor =
+    systemd.services.nano-executor =
 let
     capsFlag  = lib.optionalString (cfg.capabilities != null) " --capabilities ${lib.escapeShellArg (lib.concatStringsSep "," cfg.capabilities)}";
     tokenFlag = lib.optionalString (cfg.tokenFile != null) " --token-file ${lib.escapeShellArg cfg.tokenFile}";
     hashFlag  = lib.optionalString cfg.hashline " --hashline";
-    command   = "${cfg.package}/bin/coral-executor"
+    command   = "${cfg.package}/bin/nano-executor"
 + " --workspace ${lib.escapeShellArg cfg.workspace}"
 + " --host ${lib.escapeShellArg cfg.listenAddress}"
 + " --port ${toString cfg.port}"
 + capsFlag + tokenFlag + hashFlag;
 in {
-    description = "Coral executor (remote tool-execution client)";
+    description = "Nano executor (remote tool-execution client)";
     after    = [ "network.target" ];
     wants    = [ "network.target" ];
     wantedBy = [ "multi-user.target" ];
@@ -468,9 +468,9 @@ RestartSec       = "10s";
 
 		    package = lib.mkOption {
 			type        = lib.types.package;
-			default     = self.packages.${pkgs.system}.coral;
-			defaultText = lib.literalExpression "self.packages.\${pkgs.system}.coral";
-			description = "Package providing the llm-bridge binary. Defaults to the coral package which includes it.";
+			default     = self.packages.${pkgs.system}.nano;
+			defaultText = lib.literalExpression "self.packages.\${pkgs.system}.nano";
+			description = "Package providing the llm-bridge binary. Defaults to the nano package which includes it.";
 		    };
 
 		    user = lib.mkOption {
@@ -569,7 +569,7 @@ RestartSec       = "10s";
 
     in systemOutputs // {
       nixosModules = nixosModules // {
-        default = nixosModules.coral;
+        default = nixosModules.nano;
       };
     };
 }

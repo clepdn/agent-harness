@@ -140,7 +140,7 @@ async function fetchAnthropicModels(
         authorization: `Bearer ${accessToken}`,
         "anthropic-version": ANTHROPIC_VERSION,
         "anthropic-beta": ANTHROPIC_OAUTH_BETA,
-        "user-agent": "niri-llm-bridge",
+        "user-agent": "nano-llm-bridge",
       },
     })
     if (!resp.ok) {
@@ -302,7 +302,7 @@ export function createServer(config: BridgeConfig, apiKeys: Map<string, ApiKeyEn
         object: "model" as const,
         created: 0,
         owned_by: m.provider,
-        // Passthrough of the provider's context window so clients (e.g. coral's
+        // Passthrough of the provider's context window so clients (e.g. nano's
         // status display) can compute a context-usage percentage.
         ...(m.contextWindow ? { context_length: m.contextWindow } : {}),
       }))

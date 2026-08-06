@@ -51,7 +51,7 @@ export async function fetchAnthropicUsage(provider: CustomProvider): Promise<Pro
         Authorization: `Bearer ${token}`,
         "anthropic-beta": ANTHROPIC_OAUTH_BETA,
         "Content-Type": "application/json",
-        "User-Agent": "niri-llm-bridge",
+        "User-Agent": "nano-llm-bridge",
       },
     })
     if (!resp.ok) return null

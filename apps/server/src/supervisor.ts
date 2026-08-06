@@ -13,7 +13,7 @@ type SupervisorOptions = {
 
 /**
  * The worker takes its whole configuration from TOML, so the control plane
- * hands it the very flags a standalone `coral` run would use. Nothing about
+ * hands it the very flags a standalone `nano` run would use. Nothing about
  * the model, tools, or Discord travels through the environment.
  */
 function workerArgs(agent: ResolvedLocalAgent): string[] {
@@ -91,7 +91,7 @@ export class LocalAgentSupervisor {
     const instanceId = randomUUID()
     const child = spawn(process.execPath, ["--import", "tsx", this.options.workerEntry, ...workerArgs(this.agent)], {
       cwd: this.options.repoRoot,
-      env: { ...this.options.workerEnv, NIRI_WORKER_INSTANCE_ID: instanceId },
+      env: { ...this.options.workerEnv, NANO_WORKER_INSTANCE_ID: instanceId },
       stdio: "inherit",
     })
     this.child = child

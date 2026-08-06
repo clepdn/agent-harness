@@ -1,4 +1,4 @@
-# @mira/harness-protocol
+# @nano/harness-protocol
 
 Dependency-free contracts and runtime parsers for direct client tool calls and results.
 

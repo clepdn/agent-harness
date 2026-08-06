@@ -41,7 +41,7 @@ export function hasCap(keyEntry: ApiKeyEntry, cap: string): boolean {
  *
  * JSON format (array):
  * [
- *   { "key": "uuid-here", "allowedModels": ["*"], "name": "coral" },
+ *   { "key": "uuid-here", "allowedModels": ["*"], "name": "nano" },
  *   { "key": "uuid-here", "allowedModels": ["claude-*"], "name": "claude-only" },
  *   { "key": "uuid-here", "allowedModels": ["*"], "name": "me", "caps": ["admin"] }
  * ]

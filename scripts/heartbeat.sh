@@ -1,7 +1,7 @@
 #!/bin/bash
-CONF="${NIRI_HEARTBEAT_CONF:-/home/regent/Developer/niri/home/heartbeat.conf}"
-SERVER="${NIRI_SERVER_URL:-http://localhost:3000}"
-AGENT="${NIRI_AGENT_ID:-niri}"
+CONF="${NANO_HEARTBEAT_CONF:-/home/regent/Developer/nano/home/heartbeat.conf}"
+SERVER="${NANO_SERVER_URL:-http://localhost:3000}"
+AGENT="${NANO_AGENT_ID:-nano}"
 TRIGGER="${SERVER%/}/agents/${AGENT}/trigger/cron"
 
 INTERVAL=$(cat "$CONF" 2>/dev/null | grep -oE '^[0-9]+$' | head -1)

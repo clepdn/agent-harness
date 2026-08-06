@@ -1,7 +1,7 @@
 // Admin API + UI, mounted at /admin.
 //
 // Gated on the "admin" capability rather than mere possession of a valid key:
-// every coral agent holds a key with `allowedModels: ["*"]`, and none of them
+// every nano agent holds a key with `allowedModels: ["*"]`, and none of them
 // should be able to re-auth the accounts they run on.
 //
 // Note the deployment this sits in: nginx proxies all of :4040 to the public

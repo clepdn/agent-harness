@@ -1,0 +1,41 @@
+{
+  "name": "@nano/runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./server": "./src/server.ts"
+  },
+  "scripts": {
+    "predev": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/protocol && npm run build --workspace @nano/llm-bridge",
+    "prestart": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/protocol && npm run build --workspace @nano/llm-bridge",
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "pretest": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/protocol && npm run build --workspace @nano/llm-bridge",
+    "test": "NANO_CONFIG=../../test-config.toml NANO_HOME=/tmp/nano-runtime-test/home NANO_MIGRATE_LEGACY_STATE=false NANO_AGENT_STATE_DIR=/tmp/nano-runtime-test/state node --import tsx --test 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.1",
+    "@nano/harness-client-node": "*",
+    "@nano/harness-core": "*",
+    "@nano/harness-protocol": "*",
+    "@nano/harness-server": "*",
+    "@nano/protocol": "*",
+    "@nano/toml": "*",
+    "@oh-my-pi/pi-natives": "17.2.2",
+    "@openrouter/sdk": "^0.12.21",
+    "better-sqlite3": "^12.8.0",
+    "discord.js": "^14.25.1",
+    "fastify": "^5.8.4",
+    "openai": "^6.33.0",
+    "sqlite-vec": "^0.1.9"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}

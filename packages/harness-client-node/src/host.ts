@@ -1,5 +1,5 @@
 import path from "node:path"
-import type { ClientToolHost } from "@mira/harness-core"
+import type { ClientToolHost } from "@nano/harness-core"
 import {
   isToolCapability,
   type ClientImageArtifact,
@@ -8,7 +8,7 @@ import {
   type ToolCapability,
   type ToolInvocation,
   type WorkspaceDescriptor,
-} from "@mira/harness-protocol"
+} from "@nano/harness-protocol"
 import {
   CLIENT_HOME,
   CLIENT_WORKSPACE_ROOT,

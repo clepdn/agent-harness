@@ -16,7 +16,7 @@ import {
  * `cfg/` so the loader does not mistake them for agents.
  */
 function fixture(t: test.TestContext, files: Record<string, string> | ((dir: string) => Record<string, string>)): string {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "niri-agents-"))
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "nano-agents-"))
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
   fs.mkdirSync(path.join(directory, "cfg"), { recursive: true })
   for (const [name, contents] of Object.entries(typeof files === "function" ? files(directory) : files)) {
@@ -25,7 +25,7 @@ function fixture(t: test.TestContext, files: Record<string, string> | ((dir: str
   return directory
 }
 
-const options = { controlPort: 4300, repoRoot: "/tmp/niri-review" }
+const options = { controlPort: 4300, repoRoot: "/tmp/nano-review" }
 
 test("one toml file is one complete agent", (t) => {
   const directory = fixture(t, (dir) => ({
@@ -105,7 +105,7 @@ test("worker environment carries host basics and settings, never credentials", (
   assert.ok(agent)
   const env = buildWorkerEnvironment({ PATH: "/usr/bin", OPENAI_API_KEY: "inherited", SHELL: "/bin/bash" }, agent)
 
-  assert.equal(env.NIRI_AGENT_ID, "mira")
+  assert.equal(env.NANO_AGENT_ID, "mira")
   assert.equal(env.PORT, "4301")
   assert.equal(env.RUNNER_MAX_TURNS, "80")
   assert.equal(env.PATH, "/usr/bin")
@@ -124,10 +124,10 @@ test("unknown and reserved toml settings fail startup", (t) => {
   const lowercase = fixture(t, { "a.toml": "client = \"local\"\n\n[settings]\nrunner_max_turns = 80\n" })
   assert.throws(() => loadAgentFiles(lowercase), /uppercase runtime setting name/)
 
-  const reserved = fixture(t, { "a.toml": "client = \"local\"\n\n[settings]\nNIRI_CLIENT = \"local\"\n" })
+  const reserved = fixture(t, { "a.toml": "client = \"local\"\n\n[settings]\nNANO_CLIENT = \"local\"\n" })
   assert.throws(() => loadAgentFiles(reserved), /managed by the server/)
 
-  const configVar = fixture(t, { "a.toml": "client = \"local\"\n\n[settings]\nCORAL_CONFIG = \"/etc/coral/config.toml\"\n" })
+  const configVar = fixture(t, { "a.toml": "client = \"local\"\n\n[settings]\nNANO_CONFIG = \"/etc/nano/config.toml\"\n" })
   assert.throws(() => loadAgentFiles(configVar), /managed by the server/)
 })
 

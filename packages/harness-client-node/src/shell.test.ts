@@ -94,7 +94,7 @@ test("cleanOutput collapses terminal redraw controls", () => {
 })
 
 test("sudo commands run as one-off commands with stdin closed", async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "niri-fake-sudo-"))
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "nano-fake-sudo-"))
   const fakeSudo = path.join(dir, "sudo")
   await fs.writeFile(
     fakeSudo,

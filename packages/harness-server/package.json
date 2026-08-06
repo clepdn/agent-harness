@@ -1,5 +1,5 @@
 {
-  "name": "@mira/harness-server",
+  "name": "@nano/harness-server",
   "version": "0.1.0",
   "description": "Tiny direct HTTP client for remote AI harness tools.",
   "license": "MIT",
@@ -19,12 +19,12 @@
     "build": "tsc -p tsconfig.build.json",
     "prepack": "npm run build",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "pretest": "npm run build --workspace @mira/harness-protocol && npm run build --workspace @mira/harness-core && npm run build",
+    "pretest": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build",
     "test": "node --import tsx --test 'src/**/*.test.ts'"
   },
   "dependencies": {
-    "@mira/harness-core": "0.1.0",
-    "@mira/harness-protocol": "0.1.0"
+    "@nano/harness-core": "0.1.0",
+    "@nano/harness-protocol": "0.1.0"
   },
   "publishConfig": { "access": "public" },
   "engines": { "node": ">=20" },

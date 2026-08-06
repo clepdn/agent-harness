@@ -1,8 +1,8 @@
 import http from "node:http"
 import { timingSafeEqual } from "node:crypto"
 import type { AddressInfo } from "node:net"
-import type { ClientToolHost } from "@mira/harness-core"
-import { isClientToolName, parseToolInvocation } from "@mira/harness-protocol"
+import type { ClientToolHost } from "@nano/harness-core"
+import { isClientToolName, parseToolInvocation } from "@nano/harness-protocol"
 
 export type ToolClientHttpServerOptions = {
   host: ClientToolHost

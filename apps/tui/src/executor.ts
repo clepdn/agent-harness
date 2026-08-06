@@ -4,7 +4,7 @@ import {
   NodeToolHost,
   ToolClientHttpServer,
   parseToolCapabilities,
-} from "@mira/harness-client-node"
+} from "@nano/harness-client-node"
 
 export type ExecutorOptions = {
   workspaceRoot: string

@@ -4,8 +4,8 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..")
-const CONTROL_HOME = path.resolve(process.env.NIRI_CONTROL_HOME ?? path.join(REPO_ROOT, "data", "control"))
-const CONTROL_DB_PATH = path.resolve(process.env.NIRI_CONTROL_DB ?? path.join(CONTROL_HOME, "control.db"))
+const CONTROL_HOME = path.resolve(process.env.NANO_CONTROL_HOME ?? path.join(REPO_ROOT, "data", "control"))
+const CONTROL_DB_PATH = path.resolve(process.env.NANO_CONTROL_DB ?? path.join(CONTROL_HOME, "control.db"))
 
 let db: Database.Database
 const DEFAULT_REPLAY_TAIL_ROWS = 5000

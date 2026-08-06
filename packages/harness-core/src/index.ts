@@ -4,7 +4,7 @@ import type {
   ToolCapability,
   ToolInvocation,
   WorkspaceDescriptor,
-} from "@mira/harness-protocol"
+} from "@nano/harness-protocol"
 
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue }
 export type JsonSchema = { [key: string]: JsonValue }

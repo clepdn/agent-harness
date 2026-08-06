@@ -1,5 +1,5 @@
 {
-  "name": "@niri/web",
+  "name": "@nano/web",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@niri/chat-client": "*",
+    "@nano/chat-client": "*",
     "highlight.js": "^11.11.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
