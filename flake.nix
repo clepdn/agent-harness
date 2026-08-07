@@ -439,10 +439,15 @@ description = ''
     };
 
     capabilities = lib.mkOption {
-type    = lib.types.nullOr (lib.types.listOf lib.types.str);
+type    = lib.types.nullOr (lib.types.listOf (lib.types.enum [ "shell" "read_file" "edit_file" "image_tool" ]));
 default = null;
-example = lib.literalExpression ''[ "shell" "file" "image" ]'';
-description = "Tool capabilities the executor exposes. Null = all built-in client tools.";
+example = lib.literalExpression ''[ "shell" "read_file" ]'';
+description = ''
+    Client tools the executor exposes; must be a subset of
+    CLIENT_TOOL_NAMES (harness-protocol). Null = all of them.
+    Server-side tools (computer, discord, memory, ...) are not
+    executor capabilities and cannot be listed here.
+'';
     };
 
     hashline = lib.mkOption {
