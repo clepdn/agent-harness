@@ -27,7 +27,7 @@ import { pushToolMessage, recordToolResult, runStandardTool, toolError } from ".
 import { findSubagent, runSubagent } from "./subagent"
 import { startJob } from "./jobs"
 import { describeContextSummary, expandContextSummary, grepContext } from "./context-store"
-import { saveRestSnapshot } from "./util"
+import { clearSession, saveRestSnapshot } from "./util"
 import { compactForShutdown } from "./loop"
 import { executeAction } from "./computer-use"
 
@@ -120,6 +120,14 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       } catch (err) {
         console.warn(`[runner] end_session compaction failed: ${err instanceof Error ? err.message : String(err)}`)
       }
+      // Actually END the session: delete the full-conversation session.json so
+      // the next wake does NOT rehydrate verbatim via loadSession(). Without
+      // this, end_session was indistinguishable from wait — the runtime
+      // snapshot persisted and the next event restored the entire prior
+      // context. Clearing it makes the next wake bootstrap fresh from just the
+      // rest-snapshot summary.
+      await clearSession()
+      console.log("[runner] end_session cleared session.json — next wake starts fresh")
       return { shouldRest: true }
     },
 
