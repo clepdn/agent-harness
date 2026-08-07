@@ -482,6 +482,11 @@ enable             = true;
 wheelNeedsPassword = false;
     };
 
+    # WorkingDirectory is a hard precondition: no workspace, 200/CHDIR.
+    systemd.tmpfiles.rules = [
+"d ${cfg.workspace} 0700 ${cfg.user} ${cfg.group} - -"
+    ];
+
     systemd.services.nano-executor =
 let
     capsFlag  = lib.optionalString (cfg.capabilities != null) " --capabilities ${lib.escapeShellArg (lib.concatStringsSep "," cfg.capabilities)}";
