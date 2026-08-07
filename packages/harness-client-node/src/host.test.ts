@@ -113,3 +113,59 @@ test("the model shell does not inherit harness daemon secrets", async () => {
     await fs.rm(workspace, { recursive: true, force: true })
   }
 })
+
+test("read_bytes returns a file artifact and refuses to exceed the caller's ceiling", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-bytes-"))
+  const file = path.join(workspace, "upload.bin")
+  await fs.writeFile(file, Buffer.from([0, 1, 2, 3, 4]))
+  const host = new NodeToolHost({ capabilities: ["read_bytes"], workspace: { id: "test", root: workspace } })
+  try {
+    const result = await host.execute(invocation("read_bytes", { path: file }))
+    assert.equal(result.status, "ok")
+    assert.equal(result.image, undefined)
+    assert.equal(result.file?.bytes, 5)
+    assert.equal(result.file?.mime, "application/octet-stream")
+    assert.equal(Buffer.from(result.file?.dataUrl.split(",")[1] ?? "", "base64").length, 5)
+
+    const capped = await host.execute(invocation("read_bytes", { path: file, max_bytes: 4 }))
+    assert.equal(capped.status, "error")
+    assert.match(capped.output ?? "", /file too large: 5 bytes \(max 4\)/)
+  } finally {
+    await host.stop()
+    await fs.rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test("a capability the host does not expose is refused, not attempted", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-caps-"))
+  const host = new NodeToolHost({ capabilities: ["shell"], workspace: { id: "test", root: workspace } })
+  try {
+    const result = await host.execute(invocation("computer", { action: "screenshot" }))
+    assert.equal(result.status, "error")
+    assert.match(result.output ?? "", /client does not expose computer/)
+  } finally {
+    await host.stop()
+    await fs.rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test("computer rejects an action it cannot perform before touching the display", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-computer-"))
+  const host = new NodeToolHost({ capabilities: ["computer"], workspace: { id: "test", root: workspace } })
+  try {
+    const unknown = await host.execute(invocation("computer", { action: "teleport" }))
+    assert.equal(unknown.status, "error")
+    assert.match(unknown.output ?? "", /unsupported computer action: teleport/)
+
+    const empty = await host.execute(invocation("computer", { action: "keypress", keys: [] }))
+    assert.equal(empty.status, "error")
+    assert.match(empty.output ?? "", /keypress requires at least one key/)
+
+    const waited = await host.execute(invocation("computer", { action: "wait", duration: 1 }))
+    assert.equal(waited.status, "ok")
+    assert.equal(waited.output, "waited 1ms")
+  } finally {
+    await host.stop()
+    await fs.rm(workspace, { recursive: true, force: true })
+  }
+})

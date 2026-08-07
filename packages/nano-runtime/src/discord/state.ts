@@ -7,7 +7,6 @@
  * @module discord/state
  */
 
-import path from "path"
 import { Routes } from "discord.js"
 import { config } from "../config"
 import {
@@ -62,6 +61,7 @@ import {
   withDiscordRestRetry,
 } from "./rest"
 import { maybeFetchAndCachePronouns } from "./pronouns"
+import { readClientFile } from "../client"
 
 // ── result types ───────────────────────────────────────────────────────
 
@@ -662,27 +662,19 @@ export async function uploadDiscordFile(params: {
   const filePath = String(params.filePath ?? "").trim()
   if (!filePath) throw new Error("file_path is required")
 
-  // Resolve and validate before reading
-  const { stat, readFile } = await import("fs/promises")
-
-  const resolved = path.resolve(filePath)
+  // The path names the attached client's filesystem, not ours.
   let fileBuf: Buffer
   let fileName: string
   let fileSize: number
 
   try {
-    const st = await stat(resolved)
-    if (!st.isFile()) throw new Error(`not a regular file: ${resolved}`)
-    fileSize = st.size
-    if (fileSize > DISCORD_MAX_FILE_BYTES) {
-      throw new Error(`file too large: ${fileSize} bytes (max ${DISCORD_MAX_FILE_BYTES})`)
-    }
-    fileName = path.basename(resolved)
-    fileBuf = await readFile(resolved)
+    const artifact = await readClientFile(filePath, DISCORD_MAX_FILE_BYTES)
+    fileBuf = artifact.data
+    fileName = artifact.name
+    fileSize = artifact.data.length
   } catch (err) {
-    if (err instanceof Error && err.message.startsWith("file too large")) throw err
-    if (err instanceof Error && err.message.startsWith("not a regular file")) throw err
     const msg = err instanceof Error ? err.message : String(err)
+    if (msg.startsWith("file too large") || msg.startsWith("not a regular file")) throw new Error(msg)
     throw new Error(`cannot read upload file: ${msg}`)
   }
 

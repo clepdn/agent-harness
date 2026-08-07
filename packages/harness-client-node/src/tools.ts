@@ -1,10 +1,11 @@
 import { randomBytes } from "node:crypto"
 import fs from "node:fs/promises"
 import path from "node:path"
-import type { ClientImageArtifact } from "@nano/harness-protocol"
+import type { ClientFileArtifact, ClientImageArtifact } from "@nano/harness-protocol"
 import {
   DEFAULT_COMMAND_TIMEOUT_MS,
   DEFAULT_FILE_TIMEOUT_MS,
+  FILE_MAX_BYTES,
   IMAGE_MAX_BYTES,
   IMAGE_ROOT,
   MAX_LINE_LENGTH,
@@ -524,5 +525,59 @@ export async function editFile(filePath: string, oldText: string, newText: strin
   return {
     ok: true,
     message: `edited ${filePath} (${sign}${linesDelta} lines)`,
+  }
+}
+
+const EXTENSION_MIME: Record<string, string> = {
+  ".css": "text/css",
+  ".csv": "text/csv",
+  ".gif": "image/gif",
+  ".gz": "application/gzip",
+  ".html": "text/html",
+  ".jpeg": "image/jpeg",
+  ".jpg": "image/jpeg",
+  ".js": "text/javascript",
+  ".json": "application/json",
+  ".log": "text/plain",
+  ".md": "text/markdown",
+  ".mp3": "audio/mpeg",
+  ".mp4": "video/mp4",
+  ".pdf": "application/pdf",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".tar": "application/x-tar",
+  ".txt": "text/plain",
+  ".wav": "audio/wav",
+  ".webm": "video/webm",
+  ".webp": "image/webp",
+  ".zip": "application/zip",
+}
+
+/**
+ * Read a file off the client verbatim, as base64. This is the transport for
+ * artifacts the control plane has to hold in memory — Discord uploads, say —
+ * which live on the client's filesystem and nowhere else.
+ */
+export async function readFileBytes(filePath: string, maxBytes?: number, timeoutMs?: number): Promise<ClientFileArtifact> {
+  if (USE_DOCKER_SHELL) throw new Error("read_bytes is unavailable behind the Docker shell")
+  const opTimeoutMs = normalizeTimeoutMs(timeoutMs, DEFAULT_FILE_TIMEOUT_MS)
+  const limit = Math.min(
+    FILE_MAX_BYTES,
+    typeof maxBytes === "number" && Number.isFinite(maxBytes) && maxBytes > 0 ? Math.trunc(maxBytes) : FILE_MAX_BYTES,
+  )
+
+  const resolvedPath = await resolveLocalPath(filePath, opTimeoutMs)
+  const st = await withTimeout(fs.stat(resolvedPath), opTimeoutMs, "file stat")
+  if (!st.isFile()) throw new Error(`not a regular file: ${filePath}`)
+  if (st.size <= 0) throw new Error(`file is empty: ${filePath}`)
+  if (st.size > limit) throw new Error(`file too large: ${st.size} bytes (max ${limit})`)
+
+  const data = await fs.readFile(resolvedPath, { signal: AbortSignal.timeout(opTimeoutMs) })
+  const mime = imageMimeFromBytes(data) ?? EXTENSION_MIME[path.extname(resolvedPath).toLowerCase()] ?? "application/octet-stream"
+  return {
+    path: resolvedPath,
+    mime,
+    bytes: data.length,
+    dataUrl: `data:${mime};base64,${data.toString("base64")}`,
   }
 }

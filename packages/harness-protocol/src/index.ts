@@ -1,4 +1,4 @@
-export const CLIENT_TOOL_NAMES = ["shell", "read_file", "edit_file", "image_tool"] as const
+export const CLIENT_TOOL_NAMES = ["shell", "read_file", "edit_file", "image_tool", "computer", "read_bytes"] as const
 
 export type ClientToolName = (typeof CLIENT_TOOL_NAMES)[number]
 export type ToolCapability = ClientToolName
@@ -30,6 +30,9 @@ export type ClientImageArtifact = {
   dataUrl: string
 }
 
+/** Any file pulled off the client verbatim. Same shape, unconstrained mime. */
+export type ClientFileArtifact = ClientImageArtifact
+
 export type ClientToolResult = {
   type: "tool.result"
   invocationId: string
@@ -37,6 +40,7 @@ export type ClientToolResult = {
   status: "ok" | "error" | "cancelled" | "unknown"
   output?: string
   image?: ClientImageArtifact
+  file?: ClientFileArtifact
   completedAt: string
 }
 
@@ -89,6 +93,29 @@ export function parseToolInvocation(value: unknown): ToolInvocation | null {
   }
 }
 
+function validArtifact(value: Record<string, unknown>, mimePattern: RegExp, status: unknown): boolean {
+  return (
+    nonEmptyString(value.path) &&
+    nonEmptyString(value.mime) &&
+    mimePattern.test(value.mime) &&
+    typeof value.bytes === "number" &&
+    Number.isSafeInteger(value.bytes) &&
+    value.bytes > 0 &&
+    nonEmptyString(value.dataUrl) &&
+    value.dataUrl.startsWith(`data:${value.mime};base64,`) &&
+    status === "ok"
+  )
+}
+
+function artifact(value: Record<string, unknown>): ClientImageArtifact {
+  return {
+    path: String(value.path),
+    mime: String(value.mime),
+    bytes: Number(value.bytes),
+    dataUrl: String(value.dataUrl),
+  }
+}
+
 export function parseClientToolResult(value: unknown): ClientToolResult | null {
   const input = record(value)
   if (
@@ -105,20 +132,11 @@ export function parseClientToolResult(value: unknown): ClientToolResult | null {
 
   const image = input.image === undefined ? null : record(input.image)
   if (input.image !== undefined && !image) return null
-  if (
-    image &&
-    (!nonEmptyString(image.path) ||
-      !nonEmptyString(image.mime) ||
-      !/^image\/[a-z0-9.+-]+$/i.test(image.mime) ||
-      typeof image.bytes !== "number" ||
-      !Number.isSafeInteger(image.bytes) ||
-      image.bytes <= 0 ||
-      !nonEmptyString(image.dataUrl) ||
-      !image.dataUrl.startsWith(`data:${image.mime};base64,`) ||
-      input.status !== "ok")
-  ) {
-    return null
-  }
+  if (image && !validArtifact(image, /^image\/[a-z0-9.+-]+$/i, input.status)) return null
+
+  const file = input.file === undefined ? null : record(input.file)
+  if (input.file !== undefined && !file) return null
+  if (file && !validArtifact(file, /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i, input.status)) return null
 
   return {
     type: "tool.result",
@@ -126,16 +144,8 @@ export function parseClientToolResult(value: unknown): ClientToolResult | null {
     agentId: input.agentId.trim(),
     status: input.status as ClientToolResult["status"],
     ...(typeof input.output === "string" ? { output: input.output } : {}),
-    ...(image
-      ? {
-          image: {
-            path: String(image.path),
-            mime: String(image.mime),
-            bytes: Number(image.bytes),
-            dataUrl: String(image.dataUrl),
-          },
-        }
-      : {}),
+    ...(image ? { image: artifact(image) } : {}),
+    ...(file ? { file: artifact(file) } : {}),
     completedAt: input.completedAt,
   }
 }

@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs"
+import { basename } from "node:path"
 import { randomUUID } from "node:crypto"
 import { NodeToolHost } from "@nano/harness-client-node"
 import type { ClientToolExecutor } from "@nano/harness-core"
@@ -106,3 +107,32 @@ const baseClient: ConfiguredToolClient = client === "local"
 // runtime via the /client/connect handshake (see server.ts). This is the
 // direct-connection / pwd-mount feature.
 export const clientTools: SwitchableToolClient = new SwitchableToolClient(AGENT_ID, baseClient)
+
+/**
+ * Pull a file off the attached client as raw bytes. Tool-supplied paths name
+ * the client's filesystem, which is a different machine whenever the executor
+ * is remote, so anything the control plane has to hold in memory (a Discord
+ * upload, say) has to come across the wire.
+ */
+export async function readClientFile(
+  filePath: string,
+  maxBytes: number,
+  timeoutMs = 120_000,
+): Promise<{ path: string; name: string; mime: string; data: Buffer }> {
+  const result = await clientTools.execute({
+    agentId: AGENT_ID,
+    tool: "read_bytes",
+    args: { path: filePath, max_bytes: maxBytes },
+    timeoutMs,
+  })
+  if (result.status !== "ok" || !result.file) {
+    throw new Error(result.output?.replace(/^error:\s*/, "") || "read_bytes returned no file")
+  }
+  const { file } = result
+  return {
+    path: file.path,
+    name: basename(file.path),
+    mime: file.mime,
+    data: Buffer.from(file.dataUrl.slice(file.dataUrl.indexOf(",") + 1), "base64"),
+  }
+}

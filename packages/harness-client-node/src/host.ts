@@ -20,7 +20,8 @@ import {
   type NodeToolRuntimeOptions,
 } from "./config.js"
 import { closeBash, currentWorkingDirectory, openBash } from "./shell.js"
-import { editFile, readFile, readImageForModel, runCommand } from "./tools.js"
+import { editFile, readFile, readFileBytes, readImageForModel, runCommand } from "./tools.js"
+import { executeComputerAction, parseComputerAction } from "./computer.js"
 import { hashlineEdit, hashlineRead } from "./hashline/index.js"
 
 export type NodeToolHostOptions = {
@@ -34,7 +35,7 @@ export type NodeToolHostOptions = {
   hashline?: boolean
 }
 
-const ALL_CAPABILITIES: ToolCapability[] = ["shell", "read_file", "edit_file", "image_tool"]
+const ALL_CAPABILITIES: ToolCapability[] = ["shell", "read_file", "edit_file", "image_tool", "computer", "read_bytes"]
 
 export function parseToolCapabilities(value?: string): ToolCapability[] {
   const raw = value?.trim()
@@ -133,12 +134,18 @@ export class NodeToolHost implements ClientToolHost {
       this.assertActiveRuntime()
       await this.start()
       const output = await this.executeTool(invocation.tool, invocation.args)
+      const artifact =
+        typeof output === "string"
+          ? { output: boundedText(output) }
+          : invocation.tool === "read_bytes"
+            ? { file: output }
+            : { image: output }
       return {
         type: "tool.result",
         invocationId: invocation.invocationId,
         agentId: invocation.agentId,
         status: "ok",
-        ...(typeof output === "string" ? { output: boundedText(output) } : { image: output }),
+        ...artifact,
         completedAt: new Date().toISOString(),
       }
     } catch (error) {
@@ -202,6 +209,16 @@ export class NodeToolHost implements ClientToolHost {
       case "image_tool": {
         return readImageForModel(
           String(args.path ?? ""),
+          typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
+        )
+      }
+      case "computer": {
+        return executeComputerAction(parseComputerAction(args))
+      }
+      case "read_bytes": {
+        return readFileBytes(
+          String(args.path ?? ""),
+          typeof args.max_bytes === "number" ? args.max_bytes : undefined,
           typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
         )
       }

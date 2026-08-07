@@ -29,9 +29,11 @@ import { startJob } from "./jobs"
 import { describeContextSummary, expandContextSummary, grepContext } from "./context-store"
 import { clearSession, saveRestSnapshot } from "./util"
 import { compactForShutdown } from "./loop"
-import { executeAction } from "./computer-use"
 
 const DEFAULT_WAIT_THEN_CONTINUE_MS = 10_000
+// Screenshot capture alone allows 30s at the client; keep the invocation
+// deadline clear of it.
+const COMPUTER_TIMEOUT_MS = 60_000
 
 /**
  * Invoke a tool on the attached client. Undefined args are dropped so the
@@ -559,38 +561,45 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       let result: string
 
       try {
-        const res = await executeAction({
-          action: String(args.action ?? ""),
-          x: args.x as number | undefined,
-          y: args.y as number | undefined,
-          button: args.button as string | undefined,
-          text: args.text as string | undefined,
-          keys: args.keys as string[] | undefined,
-          scroll_x: args.scroll_x as number | undefined,
-          scroll_y: args.scroll_y as number | undefined,
-          path: args.path as Array<[number, number]> | undefined,
-          duration: args.duration as number | undefined,
+        // Runs on the attached client, so the X display driven is the
+        // executor's. `display` rides along because the config naming it lives
+        // here on the control plane, not out at the executor.
+        const res = await clientTools.execute({
+          agentId: AGENT_ID,
+          tool: "computer",
+          args: {
+            ...args,
+            ...(config.computer_use.display ? { display: config.computer_use.display } : {}),
+          },
+          timeoutMs: COMPUTER_TIMEOUT_MS,
         })
+        if (res.status !== "ok") throw new Error(res.output ?? "computer action failed")
 
-        result = pushToolMessage(convId, state, call, res.output)
+        const image = res.image
+        result = pushToolMessage(
+          convId,
+          state,
+          call,
+          image ? `screenshot captured (${image.bytes} bytes)` : res.output || "(no output)",
+        )
 
         // If the action returned an image (screenshot), push it as a multimodal message
-        if (res.image) {
-          const commaIdx = res.image.dataUrl.indexOf(",")
-          const mimeMatch = res.image.dataUrl.match(/data:([^;]+)/)
-          const mimeType = mimeMatch?.[1] ?? res.image.mime
-          const data = commaIdx >= 0 ? res.image.dataUrl.slice(commaIdx + 1) : res.image.dataUrl
+        if (image) {
+          const commaIdx = image.dataUrl.indexOf(",")
+          const mimeMatch = image.dataUrl.match(/data:([^;]+)/)
+          const mimeType = mimeMatch?.[1] ?? image.mime
+          const data = commaIdx >= 0 ? image.dataUrl.slice(commaIdx + 1) : image.dataUrl
 
           const imageMessage: PiUserMessage = {
             role: "user",
             content: [
-              { type: "text", text: `[screenshot] ${res.image.path}` },
+              { type: "text", text: `[screenshot] ${image.path}` },
               { type: "image", data, mimeType },
             ],
             timestamp: Date.now(),
           }
           state.conversation.push(imageMessage)
-          logMessage(convId, "user", `[computer] screenshot\npath=${res.image.path}`)
+          logMessage(convId, "user", `[computer] screenshot\npath=${image.path}`)
         }
       } catch (err) {
         result = recordToolResult(convId, state, call, "computer", { action: args.action }, toolError(err))

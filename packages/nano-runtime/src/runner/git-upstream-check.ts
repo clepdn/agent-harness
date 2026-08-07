@@ -1,5 +1,6 @@
-import { execFile } from "node:child_process"
 import path from "node:path"
+import { AGENT_ID } from "../agent-config"
+import { clientTools } from "../client"
 import { logMessage } from "../db"
 import type { LoopState } from "./types"
 
@@ -10,12 +11,22 @@ const THROTTLE_MS = 10 * 60 * 1000 // 10 minutes
 /** In-flight checks: toplevel → boolean (prevents concurrent fetches for same repo). */
 const inFlight = new Set<string>()
 
-function execFileAsync(file: string, args: string[], opts: { timeout: number }): Promise<{ stdout: string; stderr: string; ok: boolean }> {
-  return new Promise((resolve) => {
-    execFile(file, args, { ...opts, encoding: "utf-8" }, (err, stdout, stderr) => {
-      resolve({ stdout, stderr, ok: !err })
-    })
+/**
+ * Run git where the files actually are: on the attached client. The repo the
+ * agent edits lives in its workspace, which is a different machine whenever
+ * the executor is remote. Output is combined and git reports failure in the
+ * text, because the client shell does not surface exit codes.
+ */
+async function clientGit(directory: string, args: string, timeoutMs: number): Promise<string> {
+  const target = `'${directory.replace(/'/g, "'\\''")}'`
+  const result = await clientTools.execute({
+    agentId: AGENT_ID,
+    tool: "shell",
+    args: { command: `git -C ${target} ${args} 2>&1`, max_lines: 0, timeout_ms: timeoutMs },
+    timeoutMs: timeoutMs + 5_000,
   })
+  if (result.status !== "ok") return ""
+  return (result.output ?? "").trim()
 }
 
 /**
@@ -36,10 +47,9 @@ export function checkGitUpstream(
     let toplevel: string
     try {
       const dir = path.dirname(filePath)
-      const { stdout, ok } = await execFileAsync("git", ["-C", dir, "rev-parse", "--show-toplevel"], { timeout: 5000 })
-      if (!ok) return // exit 128 — not in a git repo
-      toplevel = stdout.trim()
-      if (!toplevel) return
+      const firstLine = (await clientGit(dir, "rev-parse --show-toplevel", 5000)).split("\n")[0] ?? ""
+      toplevel = firstLine.trim()
+      if (!toplevel.startsWith("/")) return // not in a git repo
     } catch {
       return
     }
@@ -55,10 +65,9 @@ export function checkGitUpstream(
 
     try {
       // 4. Run git fetch
-      const { stdout, stderr, ok } = await execFileAsync("git", ["-C", toplevel, "fetch"], { timeout: 30000 })
-      if (!ok) return // fetch failed — don't throttle, let it retry
-
-      const output = (stdout + stderr).trim()
+      const output = await clientGit(toplevel, "fetch", 30000)
+      // fetch failed — don't throttle, let it retry
+      if (/^(fatal|error):/m.test(output)) return
 
       // 5. If fetch output is non-empty, upstream has changed — nag
       if (output) {

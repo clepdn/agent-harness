@@ -439,15 +439,31 @@ description = ''
     };
 
     capabilities = lib.mkOption {
-type    = lib.types.nullOr (lib.types.listOf (lib.types.enum [ "shell" "read_file" "edit_file" "image_tool" ]));
+type    = lib.types.nullOr (lib.types.listOf (lib.types.enum [ "shell" "read_file" "edit_file" "image_tool" "computer" "read_bytes" ]));
 default = null;
 example = lib.literalExpression ''[ "shell" "read_file" ]'';
 description = ''
     Client tools the executor exposes; must be a subset of
     CLIENT_TOOL_NAMES (harness-protocol). Null = all of them.
-    Server-side tools (computer, discord, memory, ...) are not
-    executor capabilities and cannot be listed here.
+    Server-side tools (discord, memory, ...) run in the control
+    plane and are not executor capabilities.
 '';
+    };
+
+    imageMaxBytes = lib.mkOption {
+type    = lib.types.nullOr lib.types.ints.positive;
+default = null;
+description = ''
+    Ceiling for images the executor hands back (image_tool, computer
+    screenshots). Null keeps the client default of 1 MB, which a
+    full-desktop screenshot will exceed.
+'';
+    };
+
+    fileMaxBytes = lib.mkOption {
+type    = lib.types.nullOr lib.types.ints.positive;
+default = null;
+description = "Ceiling for read_bytes transfers. Null keeps the client default of 25 MB.";
     };
 
     hashline = lib.mkOption {
@@ -507,6 +523,10 @@ in {
     after    = [ "network.target" ];
     wants    = [ "network.target" ];
     wantedBy = [ "multi-user.target" ];
+
+    environment =
+      lib.optionalAttrs (cfg.imageMaxBytes != null) { HARNESS_IMAGE_MAX_BYTES = toString cfg.imageMaxBytes; }
+      // lib.optionalAttrs (cfg.fileMaxBytes != null) { HARNESS_FILE_MAX_BYTES = toString cfg.fileMaxBytes; };
 
     serviceConfig = {
 User             = cfg.user;

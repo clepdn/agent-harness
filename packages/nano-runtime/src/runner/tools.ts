@@ -1,9 +1,12 @@
 import type { Context, Tool, TSchema } from "../llm"
 import { config } from "../config"
 import { imageRootForModelInput } from "../container/index"
+import { clientTools } from "../client"
 import type { LoopState } from "./types"
 
-const IMAGE_ROOT_HINT = imageRootForModelInput()
+// Placeholder: the real root belongs to whichever client is attached, which
+// can change mid-session via the /client/connect handshake.
+const IMAGE_ROOT_HINT = "{{IMAGE_ROOT}}"
 
 /** Cast a plain JSON Schema object to the TSchema type. */
 function s(schema: Record<string, unknown>): TSchema {
@@ -98,7 +101,7 @@ export const TOOLS: Tool[] = [
     parameters: s({
       type: "object",
       properties: {
-        path: { type: "string", description: `Absolute path to an image file (for example ${IMAGE_ROOT_HINT}/screenshot.png).` },
+        path: { type: "string", description: "Absolute path to an image file." },
         note: { type: "string", description: "Optional text instruction to accompany the image for the next turn." },
         timeout_ms: { type: "integer", description: "Read timeout in milliseconds. Defaults to 120000. Max 600000." },
       },
@@ -312,9 +315,16 @@ export function isToolEnabled(name: string): boolean {
   return enabled && !blacklisted_tools.includes(name)
 }
 
+/** Resolve {{IMAGE_ROOT}} against the attached client's workspace. */
+function withImageRoot(tool: Tool): Tool {
+  if (!tool.description.includes(IMAGE_ROOT_HINT)) return tool
+  const root = clientTools.getWorkspace()?.imageRoot || imageRootForModelInput()
+  return { ...tool, description: tool.description.replaceAll(IMAGE_ROOT_HINT, root) }
+}
+
 /** Filtered tool list for the main agent (after [tools] config). */
 function getActiveTools(): Tool[] {
-  return TOOLS.filter((t) => isToolEnabled(t.name))
+  return TOOLS.filter((t) => isToolEnabled(t.name)).map(withImageRoot)
 }
 
 /**
@@ -335,7 +345,7 @@ export function isToolEnabledForSubagent(
 
 /** Filtered tool list for a subagent. */
 export function getSubagentTools(enabledTools: string[], blacklistedTools: string[]): Tool[] {
-  return TOOLS.filter((t) => isToolEnabledForSubagent(t.name, enabledTools, blacklistedTools))
+  return TOOLS.filter((t) => isToolEnabledForSubagent(t.name, enabledTools, blacklistedTools)).map(withImageRoot)
 }
 
 // ── Context builder ──────────────────────────────────────────────────────────
