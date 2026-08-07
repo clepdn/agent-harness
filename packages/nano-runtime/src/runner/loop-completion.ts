@@ -4,7 +4,7 @@ import type { OpenAICompletionsOptions } from "../llm"
 import { logMessage } from "../db"
 import { setContextSize } from "../discord/status-updater"
 import { buildCompletionMessages, rememberRecalledMemoryChunks } from "../memory"
-import { recordMetric } from "../metrics"
+import { recordMetric, summarizePromptResponse } from "../metrics"
 import { recordLlmRequest } from "../prometheus"
 import { emit } from "../stream"
 import type { LoopState } from "./types"
@@ -79,15 +79,12 @@ function recordPromptResponse(
   toolChoice: string | undefined,
   state: LoopState,
   result: CompletionTurnResult,
-  promptMetricId: number | null,
 ): void {
   recordMetric({
     type: "prompt_response",
-    promptMetricId: promptMetricId ?? undefined,
     model,
     toolChoice,
-    messages: state.conversation as import("../types").Message[],
-    response: result.message,
+    ...summarizePromptResponse(state.conversation as import("../types").Message[], result.message),
     usage: result.usage,
   })
 }
@@ -161,7 +158,6 @@ async function createStreamedCompletion(
     ...(modelState.enableThinking ? { reasoningEffort: modelState.thinkingEffort } : {}),
   }
 
-  const promptMetricId = recordMetric({ type: "prompt", messages: state.conversation as import("../types").Message[] })
   const eventStream = stream(model, context, options)
 
   let emittedText = false
@@ -199,7 +195,7 @@ async function createStreamedCompletion(
 
   recordLlmRequest(model.id, "success", usage, tokensPerSecond)
 
-  recordPromptResponse(model.id, toolChoice, state, { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond }, promptMetricId)
+  recordPromptResponse(model.id, toolChoice, state, { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond })
 
   return { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond }
 }

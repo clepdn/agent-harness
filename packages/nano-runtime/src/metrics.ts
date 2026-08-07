@@ -12,18 +12,18 @@ export interface BaseMetricEvent {
   timestamp: string
 }
 
-export interface PromptMetric extends BaseMetricEvent {
-  type: "prompt"
-  messages: Message[]
-}
-
 export interface PromptResponseMetric extends BaseMetricEvent {
   type: "prompt_response"
-  promptMetricId?: number
   model: string
   toolChoice?: string
-  messages: Message[]
-  response: AssistantMessage
+  // Derived summary fields only — we deliberately do NOT store the full
+  // messages[] or response body. They were hundreds of KB per turn, stored
+  // for a detail view that the dashboard never rendered, and bloated
+  // metrics.db to multiple GB. The list view only ever needs these.
+  messageCount?: number
+  lastUserMessage?: string
+  responsePreview?: string
+  toolCallCount?: number
   usage?: Usage
 }
 
@@ -46,10 +46,10 @@ export interface UsageMetric extends BaseMetricEvent {
   usage: Usage
 }
 
-export type MetricEvent = PromptMetric | PromptResponseMetric | MemoryMetric | CompactionMetric | UsageMetric
+export type MetricEvent = PromptResponseMetric | MemoryMetric | CompactionMetric | UsageMetric
 
-export type MetricListType = "response" | "summarization" | "memory" | "prompt" | "usage" | "discord"
-export type MetricBucketName = "memories" | "summarization" | "response" | "prompt" | "usage" | "discord"
+export type MetricListType = "response" | "summarization" | "memory" | "usage" | "discord"
+export type MetricBucketName = "memories" | "summarization" | "response" | "usage" | "discord"
 
 export type MetricListItem =
   | (BaseMetricListItem & {
@@ -76,11 +76,6 @@ export type MetricListItem =
       type: "memory"
       queryPreview?: string
       resultCount?: number
-    })
-  | (BaseMetricListItem & {
-      type: "prompt"
-      messageCount?: number
-      lastUserMessage?: string
     })
   | (BaseMetricListItem & {
       type: "usage"
@@ -124,7 +119,6 @@ export interface MetricsPage {
   memories: MetricListItem[]
   summarization: MetricListItem[]
   response: MetricListItem[]
-  prompt: MetricListItem[]
   usage: MetricListItem[]
   discord: DiscordMetricListItem[]
   limit: number
@@ -140,7 +134,6 @@ export interface MetricsPage {
 }
 
 export type MetricEventInput =
-  | Omit<PromptMetric, "timestamp">
   | Omit<PromptResponseMetric, "timestamp">
   | Omit<MemoryMetric, "timestamp">
   | Omit<CompactionMetric, "timestamp">
@@ -267,19 +260,17 @@ export function recordMetric(event: MetricEventInput): number | null {
 
 const DEFAULT_METRIC_LIMIT = 100
 const MAX_METRIC_LIMIT = 200
-const DEFAULT_LIST_TYPES: MetricListType[] = ["memory", "summarization", "response", "prompt", "usage", "discord"]
+const DEFAULT_LIST_TYPES: MetricListType[] = ["memory", "summarization", "response", "usage", "discord"]
 const METRIC_TYPE_TO_SOURCE: Partial<Record<MetricListType, MetricEvent["type"]>> = {
   response: "prompt_response",
   summarization: "compaction",
   memory: "memory",
-  prompt: "prompt",
   usage: "usage",
 }
 const METRIC_TYPE_TO_BUCKET: Record<MetricListType, MetricBucketName> = {
   memory: "memories",
   summarization: "summarization",
   response: "response",
-  prompt: "prompt",
   usage: "usage",
   discord: "discord",
 }
@@ -333,6 +324,27 @@ function lastUserMessage(messages: unknown): string | undefined {
   return undefined
 }
 
+/**
+ * Derives the compact summary fields we persist for a prompt/response turn,
+ * so callers can record metrics WITHOUT stuffing full messages[]/response
+ * bodies into the DB. This is the whole point of the no-full-text change.
+ */
+export function summarizePromptResponse(
+  messages: Message[],
+  response: AssistantMessage,
+): Pick<PromptResponseMetric, "messageCount" | "lastUserMessage" | "responsePreview" | "toolCallCount"> {
+  const responseText = response.content
+    .filter((c) => c.type === "text")
+    .map((c) => (c as import("./llm").TextContent).text)
+    .join("")
+  return {
+    messageCount: messages.length,
+    lastUserMessage: lastUserMessage(messages),
+    responsePreview: preview(messageText(responseText)),
+    toolCallCount: response.content.filter((c) => c.type === "toolCall").length,
+  }
+}
+
 function parseMetricRow(row: MetricRow): MetricListItem | null {
   const payload = JSON.parse(row.payload) as Partial<MetricEvent> & Record<string, unknown>
   const base: BaseMetricListItem = {
@@ -343,20 +355,17 @@ function parseMetricRow(row: MetricRow): MetricListItem | null {
   }
 
   if (row.type === "prompt_response") {
-    const response = payload.response as AssistantMessage | undefined
+    // Payload now stores pre-derived summary fields (computed at write time),
+    // not the full messages[]/response. Read them straight through.
     return {
       ...base,
       type: "response",
-      promptMetricId: typeof payload.promptMetricId === "number" ? payload.promptMetricId : undefined,
       model: typeof payload.model === "string" ? payload.model : undefined,
       toolChoice: typeof payload.toolChoice === "string" ? payload.toolChoice : undefined,
-      messageCount: Array.isArray(payload.messages) ? payload.messages.length : undefined,
-      lastUserMessage: lastUserMessage(payload.messages),
-      responsePreview: preview(messageText(response?.content
-        .filter((c) => c.type === "text")
-        .map((c) => (c as import("./llm").TextContent).text)
-        .join(""))),
-      toolCallCount: response?.content.filter((c) => c.type === "toolCall").length,
+      messageCount: typeof payload.messageCount === "number" ? payload.messageCount : undefined,
+      lastUserMessage: typeof payload.lastUserMessage === "string" ? payload.lastUserMessage : undefined,
+      responsePreview: typeof payload.responsePreview === "string" ? payload.responsePreview : undefined,
+      toolCallCount: typeof payload.toolCallCount === "number" ? payload.toolCallCount : undefined,
       usage: payload.usage as Usage | undefined,
     }
   }
@@ -383,15 +392,6 @@ function parseMetricRow(row: MetricRow): MetricListItem | null {
       type: "memory",
       queryPreview: preview(payload.query),
       resultCount: Array.isArray(payload.results) ? payload.results.length : undefined,
-    }
-  }
-
-  if (row.type === "prompt") {
-    return {
-      ...base,
-      type: "prompt",
-      messageCount: Array.isArray(payload.messages) ? payload.messages.length : undefined,
-      lastUserMessage: lastUserMessage(payload.messages),
     }
   }
 
@@ -580,7 +580,6 @@ export function getMetrics(query: MetricsQuery = {}): MetricsPage {
     memories: readMetricBucket("memory"),
     summarization: readMetricBucket("summarization"),
     response: readMetricBucket("response"),
-    prompt: readMetricBucket("prompt"),
     usage: readMetricBucket("usage"),
     discord: readDiscordBucket(),
     limit,
