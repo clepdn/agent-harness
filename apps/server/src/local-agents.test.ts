@@ -88,7 +88,7 @@ test("agent identity, ports, and homes stay isolated", (t) => {
   assert.throws(() => resolveLocalAgents(loadAgentFiles(directory), options), /share port/)
 })
 
-test("worker environment carries host basics and settings, never credentials", (t) => {
+test("worker environment carries host basics and the executor token path, never raw credentials", (t) => {
   const directory = fixture(t, (dir) => ({
     "cfg/base.toml": "[model]\nmodel = \"openai/gpt-5\"\napi_key = \"model-secret\"\n\n[discord]\nbot_token = \"discord-secret\"\n",
     "mira.toml": [
@@ -103,12 +103,18 @@ test("worker environment carries host basics and settings, never credentials", (
 
   const [agent] = resolveLocalAgents(loadAgentFiles(directory), options)
   assert.ok(agent)
-  const env = buildWorkerEnvironment({ PATH: "/usr/bin", OPENAI_API_KEY: "inherited", SHELL: "/bin/bash" }, agent)
+  const env = buildWorkerEnvironment({
+    PATH: "/usr/bin",
+    NANO_EXECUTOR_TOKEN_FILE: "/run/agenix/executor-token",
+    OPENAI_API_KEY: "inherited",
+    SHELL: "/bin/bash",
+  }, agent)
 
   assert.equal(env.NANO_AGENT_ID, "mira")
   assert.equal(env.PORT, "4301")
   assert.equal(env.RUNNER_MAX_TURNS, "80")
   assert.equal(env.PATH, "/usr/bin")
+  assert.equal(env.NANO_EXECUTOR_TOKEN_FILE, "/run/agenix/executor-token")
   // Config travels as files on argv. Nothing from [model] or [discord] may
   // reach the environment, because the agent's own bash tool inherits it.
   assert.equal(env.OPENAI_API_KEY, undefined)
@@ -129,6 +135,9 @@ test("unknown and reserved toml settings fail startup", (t) => {
 
   const configVar = fixture(t, { "a.toml": "client = \"local\"\n\n[settings]\nNANO_CONFIG = \"/etc/nano/config.toml\"\n" })
   assert.throws(() => loadAgentFiles(configVar), /managed by the server/)
+
+  const executorToken = fixture(t, { "a.toml": "client = \"local\"\n\n[settings]\nNANO_EXECUTOR_TOKEN_FILE = \"/tmp/token\"\n" })
+  assert.throws(() => loadAgentFiles(executorToken), /managed by the server/)
 })
 
 test("malformed toml names the file", (t) => {
