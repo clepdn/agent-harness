@@ -2,6 +2,7 @@ import { config } from "../config"
 import { recordMetric } from "../metrics"
 import { emit } from "../stream"
 import { setContextSize, setWorking } from "../discord/status-updater"
+import { dispatchDiscordTyping, stopDiscordTyping } from "../discord/typing-lease"
 import { setPromWorking } from "../prometheus"
 import type { Message } from "../types"
 import { modelState } from "./model-state"
@@ -44,7 +45,12 @@ enum CycleOutcome {
 
 export type RunLoopExit = "rest"
 
-async function waitForNextEvent(convId: number, state: LoopState, hooks: LoopHooks): Promise<void> {
+async function waitForNextEvent(
+  convId: number,
+  state: LoopState,
+  hooks: LoopHooks,
+  compact: (state: LoopState) => Promise<boolean> = (currentState) => applyCompaction(currentState, "idle"),
+): Promise<void> {
   // When idle compaction is disabled, just block until the next event.
   // Read from modelState so it swaps with the model preset at runtime.
   const idleCompactionMs = modelState.idleCompactionMs
@@ -75,12 +81,14 @@ async function waitForNextEvent(convId: number, state: LoopState, hooks: LoopHoo
     const manual = state.compactionRequested === true
     if (manual) state.compactionRequested = false
 
-    const compacted = await applyCompaction(state, "idle")
+    const compacted = await compact(state)
     if (compacted) {
       console.log(
         `[runner] idle compaction ran while waiting for the next event${manual ? " (manual /compact)" : ""}`,
       )
-    } else if (manual) {
+      return
+    }
+    if (manual) {
       console.log("[runner] manual /compact requested but nothing to compact (summary not smaller)")
     }
   }
@@ -427,11 +435,32 @@ export async function compactForShutdown(state: LoopState): Promise<boolean> {
   return applyLLMCompaction(state, "shutdown", strategy, true)
 }
 
+function pendingDiscordChannel(conversation: Message[], endExclusive: number): string | undefined {
+  for (let index = endExclusive - 1; index >= 0; index -= 1) {
+    const message = conversation[index]
+    if (!message) continue
+    if (message.role === "assistant") break
+    if (message.role !== "user" || typeof message.content !== "string") continue
+    if (!/\[discord(?:\/(?:dm|channel)| batch)\]/i.test(message.content)) continue
+    const dmMatch = message.content.match(/context:\s*DM\s+(\S+)/i)
+    const channelMatch = message.content.match(/context:\s*[^\n]+\(([^)]+)\)/i)
+    return dmMatch?.[1] ?? channelMatch?.[1]
+  }
+  return undefined
+}
+
+function clearDiscordTypingScope(state: LoopState): void {
+  stopDiscordTyping(state.discordTypingTurnId)
+  state.discordTypingTurnId = undefined
+  state.discordTypingChannelId = undefined
+}
+
 export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks): Promise<RunLoopExit> {
   let turnCount = 0
   let previousTurnSignature: string | null = null
   let consecutiveIdenticalToolTurns = 0
 
+  try {
   while (true) {
     // Check for programmatic rest at the top of each iteration.
     // This catches rest requested during event wait (waitForNextEvent returns
@@ -439,6 +468,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     if (state.restRequested) {
       console.log(`[runner] programmatic rest requested: ${state.restReason}`)
       await saveRestSnapshot(state.conversation, state.restReason)
+      clearDiscordTypingScope(state)
       setWorking(false)
       setPromWorking(false)
       return "rest"
@@ -447,9 +477,27 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     await applyCompaction(state, "pre-turn")
 
     const turnStart = state.conversation.length
+    const typingTurnId = state.discordTypingTurnId ?? `${convId}:${turnCount + 1}`
+    if (!state.discordTypingTurnId) {
+      const channel = pendingDiscordChannel(state.conversation, turnStart)
+      if (channel) {
+        state.discordTypingTurnId = typingTurnId
+        state.discordTypingChannelId = channel
+        dispatchDiscordTyping(typingTurnId, channel)
+      }
+    }
+
     setWorking(true)
     setPromWorking(true)
-    const outcome = await processAssistantTurn(convId, state, hooks)
+    let outcome: CycleOutcome
+    try {
+      outcome = await processAssistantTurn(convId, state, hooks)
+    } catch (err) {
+      clearDiscordTypingScope(state)
+      setWorking(false)
+      setPromWorking(false)
+      throw err
+    }
     turnCount += 1
 
     const turnMessages = state.conversation.slice(turnStart)
@@ -476,6 +524,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     }
 
     if (outcome === CycleOutcome.Rest) {
+      clearDiscordTypingScope(state)
       setWorking(false)
       setPromWorking(false)
       return "rest"
@@ -485,6 +534,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     if (state.restRequested) {
       console.log(`[runner] programmatic rest requested: ${state.restReason}`)
       await saveRestSnapshot(state.conversation, state.restReason)
+      clearDiscordTypingScope(state)
       setWorking(false)
       setPromWorking(false)
       return "rest"
@@ -500,6 +550,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
         })
         continue
       }
+      clearDiscordTypingScope(state)
       setWorking(false)
       setPromWorking(false)
       await waitForNextEvent(convId, state, hooks)
@@ -524,14 +575,17 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       consecutiveIdenticalToolTurns = 0
       continue
     }
-
+  }
+  } finally {
+    clearDiscordTypingScope(state)
   }
 }
-
 export const __loopTest = {
   applyLoopGuardNudge,
   applyDiscordSendNudge,
   hasDiscordInputForTurn,
   waitForNextEvent,
   applyCompaction,
+  pendingDiscordChannel,
+  clearDiscordTypingScope,
 }

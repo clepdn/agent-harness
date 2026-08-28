@@ -1,4 +1,5 @@
 import { emit } from "../stream"
+import { clearDiscordTypingScope } from "../discord/typing-lease"
 import { buildToolHandlers } from "./loop-tool-registry"
 import { executeToolCall, pushToolMessage } from "./loop-tool-runtime"
 import type { FunctionToolCall } from "./loop-shared"
@@ -28,6 +29,7 @@ function maybeInterruptAfterTool(
   if (state.pendingInputs.length === 0) return false
 
   const incoming = state.pendingInputs.shift()!
+  clearDiscordTypingScope(state)
   hooks.injectIncomingEvent(convId, incoming)
   skipRemainingToolCalls(convId, state, calls, nextIndex, incoming.source)
   return true
@@ -58,4 +60,7 @@ export async function processToolCalls(
   }
 
   return false
+}
+export const __loopToolsTest = {
+  maybeInterruptAfterTool,
 }

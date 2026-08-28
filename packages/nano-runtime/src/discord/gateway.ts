@@ -9,7 +9,9 @@ import {
 } from "discord.js"
 import { config, setDiscordBotUserId } from "../config"
 import { handleDiscordIngress } from "./pipeline"
-import { noteDmTyping } from "./dm-debounce"
+import { debounceDmWake, noteDmTyping } from "./dm-debounce"
+import { ingestDiscordEvent, type DiscordIngestResult } from "./state"
+import { configureDiscordTyping } from "./typing-lease"
 import { registerSlashCommands, handleInteraction, handleAutocomplete } from "./slash-commands"
 import { subscribeRunnerPresence, type RunnerPresence } from "../runner/presence"
 import { startStatusUpdater, stopStatusUpdater } from "./status-updater"
@@ -99,6 +101,25 @@ function buildIngressPayload(message: Message): Record<string, unknown> {
   }
 }
 
+function payloadAuthorId(payload: unknown): string {
+  const root = payload && typeof payload === "object" ? payload as Record<string, unknown> : {}
+  const message = root.message && typeof root.message === "object" ? root.message as Record<string, unknown> : root
+  const author = message.author && typeof message.author === "object" ? message.author as Record<string, unknown> : {}
+  return asString(author.id)
+}
+
+function handleGatewayMessage(payload: unknown) {
+  const ingest: DiscordIngestResult = ingestDiscordEvent(payload)
+  const channelId = ingest.channelId
+  if (ingest.isNew && ingest.bucket === "dm" && channelId) {
+    const deferred = debounceDmWake(channelId, payloadAuthorId(payload), () => {
+      handleDiscordIngress(payload, ingest)
+    })
+    if (deferred) return { ingested: ingest.stored, woke: false, reason: "dm_priority" as const, note: "debounced" }
+  }
+  return handleDiscordIngress(payload, ingest)
+}
+
 export type DiscordGatewayHandle = {
   stop: () => Promise<void>
 }
@@ -156,6 +177,12 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
     partials: [Partials.Channel],
   })
 
+  configureDiscordTyping((channelId) => {
+    const channel = client.channels.cache.get(channelId)
+    if (!channel || !("sendTyping" in channel) || typeof channel.sendTyping !== "function") return Promise.resolve()
+    return channel.sendTyping()
+  })
+
   if (trace) {
     console.log("[discord gateway] trace enabled")
   }
@@ -182,17 +209,14 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
   })
 
   client.on("raw", (packet: { t?: string; d?: Record<string, unknown> }) => {
-    // Typing indicators extend an in-flight DM wake debounce window. A DM
-    // typing event has no guild_id; guild typing is ignored.
+    // Typing can only extend an existing DM message burst, never wake alone.
     if (packet?.t === "TYPING_START") {
       const d = packet.d ?? {}
       const channelId = asString(d.channel_id)
       const guildId = asString(d.guild_id)
       if (channelId && !guildId) {
-        noteDmTyping(channelId)
-        if (trace) {
-          console.log(`[discord gateway/raw] TYPING_START dm channel=${channelId} -> extend debounce`)
-        }
+        noteDmTyping(channelId, asString(d.user_id))
+        if (trace) console.log(`[discord gateway/raw] TYPING_START dm channel=${channelId} -> extend debounce`)
       }
       return
     }
@@ -224,10 +248,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
     const author = (d.author ?? {}) as Record<string, unknown>
     let ingestResultText = ""
     try {
-      const result = handleDiscordIngress({
-        ...d,
-        is_dm: isDm,
-      })
+      const result = handleGatewayMessage({ ...d, is_dm: isDm })
       ingestResultText = ` ingested=${result.ingested} woke=${result.woke} reason=${result.reason}`
     } catch (err) {
       ingestResultText = ` ingest_error=${err instanceof Error ? err.message : String(err)}`
@@ -243,7 +264,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
   client.on(Events.MessageCreate, (message) => {
     try {
       const payload = buildIngressPayload(message)
-      const result = handleDiscordIngress(payload)
+      const result = handleGatewayMessage(payload)
       if (trace) {
         const channelType = typeof message.channel?.type === "number" ? message.channel.type : null
         const isDm = message.guildId == null
@@ -283,6 +304,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
       stopStatusUpdater()
       stopPrometheusServer()
       await client.destroy()
+      configureDiscordTyping(null)
       console.log("[discord gateway] disconnected")
     },
   }

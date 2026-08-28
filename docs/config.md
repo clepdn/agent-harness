@@ -190,6 +190,8 @@ directory, which should be bind-mounted into the container.
 | `gateway_raw_fallback_all` | `false` | Extend the raw fallback to all channel types, not just DMs. |
 | `wake_on_event` | `false` | Wake the runner on every ingested guild channel message (not just DMs). DMs always wake. |
 | `wake_on_dm` | `true` | Wake immediately on DMs even when `wake_on_event` is false. |
+| `dm_wake_debounce_ms` | `5000` | Trailing-edge hold (ms) for a new DM wake; each matching author/channel message or typing event resets the hold. `0` disables it. Successful manual/idle compaction immediately reactivates the runner for the next model turn; shutdown compaction does not. |
+| `dm_wake_debounce_cap_ms` | `60000` | Maximum total DM wake hold (ms) from the first matching author/channel message, even while typing continues. |
 
 ### Batch digest (REST polling)
 

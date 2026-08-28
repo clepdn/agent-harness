@@ -2,6 +2,7 @@ import type { ToolResultMessage } from "../llm"
 import { redactSecrets } from "../config"
 import { logMessage } from "../db"
 import { emit } from "../stream"
+import { beginDiscordToolWait, endDiscordToolWait } from "../discord/typing-lease"
 import { latestAssistantContent } from "./loop-content"
 import type {
   ArgTuple,
@@ -55,9 +56,7 @@ function hasToolResponse(state: LoopState, call: FunctionToolCall): boolean {
   )
 }
 
-/**
- * Records a tool result and emits it to stream subscribers.
- */
+/** Records a tool result and emits it to stream subscribers. */
 export function recordToolResult(
   convId: number,
   state: LoopState,
@@ -71,9 +70,7 @@ export function recordToolResult(
   return result
 }
 
-/**
- * Normalizes thrown values into tool-friendly error text.
- */
+/** Normalizes thrown values into tool-friendly error text. */
 export function toolError(err: unknown): string {
   return `error: ${err instanceof Error ? err.message : String(err)}`
 }
@@ -86,9 +83,7 @@ function pickArgsByKeys<K extends readonly ToolArgKey[]>(args: ToolArgs, keys: K
   return Object.fromEntries(keys.map((key) => [key, args[key]]))
 }
 
-/**
- * Executes a standard "run command then record result" tool pattern.
- */
+/** Executes a standard "run command then record result" tool pattern. */
 export async function runStandardTool<
   RunKeys extends readonly ToolArgKey[],
   LogKeys extends readonly ToolArgKey[] = RunKeys,
@@ -108,9 +103,7 @@ export async function runStandardTool<
   return {}
 }
 
-/**
- * Executes one function tool call end-to-end.
- */
+/** Executes one function tool call end-to-end. */
 export async function executeToolCall(
   convId: number,
   state: LoopState,
@@ -129,6 +122,7 @@ export async function executeToolCall(
 
   const isWaitTool = call.name === "wait" || call.name === "wait_then_continue"
   if (!isWaitTool) state.toolInFlight = true
+  beginDiscordToolWait(state.discordTypingTurnId ?? "")
 
   try {
     const handler = handlers[call.name]
@@ -147,6 +141,7 @@ export async function executeToolCall(
     }
     return {}
   } finally {
+    endDiscordToolWait(state.discordTypingTurnId ?? "")
     if (!isWaitTool) {
       state.toolInFlight = false
       hooks.flushDeferredEvents()

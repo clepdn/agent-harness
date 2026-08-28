@@ -6,6 +6,7 @@ import { isWebSearchAvailable } from "../web-search"
 import { markDiscordItem } from "../discord/state"
 import { endConversation, logMessage, startConversation } from "../db"
 import { emit } from "../stream"
+import { clearDiscordTypingScope } from "../discord/typing-lease"
 import { runLoop } from "./loop"
 import { setRunnerPresence } from "./presence"
 import { createNiriToolCatalog } from "./tool-catalog"
@@ -328,6 +329,7 @@ function emitUserEvent(event: UserMessage): void {
 }
 
 function injectIncomingEvent(convId: number, event: UserMessage): void {
+  clearDiscordTypingScope(state)
   autoSeeDiscordEvent(event)
   const incomingMessage = formatIncomingEvent(event)
   state.conversation.push({

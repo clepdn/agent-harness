@@ -1,10 +1,17 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { __loopTest } from "./loop"
+import { __loopToolsTest } from "./loop-tools"
 import { modelState } from "./model-state"
-import type { Message } from "../types"
+import type { Message, UserMessage } from "../types"
 import type { LoopState } from "./types"
 import { makeUserMessage, makeAssistantMessage, makeToolResultMessage } from "./test-helpers"
+import {
+  configureDiscordTyping,
+  dispatchDiscordTyping,
+  notifyDiscordModelActivity,
+  __discordTypingLeaseTest,
+} from "../discord/typing-lease"
 
 const testClientTools = {
   getCapabilities: () => [],
@@ -31,6 +38,96 @@ function makeState(): LoopState {
     restReason: "",
   }
 }
+
+test("pendingDiscordChannel selects newest Discord wake in the pending user segment", () => {
+  const conversation = [
+    makeUserMessage("[discord/dm] old context: DM old-channel"),
+    makeAssistantMessage("handled"),
+    makeUserMessage("[discord/dm] new context: DM new-channel"),
+  ]
+  assert.equal(__loopTest.pendingDiscordChannel(conversation, conversation.length), "new-channel")
+})
+
+test("pendingDiscordChannel ignores stale Discord context before the prior assistant", () => {
+  const conversation = [
+    makeUserMessage("[discord/dm] stale context: DM stale-channel"),
+    makeAssistantMessage("handled"),
+    makeUserMessage("ordinary user message"),
+  ]
+  assert.equal(__loopTest.pendingDiscordChannel(conversation, conversation.length), undefined)
+})
+
+test("clearDiscordTypingScope clears manager state fields", () => {
+  const state = makeState()
+  state.discordTypingTurnId = "turn"
+  state.discordTypingChannelId = "channel"
+  __loopTest.clearDiscordTypingScope(state)
+  assert.equal(state.discordTypingTurnId, undefined)
+  assert.equal(state.discordTypingChannelId, undefined)
+})
+
+function makeTypingSupersessionHooks(state: LoopState, injected: UserMessage[]) {
+  return {
+    injectIncomingEvent: (_convId: number, event: UserMessage) => {
+      injected.push(event)
+      state.conversation.push(makeUserMessage(`[incoming — ${event.source}]\n\n${event.content}`))
+    },
+  } as never
+}
+
+test("new Discord event supersedes typing scope after a tool", () => {
+  const state = makeState()
+  const injected: UserMessage[] = []
+  state.discordTypingTurnId = "old-turn"
+  state.discordTypingChannelId = "old-channel"
+  configureDiscordTyping(() => {})
+  dispatchDiscordTyping("old-turn", "old-channel")
+  notifyDiscordModelActivity("old-turn")
+  state.pendingInputs.push({
+    source: "discord",
+    triggeredAt: "2026-08-28T00:00:00.000Z",
+    content: "[discord/dm] @alice\ncontext: DM new-channel\n\nnew message",
+    raw: {},
+  })
+
+  try {
+    assert.equal(__loopToolsTest.maybeInterruptAfterTool(1, state, makeTypingSupersessionHooks(state, injected), [], 0), true)
+    assert.equal(injected[0]?.source, "discord")
+    assert.equal(state.discordTypingTurnId, undefined)
+    assert.equal(state.discordTypingChannelId, undefined)
+    assert.equal(__discordTypingLeaseTest.active, null)
+    assert.equal(__loopTest.pendingDiscordChannel(state.conversation, state.conversation.length), "new-channel")
+  } finally {
+    __discordTypingLeaseTest.reset()
+  }
+})
+
+test("new non-Discord event supersedes Discord typing scope after a tool", () => {
+  const state = makeState()
+  const injected: UserMessage[] = []
+  state.discordTypingTurnId = "old-turn"
+  state.discordTypingChannelId = "old-channel"
+  configureDiscordTyping(() => {})
+  dispatchDiscordTyping("old-turn", "old-channel")
+  notifyDiscordModelActivity("old-turn")
+  state.pendingInputs.push({
+    source: "chat",
+    triggeredAt: "2026-08-28T00:00:00.000Z",
+    content: "hello from chat",
+    raw: {},
+  })
+
+  try {
+    assert.equal(__loopToolsTest.maybeInterruptAfterTool(1, state, makeTypingSupersessionHooks(state, injected), [], 0), true)
+    assert.equal(injected[0]?.source, "chat")
+    assert.equal(state.discordTypingTurnId, undefined)
+    assert.equal(state.discordTypingChannelId, undefined)
+    assert.equal(__discordTypingLeaseTest.active, null)
+    assert.equal(__loopTest.pendingDiscordChannel(state.conversation, state.conversation.length), undefined)
+  } finally {
+    __discordTypingLeaseTest.reset()
+  }
+})
 
 test("applyDiscordSendNudge appends a follow-up user nudge for unsent Discord replies", () => {
   const state = makeState()
@@ -203,6 +300,42 @@ test("waitForNextEvent waits for and injects the next external event", async () 
   })
 
   assert.deepEqual(calls, ["wait", "inject:still here"])
+})
+
+test("waitForNextEvent returns after successful compaction for immediate reactivation", async () => {
+  const calls: string[] = []
+  const state = makeState()
+  const savedIdle = modelState.idleCompactionMs
+  modelState.idleCompactionMs = 60_000
+
+  try {
+    await __loopTest.waitForNextEvent(7, state, {
+      clientTools: testClientTools,
+      getTools: () => [],
+      waitForEvent: async () => {
+        calls.push("wait")
+        return null
+      },
+      waitForEventWithTimeout: async () => {
+        calls.push("timeout")
+        return null
+      },
+      injectIncomingEvent: () => calls.push("inject"),
+      flushDeferredEvents: () => {},
+      clearSession: async () => {},
+      saveSession: async () => {},
+      saveShutdownSnapshot: async () => {},
+      shouldShutdown: () => false,
+      resolveShutdown: () => {},
+    }, async () => {
+      calls.push("compact")
+      return true
+    })
+  } finally {
+    modelState.idleCompactionMs = savedIdle
+  }
+
+  assert.deepEqual(calls, ["timeout", "compact"])
 })
 
 test("waitForNextEvent bails out on shutdown instead of looping the idle timer", async () => {

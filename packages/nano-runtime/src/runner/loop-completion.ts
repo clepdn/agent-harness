@@ -8,8 +8,9 @@ import { buildCompletionMessages, rememberRecalledMemoryChunks } from "../memory
 import { recordMetric, summarizePromptResponse } from "../metrics"
 import { recordLlmRequest } from "../prometheus"
 import { emit } from "../stream"
-import type { LoopState } from "./types"
+import { notifyDiscordModelActivity } from "../discord/typing-lease"
 import { modelState } from "./model-state"
+import type { LoopState } from "./types"
 import {
   buildContext,
   errorSummary,
@@ -169,11 +170,14 @@ async function createStreamedCompletion(
 
   for await (const event of eventStream as AsyncIterable<AssistantMessageEvent>) {
     if (event.type === "text_delta") {
+      notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
       emit({ type: "text", text: event.delta })
       emittedText = true
     } else if (event.type === "thinking_start") {
+      notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
       bufferedThinking = ""
     } else if (event.type === "thinking_delta") {
+      notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
       if (modelState.enableThinking) bufferedThinking += event.delta
     } else if (event.type === "thinking_end") {
       if (modelState.enableThinking && bufferedThinking) {

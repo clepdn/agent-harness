@@ -21,6 +21,7 @@ import { setCustomStatus } from "../discord/status-updater"
 import { searchDiscordMessages } from "../discord/search"
 import { webSearch } from "../web-search"
 import { emit } from "../stream"
+import { stopDiscordTyping } from "../discord/typing-lease"
 import type { ToolHandler } from "./loop-shared"
 import { checkGitUpstream } from "./git-upstream-check"
 import { GIT_UPSTREAM_NAG } from "./config"
@@ -464,18 +465,25 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         name: "discord_send",
         logArgKeys: ["channel_id", "source_item_id", "reply_mode"] as const,
         runArgKeys: ["channel_id", "content", "source_item_id", "reply_mode", "reference_message"] as const,
-        run: async (channel_id, content, source_item_id, reply_mode, reference_message) =>
-          JSON.stringify(
-            await sendDiscordMessage({
-              channelId: channel_id as string,
-              content: content as string,
-              sourceItemId: source_item_id as string | undefined,
-              replyMode: reply_mode as string | undefined,
-              referenceMessage: reference_message as string | undefined,
-            }),
-            null,
-            2,
-          ),
+        run: async (channel_id, content, source_item_id, reply_mode, reference_message) => {
+          try {
+            return JSON.stringify(
+              await sendDiscordMessage({
+                channelId: channel_id as string,
+                content: content as string,
+                sourceItemId: source_item_id as string | undefined,
+                replyMode: reply_mode as string | undefined,
+                referenceMessage: reference_message as string | undefined,
+              }),
+              null,
+              2,
+            )
+          } finally {
+            stopDiscordTyping(ctx.state.discordTypingTurnId)
+            ctx.state.discordTypingTurnId = undefined
+            ctx.state.discordTypingChannelId = undefined
+          }
+        }
       }),
 
     discord_upload: (ctx) =>

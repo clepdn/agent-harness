@@ -2,8 +2,7 @@ import { config } from "../config"
 import { enqueueEvent, isRunning, wake } from "../runner/index"
 import { fromDiscord } from "../triggers/discord"
 import { isChannelActiveNow } from "./cooldown"
-import { debounceDmWake } from "./dm-debounce"
-import { ingestDiscordEvent } from "./state"
+import { ingestDiscordEvent, type DiscordIngestResult } from "./state"
 
 const DISCORD_WAKE_ON_EVENT = config.discord.wake_on_event
 
@@ -14,8 +13,8 @@ export type DiscordIngressOutcome = {
   note?: string
 }
 
-export function handleDiscordIngress(payload: unknown): DiscordIngressOutcome {
-  const ingest = ingestDiscordEvent(payload)
+export function handleDiscordIngress(payload: unknown, preparedIngest?: DiscordIngestResult): DiscordIngressOutcome {
+  const ingest = preparedIngest ?? ingestDiscordEvent(payload)
   const isWakeEligible = ingest.isNew && !ingest.isFromSelf && Boolean(ingest.bucket)
   const wakeForDm = ingest.bucket === "dm"
 
@@ -43,30 +42,8 @@ export function handleDiscordIngress(payload: unknown): DiscordIngressOutcome {
   }
 
   const event = fromDiscord(payload)
-
-  const deliver = () => {
-    if (isRunning()) {
-      enqueueEvent(event, { priority: wakeForDm })
-    } else {
-      void wake(event)
-    }
-  }
-
-  // DM wakes are debounced: hold briefly so an incoming typing indicator or a
-  // rapid follow-up message can extend the window, then wake once. If the
-  // runner is already running we skip the debounce — the event is enqueued
-  // immediately since there's no cold-start activation to coalesce.
-  if (wakeForDm && ingest.channelId && !isRunning()) {
-    const deferred = debounceDmWake(ingest.channelId, deliver)
-    return {
-      ingested: ingest.stored,
-      woke: !deferred,
-      reason: "dm_priority",
-      ...(deferred ? { note: "debounced" } : ingest.reason ? { note: ingest.reason } : {}),
-    }
-  }
-
-  deliver()
+  if (isRunning()) enqueueEvent(event, { priority: wakeForDm })
+  else void wake(event)
 
   return {
     ingested: ingest.stored,

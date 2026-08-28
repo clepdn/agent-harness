@@ -16,12 +16,17 @@ import { config } from "../config"
 
 type Pending = {
   channelId: string
+  userId: string
   fire: () => void
   firstAt: number
   timer: ReturnType<typeof setTimeout>
 }
 
 const pending = new Map<string, Pending>()
+
+function pendingKey(channelId: string, userId: string): string {
+  return `${channelId}\u0000${userId}`
+}
 
 function baseMs(): number {
   return Math.max(0, config.discord.dm_wake_debounce_ms)
@@ -31,11 +36,11 @@ function capMs(): number {
   return Math.max(baseMs(), config.discord.dm_wake_debounce_cap_ms)
 }
 
-function clearPending(channelId: string): void {
-  const entry = pending.get(channelId)
+function clearPending(key: string): void {
+  const entry = pending.get(key)
   if (!entry) return
   clearTimeout(entry.timer)
-  pending.delete(channelId)
+  pending.delete(key)
 }
 
 function scheduleTimer(entry: Pending): void {
@@ -46,7 +51,7 @@ function scheduleTimer(entry: Pending): void {
   const nextFireAt = Math.min(now + baseMs(), capDeadline)
   const delay = Math.max(0, nextFireAt - now)
   entry.timer = setTimeout(() => {
-    pending.delete(entry.channelId)
+    pending.delete(pendingKey(entry.channelId, entry.userId))
     try {
       entry.fire()
     } catch (err) {
@@ -57,15 +62,16 @@ function scheduleTimer(entry: Pending): void {
   if (typeof entry.timer.unref === "function") entry.timer.unref()
 }
 
-// Called when a DM message becomes wake-eligible. If a debounce window is
-// active for this DM channel, extend it (the burst continues). Otherwise open a
-// new window that will fire `fire` once it settles.
+// Called at Discord ingress when a DM becomes wake-eligible. The trailing
+// wake is keyed by both channel and initiating author, so independent users
+// in a group DM cannot extend or suppress one another's burst.
 //
 // Returns true if the wake was deferred (caller should NOT wake now).
-export function debounceDmWake(channelId: string, fire: () => void): boolean {
+export function debounceDmWake(channelId: string, userId: string, fire: () => void): boolean {
   if (baseMs() <= 0) return false // debounce disabled
 
-  const existing = pending.get(channelId)
+  const key = pendingKey(channelId, userId.trim())
+  const existing = pending.get(key)
   if (existing) {
     // A burst is already in flight. Keep the newest fire callback (it carries
     // the freshest event) and extend the window.
@@ -76,24 +82,27 @@ export function debounceDmWake(channelId: string, fire: () => void): boolean {
 
   const entry: Pending = {
     channelId,
+    userId: userId.trim(),
     fire,
     firstAt: Date.now(),
     timer: undefined as unknown as ReturnType<typeof setTimeout>,
   }
-  pending.set(channelId, entry)
+  pending.set(key, entry)
   scheduleTimer(entry)
   return true
 }
 
-// Called on a TYPING_START for a DM channel. If a wake is pending for this
-// channel, extend the hold — the user is still composing.
-export function noteDmTyping(channelId: string): void {
-  const entry = pending.get(channelId)
-  if (!entry) return
-  scheduleTimer(entry)
+// Called on a TYPING_START for a DM channel. Only the matching initiating
+// user/channel entry extends the hold; a typing event without a user id cannot
+// be associated safely and never creates or changes a pending wake.
+export function noteDmTyping(channelId: string, userId?: string): void {
+  const normalizedUserId = userId?.trim()
+  if (!normalizedUserId) return
+  const entry = pending.get(pendingKey(channelId, normalizedUserId))
+  if (entry) scheduleTimer(entry)
 }
 
 // Test/shutdown helper.
 export function _resetDmDebounce(): void {
-  for (const channelId of [...pending.keys()]) clearPending(channelId)
+  for (const key of [...pending.keys()]) clearPending(key)
 }

@@ -27,6 +27,9 @@ export interface LoopState {
   restReason: string
   /** When true, force a compaction pass at the next idle wait, regardless of token count. */
   compactionRequested?: boolean
+  /** Stable outbound Discord response scope across tool-producing iterations. */
+  discordTypingTurnId?: string
+  discordTypingChannelId?: string
 }
 
 /** Lifecycle hooks injected by the runner orchestrator into the loop. */
@@ -57,4 +60,6 @@ export interface RunnerStateInternal extends RunnerState {
   restRequested: boolean
   restReason: string
   compactionRequested?: boolean
+  discordTypingTurnId?: string
+  discordTypingChannelId?: string
 }
