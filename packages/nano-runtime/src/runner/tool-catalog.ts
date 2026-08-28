@@ -10,6 +10,8 @@ export type NiriToolCatalogOptions = {
   workspace?: WorkspaceDescriptor | null
   memory?: boolean
   discord?: boolean
+  subagents?: boolean
+  computer?: boolean
   webSearch?: boolean
 }
 
@@ -255,6 +257,47 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
           required: ["channel_id", "note"],
         },
       ),
+      functionTool(
+        "discord_mark",
+        "Set decision state for a Discord inbox item.",
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            item_id: { type: "string" },
+            status: { type: "string", enum: ["pending", "seen", "acted", "ignored"] },
+            action: { type: "string", enum: ["none", "replied", "messaged", "dismissed", "noted"] },
+            note: { type: "string" },
+          },
+          required: ["item_id", "status"],
+        },
+      ),
+      functionTool(
+        "discord_upload",
+        "Upload a file to a Discord channel.",
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            channel_id: { type: "string" },
+            file_path: { type: "string" },
+            content: { type: "string" },
+            source_item_id: { type: "string" },
+            reference_message: { type: "string" },
+            reply_mode: { type: "string", enum: ["auto", "plain", "explicit"] },
+          },
+          required: ["file_path"],
+        },
+      ),
+      functionTool(
+        "set_status",
+        "Set or clear this agent's Discord custom status text.",
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: { text: { type: "string" } },
+        },
+      ),
     )
   }
 
@@ -272,6 +315,51 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
             include_text: { type: "boolean", description: "When true, pull short page-content highlights for each result, not just snippets. Default false." },
           },
           required: ["query"],
+        },
+      ),
+    )
+  }
+
+  if (options.subagents) {
+    tools.push(
+      functionTool(
+        "subagent",
+        "Spawn a configured subagent to handle one task.",
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            name: { type: "string" },
+            task: { type: "string" },
+            blocking: { type: "boolean" },
+          },
+          required: ["name", "task"],
+        },
+      ),
+    )
+  }
+
+  if (options.computer) {
+    tools.push(
+      functionTool(
+        "computer",
+        "Interact with the configured graphical desktop.",
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            action: { type: "string", enum: ["screenshot", "click", "double_click", "scroll", "type", "keypress", "drag", "move", "wait"] },
+            x: { type: "integer" },
+            y: { type: "integer" },
+            button: { type: "string", enum: ["left", "right", "middle"] },
+            text: { type: "string" },
+            keys: { type: "array", items: { type: "string" } },
+            scroll_x: { type: "integer" },
+            scroll_y: { type: "integer" },
+            path: { type: "array", items: { type: "array", items: { type: "integer" } } },
+            duration: { type: "integer" },
+          },
+          required: ["action"],
         },
       ),
     )

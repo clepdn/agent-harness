@@ -12,6 +12,7 @@ import { fromBsky } from "./triggers/bsky"
 import { fromWebhook } from "./triggers/webhook"
 import { fromCron } from "./triggers/cron"
 import { fromChat } from "./triggers/chat"
+import { fromClientLifecycle } from "./triggers/client"
 import { subscribe } from "./stream"
 import { getMetrics, getMetricDetail, getDiscordMetricDetail } from "./metrics"
 import { parseChannelIds } from "./discord/parse"
@@ -35,7 +36,7 @@ const METRIC_TYPE_ALIASES: Record<string, MetricListType> = {
   "prompt-response": "response",
   completion: "response",
 }
-const TRIGGER_SOURCES = new Set(["discord", "bsky", "webhook", "cron", "chat"])
+const TRIGGER_SOURCES = new Set(["discord", "bsky", "webhook", "cron", "chat", "client"])
 
 function parseMetricTypes(raw: string | undefined): MetricListType[] | undefined {
   if (!raw?.trim()) return undefined
@@ -50,7 +51,11 @@ function parseMetricTypes(raw: string | undefined): MetricListType[] | undefined
   return types.length ? types : undefined
 }
 
-export function createServer(options: { requestRestart?: (reason?: string) => void; requestShutdown?: () => void } = {}) {
+export function createServer(options: {
+  requestRestart?: (reason?: string) => void
+  requestShutdown?: () => void
+  dispatchClientLifecycle?: (event: UserMessage) => boolean
+} = {}) {
   const imageMaxBytes = Math.max(1, Number.parseInt(process.env.IMAGE_TOOL_MAX_BYTES ?? "1000000", 10) || 1_000_000)
   const app = Fastify({ logger: false, bodyLimit: Math.max(2_000_000, imageMaxBytes * 2 + 1_000_000) })
   let discordBatchInFlight = false
@@ -141,6 +146,7 @@ export function createServer(options: { requestRestart?: (reason?: string) => vo
     void wake(event)
     return true
   }
+  const dispatchClientLifecycle = options.dispatchClientLifecycle ?? dispatchEvent
 
   app.get("/awp/status", async () => ({
     agentId: AGENT_ID,
@@ -176,11 +182,19 @@ export function createServer(options: { requestRestart?: (reason?: string) => vo
         ...(workspace ? { workspace } : {}),
         ...(capabilities ? { capabilities } : {}),
       })
+      const status = clientTools.status()
+      const accepted = dispatchClientLifecycle(fromClientLifecycle(
+        "connected",
+        status.workspace,
+        status.capabilities,
+        status.clientId,
+      ))
       return reply.send({
         ok: true,
         agentId: AGENT_ID,
         client: info,
-        status: clientTools.status(),
+        status,
+        notified: accepted,
       })
     } catch (error) {
       return reply.code(502).send({
@@ -190,8 +204,15 @@ export function createServer(options: { requestRestart?: (reason?: string) => vo
   })
 
   app.post("/client/disconnect", async (_req, reply) => {
+    const previous = clientTools.status()
     const info = await clientTools.disconnect()
-    return reply.send({ ok: true, agentId: AGENT_ID, client: info })
+    const accepted = dispatchClientLifecycle(fromClientLifecycle(
+      "disconnected",
+      previous.workspace,
+      previous.capabilities,
+      previous.clientId,
+    ))
+    return reply.send({ ok: true, agentId: AGENT_ID, client: info, notified: accepted })
   })
 
   app.post("/awp/events", async (req, reply) => {

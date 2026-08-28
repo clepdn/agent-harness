@@ -18,9 +18,15 @@ function banner(text: string): void {
   process.stdout.write(`${clearLine}${text}\n`)
 }
 
-async function connect(control: string, executor: RunningExecutor): Promise<void> {
+function controlUrl(path: string): string {
+  return args.agent
+    ? `${args.control}/agents/${encodeURIComponent(args.agent)}${path}`
+    : `${args.control}${path}`
+}
+
+async function connect(executor: RunningExecutor): Promise<void> {
   const endpoint = args.advertise?.replace(/\/+$/, "") ?? executor.url
-  const res = await fetch(`${control}/client/connect`, {
+  const res = await fetch(controlUrl("/client/connect"), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -35,9 +41,9 @@ async function connect(control: string, executor: RunningExecutor): Promise<void
   }
 }
 
-async function disconnect(control: string): Promise<void> {
+async function disconnect(): Promise<void> {
   try {
-    await fetch(`${control}/client/disconnect`, { method: "POST" })
+    await fetch(controlUrl("/client/disconnect"), { method: "POST" })
   } catch {}
 }
 
@@ -107,7 +113,7 @@ function clip(text: string, maxLines: number): string[] {
 }
 
 async function main(): Promise<void> {
-  banner(dim(`nano-tui → ${args.control}`))
+  banner(dim(`nano-tui → ${args.control}${args.agent ? ` (${args.agent})` : ""}`))
   banner(dim("starting local tool executor…"))
 
   let executor: RunningExecutor
@@ -127,7 +133,7 @@ async function main(): Promise<void> {
   banner(`${green("✓")} workspace ${bold(executor.workspaceRoot)} mounted (${executor.capabilities.length} tools)`)
 
   try {
-    await connect(args.control, executor)
+    await connect(executor)
   } catch (error) {
     banner(red(`✗ ${(error as Error).message}`))
     await executor.stop()
@@ -136,7 +142,7 @@ async function main(): Promise<void> {
   banner(`${green("✓")} connected — nano now runs tools against your files`)
   banner(gray("type a message, Enter to send · Ctrl-C to quit\n"))
 
-  const chat = createChatClient({ baseUrl: args.control })
+  const chat = createChatClient({ baseUrl: args.control, ...(args.agent ? { agentId: args.agent } : {}) })
   const streamState = { streaming: false }
   const abort = new AbortController()
 
@@ -185,7 +191,7 @@ async function main(): Promise<void> {
     process.stdout.write(SHOW_CURSOR)
     banner(dim("\ndisconnecting…"))
     abort.abort()
-    await disconnect(args.control)
+    await disconnect()
     await executor.stop().catch(() => {})
     await streamLoop.catch(() => {})
     process.exit(0)

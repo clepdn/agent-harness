@@ -40,6 +40,7 @@ npm run start --workspace @nano/tui -- --control http://<control-host>:3001
 
 # common flags
 --control <url>       control plane base URL (env NANO_CONTROL_URL)
+--agent <id>        target agent on a multi-agent control plane (env NANO_AGENT_ID)
 --workspace <dir>     dir to mount (default: cwd)
 --advertise <url>     callback URL if the control plane is on another host
 --listen-host <host>  0.0.0.0 to accept calls from a remote control plane
@@ -60,6 +61,14 @@ call back on:
 
 ```sh
 nano-tui --control http://homura:3001 --listen-host 0.0.0.0 --advertise http://<your-ip>:<port> --tool-port 3010
+```
+
+When the multi-agent control plane is forwarded locally, select its worker explicitly:
+
+```sh
+ssh -N -L 4220:127.0.0.1:4220 homura
+npm run start --workspace @nano/tui -- --control http://127.0.0.1:4220 --agent nano \
+  --listen-host 0.0.0.0 --advertise http://<your-mesh-ip>:4221 --tool-port 4221
 ```
 
 ## server side

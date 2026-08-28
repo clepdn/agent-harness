@@ -18,6 +18,7 @@ import {
 } from "../discord/state"
 import { listAliases, removeAlias, searchMemories, setAlias } from "../memory"
 import { setCustomStatus } from "../discord/status-updater"
+import { searchDiscordMessages } from "../discord/search"
 import { webSearch } from "../web-search"
 import { emit } from "../stream"
 import type { ToolHandler } from "./loop-shared"
@@ -438,6 +439,24 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
             2,
           )
         },
+      }),
+
+    discord_search: (ctx) =>
+      runStandardTool(ctx, {
+        name: "discord_search",
+        logArgKeys: ["channel_id", "query", "message_id", "limit"] as const,
+        runArgKeys: ["channel_id", "query", "message_id", "limit"] as const,
+        run: async (channelId, query, messageId, limit) =>
+          JSON.stringify(
+            await searchDiscordMessages({
+              channelId: String(channelId ?? ""),
+              ...(query ? { query: String(query) } : {}),
+              ...(messageId ? { messageId: String(messageId) } : {}),
+              ...(typeof limit === "number" ? { limit } : {}),
+            }),
+            null,
+            2,
+          ),
       }),
 
     discord_send: (ctx) =>

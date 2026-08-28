@@ -1,4 +1,5 @@
 import { buildBootstrap } from "../bootstrap"
+import { config } from "../config"
 import { clientTools } from "../client"
 import { areDiscordToolsAvailable } from "../discord/availability"
 import { isWebSearchAvailable } from "../web-search"
@@ -24,6 +25,8 @@ function currentToolCatalog() {
     workspace: clientTools.getWorkspace(),
     memory: true,
     discord: areDiscordToolsAvailable(),
+    subagents: config.subagents.length > 0,
+    computer: config.computer_use.enabled,
     webSearch: isWebSearchAvailable(),
   })
 }

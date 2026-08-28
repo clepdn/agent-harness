@@ -1,6 +1,7 @@
 import { stream } from "../llm"
 import type { AssistantMessage, AssistantMessageEvent, TextContent, ThinkingContent, Usage } from "../llm"
 import type { OpenAICompletionsOptions } from "../llm"
+import type { ToolDefinition } from "@nano/harness-core"
 import { logMessage } from "../db"
 import { setContextSize } from "../discord/status-updater"
 import { buildCompletionMessages, rememberRecalledMemoryChunks } from "../memory"
@@ -147,9 +148,10 @@ async function createStreamedCompletion(
   apiKey: string | undefined,
   toolChoice: "required" | "auto" | "none",
   state: LoopState,
+  tools?: ToolDefinition[],
 ): Promise<CompletionTurnResult> {
   const startedAt = Date.now()
-  const context = buildContext(state)
+  const context = buildContext(state, tools)
 
   const resolvedToolChoice = modelState.enableThinking && toolChoice === "required" ? "auto" : toolChoice
   const options: OpenAICompletionsOptions = {
@@ -199,13 +201,11 @@ async function createStreamedCompletion(
 
   return { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond }
 }
-
-async function createFallbackCompletion(state: LoopState): Promise<CompletionTurnResult> {
-  return createStreamedCompletion(modelState.fallbackModel, modelState.fallbackApiKey, modelState.fallbackToolChoice, state)
+async function createFallbackCompletion(state: LoopState, tools?: ToolDefinition[]): Promise<CompletionTurnResult> {
+  return createStreamedCompletion(modelState.fallbackModel, modelState.fallbackApiKey, modelState.fallbackToolChoice, state, tools)
 }
-
-async function createPrimaryCompletion(state: LoopState): Promise<CompletionTurnResult> {
-  return createStreamedCompletion(modelState.primaryModel!, modelState.primaryApiKey, modelState.primaryToolChoice, state)
+async function createPrimaryCompletion(state: LoopState, tools?: ToolDefinition[]): Promise<CompletionTurnResult> {
+  return createStreamedCompletion(modelState.primaryModel!, modelState.primaryApiKey, modelState.primaryToolChoice, state, tools)
 }
 
 function logPromptSizeDebug(state: LoopState, errMsg: string, label: string): void {
@@ -264,6 +264,7 @@ async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Pro
  */
 export async function fetchCompletion(
   state: LoopState,
+  tools?: ToolDefinition[],
   _baseState: LoopState = state,
 ): Promise<CompletionTurnResult> {
   let promptTooLargeAttempts = 0
@@ -302,7 +303,7 @@ export async function fetchCompletion(
       }
 
       try {
-        const completion = await createFallbackCompletion(requestState)
+        const completion = await createFallbackCompletion(requestState, tools)
         state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
         state.memoryRecallPending = false
         return completion
@@ -327,7 +328,7 @@ export async function fetchCompletion(
     }
 
     try {
-      const completion = await createPrimaryCompletion(requestState)
+      const completion = await createPrimaryCompletion(requestState, tools)
       state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
       state.memoryRecallPending = false
       return completion
@@ -364,7 +365,7 @@ export async function fetchCompletion(
 
       console.warn(`[api] primary down (${errMsg}) - switching to fallback`)
       try {
-        const completion = await createFallbackCompletion(requestState)
+        const completion = await createFallbackCompletion(requestState, tools)
         state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
         state.memoryRecallPending = false
         return completion

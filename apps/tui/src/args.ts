@@ -1,5 +1,6 @@
 export type TuiArgs = {
   control: string
+  agent?: string
   workspace: string
   advertise?: string
   listenHost: string
@@ -17,6 +18,7 @@ function flag(name: string): string | undefined {
 export function parseArgs(): TuiArgs {
   return {
     control: (flag("--control") ?? process.env.NANO_CONTROL_URL ?? "http://127.0.0.1:3001").replace(/\/+$/, ""),
+    agent: flag("--agent") ?? process.env.NANO_AGENT_ID,
     workspace: flag("--workspace") ?? process.cwd(),
     advertise: flag("--advertise") ?? process.env.NANO_ADVERTISE_URL,
     listenHost: flag("--listen-host") ?? "127.0.0.1",
@@ -32,6 +34,7 @@ export const HELP = `nano-tui — direct terminal chat client for the nano contr
 Usage: nano-tui [options]
 
   --control <url>       control plane base URL (default http://127.0.0.1:3001, env NANO_CONTROL_URL)
+  --agent <id>          agent ID when connecting through a multi-agent control plane
   --workspace <dir>     directory to mount as the tool workspace (default: cwd)
   --advertise <url>     URL the control plane should call back on (default: the
                         executor's own bound address; set this when the control

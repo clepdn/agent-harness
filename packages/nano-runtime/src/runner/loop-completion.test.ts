@@ -1,9 +1,11 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import type { AssistantMessage } from "../llm"
+import type { AssistantMessage, Tool } from "../llm"
+import type { LoopState } from "./types"
 import { assistantContentText } from "./loop-content"
 import { messageStringContent } from "./messages"
 import { applyUsage } from "./loop-completion"
+import { buildContext } from "./tools"
 
 // Pi AssistantMessage is the native format now — no conversion needed.
 // These tests verify helper functions that work on pi types directly.
@@ -75,4 +77,56 @@ test("applyUsage counts cacheWrite tokens toward contextSize (regression)", () =
   }
   applyUsage(state, usage)
   assert.equal(state.contextSize, 46000, "contextSize must be input + cacheRead + cacheWrite (not output)")
+})
+
+test("completion context includes dynamic server memory tools without dropping legacy tools", () => {
+  const state = {
+    systemPrompt: "test",
+    conversation: [],
+  } as unknown as LoopState
+  const context = buildContext(state, [
+    {
+      type: "function",
+      function: {
+        name: "memory_write",
+        description: "Write memory",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "memory_read",
+        description: "Read memory",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+  ])
+  const names = (context.tools as Tool[]).map((tool) => tool.name)
+
+  assert.equal(names.includes("memory_write"), true)
+  assert.equal(names.includes("memory_read"), true)
+  assert.equal(names.includes("wait"), true)
+  assert.equal(new Set(names).size, names.length)
+})
+
+test("completion context does not reopen dynamically gated Discord tools", () => {
+  const state = {
+    systemPrompt: "test",
+    conversation: [],
+  } as unknown as LoopState
+  const names = (buildContext(state, [
+    {
+      type: "function",
+      function: {
+        name: "memory_read",
+        description: "Read memory",
+        parameters: { type: "object", properties: {} },
+      },
+    },
+  ]).tools as Tool[]).map((tool) => tool.name)
+
+  assert.equal(names.includes("memory_read"), true)
+  assert.equal(names.includes("discord_send"), false)
+  assert.equal(names.includes("discord_upload"), false)
 })

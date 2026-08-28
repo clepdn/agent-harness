@@ -428,6 +428,33 @@ export function registerControlRoutes(
     await proxyWorkerStream(id, reply, Number.parseInt(query.after_seq ?? "0", 10) || 0, options.configuredAgentIds)
   })
 
+  app.post("/agents/:id/client/connect", async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const agent = findAgent(id)
+    if (!agent) return reply.code(404).send({ error: "agent not found" })
+    try {
+      const result = await fetchWorkerJson(agent, "/client/connect", {
+        method: "POST",
+        body: JSON.stringify(req.body ?? {}),
+      })
+      return reply.send(result)
+    } catch (err) {
+      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) })
+    }
+  })
+
+  app.post("/agents/:id/client/disconnect", async (req, reply) => {
+    const { id } = req.params as { id: string }
+    const agent = findAgent(id)
+    if (!agent) return reply.code(404).send({ error: "agent not found" })
+    try {
+      const result = await fetchWorkerJson(agent, "/client/disconnect", { method: "POST" })
+      return reply.send(result)
+    } catch (err) {
+      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) })
+    }
+  })
+
   app.get("/agents/:id/client/status", async (req, reply) => {
     const { id } = req.params as { id: string }
     const agent = findAgent(id)

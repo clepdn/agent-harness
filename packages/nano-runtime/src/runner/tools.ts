@@ -1,4 +1,5 @@
 import type { Context, Tool, TSchema } from "../llm"
+import type { ToolDefinition } from "@nano/harness-core"
 import { config } from "../config"
 import { imageRootForModelInput } from "../container/index"
 import { clientTools } from "../client"
@@ -354,10 +355,42 @@ export function getSubagentTools(enabledTools: string[], blacklistedTools: strin
  * Assembles a Context from loop state.
  * The conversation is already in pi's native format; this just wraps it.
  */
-export function buildContext(state: Pick<LoopState, "systemPrompt" | "conversation">): Context {
+const DYNAMICALLY_GATED_TOOLS = new Set([
+  "shell",
+  "read_file",
+  "edit_file",
+  "image_tool",
+  "computer",
+  "discord_scan",
+  "discord_inbox",
+  "discord_backread",
+  "discord_mark",
+  "discord_send",
+  "discord_upload",
+  "discord_channels",
+  "discord_channel_note",
+  "set_status",
+])
+
+function getCompletionTools(toolDefinitions?: ToolDefinition[]): Tool[] {
+  if (!toolDefinitions) return getActiveTools()
+
+  const tools = toolDefinitions.map((tool) => ({
+    name: tool.function.name,
+    description: tool.function.description,
+    parameters: tool.function.parameters as TSchema,
+  }))
+  const names = new Set(tools.map((tool) => tool.name))
+  for (const tool of getActiveTools()) {
+    if (!names.has(tool.name) && !DYNAMICALLY_GATED_TOOLS.has(tool.name)) tools.push(tool)
+  }
+  return tools.filter((tool) => isToolEnabled(tool.name))
+}
+
+export function buildContext(state: Pick<LoopState, "systemPrompt" | "conversation">, toolDefinitions?: ToolDefinition[]): Context {
   return {
     systemPrompt: state.systemPrompt || undefined,
     messages: state.conversation,
-    tools: getActiveTools(),
+    tools: getCompletionTools(toolDefinitions),
   }
 }
