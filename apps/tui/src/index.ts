@@ -1,7 +1,7 @@
 #!/usr/bin/env -S npx tsx
 import readline from "node:readline"
 import { createChatClient, type StreamEvent } from "@nano/chat-client"
-import { parseArgs, HELP } from "./args.js"
+import { parseArgs, HELP, handshakeErrorMessage } from "./args.js"
 import { startExecutor, type RunningExecutor } from "./executor.js"
 import {
   bold, cyan, dim, gray, green, magenta, red, yellow,
@@ -37,7 +37,7 @@ async function connect(executor: RunningExecutor): Promise<void> {
   })
   if (!res.ok) {
     const body = await res.text().catch(() => "")
-    throw new Error(`handshake failed (${res.status}): ${body}`)
+    throw new Error(handshakeErrorMessage(res.status, res.statusText, body, args.control, args.agent))
   }
 }
 

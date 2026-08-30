@@ -29,24 +29,44 @@ export function parseArgs(): TuiArgs {
   }
 }
 
-export const HELP = `nano-tui — direct terminal chat client for the nano control plane
+export const HELP = `nano-tui — direct terminal chat client for nano
 
 Usage: nano-tui [options]
 
-  --control <url>       control plane base URL (default http://127.0.0.1:3001, env NANO_CONTROL_URL)
+  --control <url>       worker or control plane base URL (default http://127.0.0.1:3001, env NANO_CONTROL_URL)
   --agent <id>          agent ID when connecting through a multi-agent control plane
   --workspace <dir>     directory to mount as the tool workspace (default: cwd)
-  --advertise <url>     URL the control plane should call back on (default: the
-                        executor's own bound address; set this when the control
-                        plane is on another host, e.g. http://<your-ip>:<port>)
+  --advertise <url>     URL the worker should call back on (default: the
+                        executor's own bound address; set this when the worker
+                        is on another host, e.g. http://<your-ip>:<port>)
   --listen-host <host>  host the executor binds (default 127.0.0.1; use 0.0.0.0
-                        to accept calls from a remote control plane)
+                        to accept calls from a remote worker)
   --tool-port <n>       executor port (default 0 = ephemeral)
   --capabilities <csv>  restrict tool capabilities (default: all)
   --hashline            enable hashline file editing
   -h, --help            show this help
 
-On start it mounts your working directory into the control plane via the
-/client/connect handshake, so nano runs tools directly against your files.
+Use a worker URL directly, or use the outer multi-agent control URL together
+with --agent. On start this client mounts your working directory via the
+selected worker's /client/connect route, so nano runs tools against your files.
 Type a message and press Enter. Ctrl-C to quit (auto-disconnects).
 `
+
+export function handshakeErrorMessage(
+  status: number,
+  statusText: string,
+  body: string,
+  control: string,
+  agent?: string,
+): string {
+  const detail = body.trim()
+  if (status === 404) {
+    const target = agent ? `${control} for agent ${agent}` : control
+    const guidance = agent
+      ? " Verify that --agent names an agent served by this control plane."
+      : " If this is the outer multi-agent control URL, pass --agent; otherwise use the selected worker URL."
+    return `handshake failed (404) at ${target}.${guidance}${detail ? ` Server response: ${detail}` : ""}`
+  }
+  const statusLabel = `${status} ${statusText}`.trim()
+  return `handshake failed (${statusLabel}): ${detail}`
+}
