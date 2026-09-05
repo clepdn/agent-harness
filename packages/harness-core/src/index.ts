@@ -57,7 +57,7 @@ export function createClientToolCatalog(options: ClientToolCatalogOptions = {}):
     tools.push(
       functionTool(
         "shell",
-        "Execute a bash command in the attached client workspace. The shell is stateful, so working-directory and environment changes persist on that client.",
+        "Execute a bash command in a fresh process in the attached client workspace. Each call starts from the workspace root with a clean shell; set pty=true only when the command requires terminal semantics.",
         {
           type: "object",
           additionalProperties: false,
@@ -65,6 +65,7 @@ export function createClientToolCatalog(options: ClientToolCatalogOptions = {}):
             command: { type: "string" },
             max_lines: { type: "integer", minimum: 1, description: "Maximum lines to return." },
             timeout_ms: { type: "integer", minimum: 1000, maximum: 600000 },
+            pty: { type: "boolean", description: "Allocate a fresh PTY for this command. Defaults to false." },
           },
           required: ["command"],
         },

@@ -60,20 +60,33 @@ export class ToolClientHttpServer {
     this.port = options.port ?? 3002
     this.bodyLimitBytes = Math.max(1_024, options.bodyLimitBytes ?? 2_000_000)
     this.authToken = options.authToken?.trim() || null
-    this.server = http.createServer((request, response) => void this.handle(request, response))
+    this.server = http.createServer((request, response) => {
+      void this.handle(request, response).catch((error) => {
+        if (!response.headersSent) {
+          try { sendJson(response, 500, { error: error instanceof Error ? error.message : String(error) }) } catch {}
+        } else {
+          response.destroy(error instanceof Error ? error : new Error(String(error)))
+        }
+      })
+    })
   }
 
   async start(): Promise<ToolClientHttpServerAddress> {
     if (this.address) return this.address
     await this.toolHost.start()
-    await new Promise<void>((resolve, reject) => {
-      const onError = (error: Error) => reject(error)
-      this.server.once("error", onError)
-      this.server.listen(this.port, this.listenHost, () => {
-        this.server.off("error", onError)
-        resolve()
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const onError = (error: Error) => reject(error)
+        this.server.once("error", onError)
+        this.server.listen(this.port, this.listenHost, () => {
+          this.server.off("error", onError)
+          resolve()
+        })
       })
-    })
+    } catch (error) {
+      await this.toolHost.stop().catch(() => {})
+      throw error
+    }
     const address = this.server.address() as AddressInfo
     const publicHost = this.listenHost === "0.0.0.0" || this.listenHost === "::" ? "127.0.0.1" : this.listenHost
     this.address = { host: this.listenHost, port: address.port, url: `http://${publicHost}:${address.port}` }
@@ -81,12 +94,12 @@ export class ToolClientHttpServer {
   }
 
   async stop(): Promise<void> {
+    await this.toolHost.stop()
     this.server.closeAllConnections()
     if (this.server.listening) {
       await new Promise<void>((resolve, reject) => this.server.close((error) => error ? reject(error) : resolve()))
     }
     this.address = null
-    await this.toolHost.stop()
   }
 
   private authorized(request: http.IncomingMessage): boolean {

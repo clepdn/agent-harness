@@ -25,7 +25,7 @@ test("Docker mode requires both container name and user", () => {
   )
 })
 
-test("the advertised workspace is the persistent shell's initial directory", async () => {
+test("the advertised workspace is the initial directory for each isolated shell", async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-cwd-"))
   const realWorkspace = await fs.realpath(workspace)
   const host = new NodeToolHost({ capabilities: ["shell"], workspace: { id: "test", root: workspace } })
@@ -34,6 +34,50 @@ test("the advertised workspace is the persistent shell's initial directory", asy
     assert.equal(result.status, "ok")
     assert.equal(result.output, realWorkspace)
     assert.equal(host.getWorkspace().root, realWorkspace)
+    assert.equal(host.getWorkspace().persistentShell, false)
+  } finally {
+    await host.stop()
+    await fs.rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test("shell failures are returned as tool errors", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-shell-error-"))
+  const host = new NodeToolHost({ capabilities: ["shell"], workspace: { id: "test", root: workspace } })
+  try {
+    const result = await host.execute(invocation("shell", { command: "echo nope >&2; exit 7" }))
+    assert.equal(result.status, "error")
+    assert.match(result.output ?? "", /exited with code 7[\s\S]*nope/)
+  } finally {
+    await host.stop()
+    await fs.rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test("shell PTY allocation is opt-in on each invocation", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-shell-pty-"))
+  const host = new NodeToolHost({ capabilities: ["shell"], workspace: { id: "test", root: workspace } })
+  try {
+    const plain = await host.execute(invocation("shell", { command: "if [ -t 1 ]; then echo tty; else echo pipe; fi" }))
+    const terminal = await host.execute(invocation("shell", { command: "if [ -t 1 ]; then echo tty; else echo pipe; fi", pty: true }))
+    assert.equal(plain.output, "pipe")
+    assert.equal(terminal.output, "tty")
+  } finally {
+    await host.stop()
+    await fs.rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test("the invocation deadline cancels and kills a shell command", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-shell-deadline-"))
+  const host = new NodeToolHost({ capabilities: ["shell"], workspace: { id: "test", root: workspace } })
+  try {
+    const call = invocation("shell", { command: "sleep 10", timeout_ms: 10_000 })
+    call.deadlineAt = new Date(Date.now() + 75).toISOString()
+    const startedAt = Date.now()
+    const result = await host.execute(call)
+    assert.equal(result.status, "cancelled")
+    assert.ok(Date.now() - startedAt < 2_000)
   } finally {
     await host.stop()
     await fs.rm(workspace, { recursive: true, force: true })

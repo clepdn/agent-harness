@@ -14,28 +14,19 @@ import {
   normalizeTimeoutMs,
   resolveMaxLines,
 } from "./config.js"
-import { currentWorkingDirectory, runOneOff, runRaw } from "./shell.js"
+import { currentWorkingDirectory, runRaw } from "./shell.js"
 import type { EditResult, ImageToolPayload } from "./types.js"
 
-function invokesSudo(command: string): boolean {
-  return /(^|[;&|({]\s*)sudo(\s|$)/.test(String(command ?? ""))
-}
-
-export async function runCommand(command: string, maxLines?: number, timeoutMs?: number): Promise<string> {
+export async function runCommand(
+  command: string,
+  maxLines?: number,
+  timeoutMs?: number,
+  pty = false,
+  signal?: AbortSignal,
+): Promise<string> {
   const cap = resolveMaxLines(command, maxLines)
   const opTimeoutMs = normalizeTimeoutMs(timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS)
-  const raw = invokesSudo(command)
-    ? await runOneOff(command, await currentWorkingDirectory(opTimeoutMs), { timeoutMs: opTimeoutMs })
-    : await runRaw(command, {
-        timeoutMs: opTimeoutMs,
-        // Always detach stdin from the PTY. The agent cannot type into a prompt,
-        // so an interactive child (clack/inquirer prompts, pagers, REPLs) would
-        // only consume the trailing completion sentinels still buffered in the
-        // PTY — poisoning completion detection and flooding the session with
-        // prompt redraw garbage. /dev/null gives such children immediate EOF
-        // so they abort cleanly and bash reaches the end sentinel.
-        redirectStdinToDevNull: true,
-      })
+  const raw = await runRaw(command, { timeoutMs: opTimeoutMs, pty, ...(signal ? { signal } : {}) })
 
   if (cap === 0) return raw
 

@@ -73,13 +73,12 @@ const KEY_MAP: Record<string, string> = {
 const BUTTON_MAP: Record<string, number> = { left: 1, middle: 2, right: 3 }
 
 /**
- * xdotool and `import` say nothing on success, so any output is the failure:
- * a dead DISPLAY, an unknown key name, a missing binary. The shell tool cannot
- * see exit codes, so this is the only signal — without it a click on a display
- * that isn't there reports success and the agent works blind.
+ * xdotool and `import` normally say nothing on success. Non-zero exits are
+ * rejected by the shell runner; unexpected successful output is also treated
+ * as a failure so display diagnostics cannot be mistaken for success.
  */
-async function xdo(command: string, timeoutMs: number): Promise<void> {
-  const output = (await runCommand(command, 0, timeoutMs)).trim()
+async function xdo(command: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
+  const output = (await runCommand(command, 0, timeoutMs, false, signal)).trim()
   if (output) throw new Error(output.split("\n").slice(0, 3).join(" | "))
 }
 
@@ -138,7 +137,11 @@ export function parseComputerAction(args: Record<string, unknown>): ComputerActi
  * Execute a computer action. Screenshots come back as an image artifact; every
  * other action returns a one-line description of what it did.
  */
-export async function executeComputerAction(act: ComputerAction): Promise<string | ClientImageArtifact> {
+export async function executeComputerAction(
+  act: ComputerAction,
+  timeoutMs = 30_000,
+  signal?: AbortSignal,
+): Promise<string | ClientImageArtifact> {
   const display = `DISPLAY=${quote(act.display?.trim() || process.env.DISPLAY || ":0")}`
 
   switch (act.action) {
@@ -146,29 +149,29 @@ export async function executeComputerAction(act: ComputerAction): Promise<string
       // readImageForModel only serves paths inside IMAGE_ROOT, so capture there.
       await fs.mkdir(IMAGE_ROOT, { recursive: true })
       const imgPath = path.join(IMAGE_ROOT, `screenshot-${Date.now()}.png`)
-      await xdo(`export ${display} && import -window root ${quote(imgPath)}`, 30000)
-      return readImageForModel(imgPath, 30000)
+      await xdo(`export ${display} && import -window root ${quote(imgPath)}`, Math.min(30_000, timeoutMs), signal)
+      return readImageForModel(imgPath, Math.min(30_000, timeoutMs))
     }
 
     case "click": {
       const btn = BUTTON_MAP[(act.button ?? "left").toLowerCase()] ?? 1
       const mods = act.keys?.length ? `+${act.keys.map(normalizeKey).join("+")}` : ""
-      await xdo(`export ${display} && xdotool mousemove ${act.x} ${act.y} click${mods ? ` --window $(xdotool getwindowfocus)` : ""} ${btn}`, 10000)
+      await xdo(`export ${display} && xdotool mousemove ${act.x} ${act.y} click${mods ? ` --window $(xdotool getwindowfocus)` : ""} ${btn}`, Math.min(10_000, timeoutMs), signal)
       return `clicked ${act.button ?? "left"} at (${act.x}, ${act.y})`
     }
 
     case "double_click": {
       const btn = BUTTON_MAP[(act.button ?? "left").toLowerCase()] ?? 1
-      await xdo(`export ${display} && xdotool mousemove ${act.x} ${act.y} click --repeat 2 ${btn}`, 10000)
+      await xdo(`export ${display} && xdotool mousemove ${act.x} ${act.y} click --repeat 2 ${btn}`, Math.min(10_000, timeoutMs), signal)
       return `double-clicked ${act.button ?? "left"} at (${act.x}, ${act.y})`
     }
 
     case "scroll": {
       const btn = (act.scroll_y ?? 0) < 0 ? 4 : 5
       const clicks = Math.max(1, Math.abs(Math.round((act.scroll_y ?? 0) / 100)))
-      await xdo(`export ${display} && xdotool mousemove ${act.x} ${act.y}`, 10000)
+      await xdo(`export ${display} && xdotool mousemove ${act.x} ${act.y}`, Math.min(10_000, timeoutMs), signal)
       for (let i = 0; i < clicks; i++) {
-        await xdo(`export ${display} && xdotool click ${btn}`, 5000)
+        await xdo(`export ${display} && xdotool click ${btn}`, Math.min(5_000, timeoutMs), signal)
       }
       return `scrolled ${clicks} clicks ${btn === 4 ? "up" : "down"} at (${act.x}, ${act.y})`
     }
@@ -176,7 +179,7 @@ export async function executeComputerAction(act: ComputerAction): Promise<string
     case "type": {
       const text = act.text ?? ""
       // --clearmodifiers avoids stuck modifier keys.
-      await xdo(`export ${display} && xdotool type --clearmodifiers --delay 0 ${quote(text)}`, 30000)
+      await xdo(`export ${display} && xdotool type --clearmodifiers --delay 0 ${quote(text)}`, Math.min(30_000, timeoutMs), signal)
       return `typed ${text.length} chars`
     }
 
@@ -184,7 +187,7 @@ export async function executeComputerAction(act: ComputerAction): Promise<string
       const keys = act.keys ?? []
       if (keys.length === 0) throw new Error("keypress requires at least one key")
       const combo = keys.map(normalizeKey).join("+")
-      await xdo(`export ${display} && xdotool key ${quote(combo)}`, 10000)
+      await xdo(`export ${display} && xdotool key ${quote(combo)}`, Math.min(10_000, timeoutMs), signal)
       return `pressed ${combo}`
     }
 
@@ -193,23 +196,24 @@ export async function executeComputerAction(act: ComputerAction): Promise<string
       const start = points[0]
       if (!start || points.length < 2) throw new Error("drag requires at least two path points")
       const rest = points.slice(1)
-      await xdo(`export ${display} && xdotool mousemove ${start[0]} ${start[1]} mousedown 1`, 10000)
+      await xdo(`export ${display} && xdotool mousemove ${start[0]} ${start[1]} mousedown 1`, Math.min(10_000, timeoutMs), signal)
       for (const [x, y] of rest) {
-        await xdo(`export ${display} && xdotool mousemove ${x} ${y}`, 5000)
+        await xdo(`export ${display} && xdotool mousemove ${x} ${y}`, Math.min(5_000, timeoutMs), signal)
       }
-      await xdo(`export ${display} && xdotool mouseup 1`, 5000)
+      await xdo(`export ${display} && xdotool mouseup 1`, Math.min(5_000, timeoutMs), signal)
       return `dragged from (${start[0]}, ${start[1]}) through ${rest.length} points`
     }
 
     case "move": {
-      await xdo(`export ${display} && xdotool mousemove ${act.x} ${act.y}`, 10000)
+      await xdo(`export ${display} && xdotool mousemove ${act.x} ${act.y}`, Math.min(10_000, timeoutMs), signal)
       return `moved mouse to (${act.x}, ${act.y})`
     }
 
     case "wait": {
       const ms = Number.isFinite(act.duration) ? Math.max(0, Number(act.duration)) : 1000
-      await sleep(ms)
-      return `waited ${ms}ms`
+      const waitedMs = Math.min(ms, timeoutMs)
+      await sleep(waitedMs, undefined, { signal })
+      return `waited ${waitedMs}ms`
     }
 
     default:

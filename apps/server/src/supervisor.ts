@@ -25,6 +25,7 @@ function workerArgs(agent: ResolvedLocalAgent): string[] {
 
 const HEALTH_TIMEOUT_MS = 30_000
 const STOP_TIMEOUT_MS = 75_000
+const STABLE_RUNTIME_MS = 60_000
 
 function childExited(child: ChildProcess): boolean {
   return child.exitCode !== null || child.signalCode !== null
@@ -59,6 +60,7 @@ export class LocalAgentSupervisor {
   private stopping = false
   private restartTimer: ReturnType<typeof setTimeout> | null = null
   private restartDelayMs = 1_000
+  private healthyAt = 0
 
   constructor(options: SupervisorOptions) {
     this.options = options
@@ -67,7 +69,12 @@ export class LocalAgentSupervisor {
 
   async start(): Promise<void> {
     this.stopping = false
-    await this.spawnAndWaitForHealth()
+    try {
+      await this.spawnAndWaitForHealth()
+    } catch (error) {
+      console.error(`[server] local agent ${this.agent.id} failed initial startup:`, error)
+      if (!this.stopping) this.scheduleRestart()
+    }
   }
 
   async stop(): Promise<void> {
@@ -111,7 +118,7 @@ export class LocalAgentSupervisor {
       throw error
     }
     if (this.child !== child || childExited(child)) throw new Error(`local agent ${this.agent.id} exited before becoming healthy`)
-    this.restartDelayMs = 1_000
+    this.healthyAt = Date.now()
     this.options.onReady(this.agent)
   }
 
@@ -142,6 +149,10 @@ export class LocalAgentSupervisor {
     this.child = null
     console.warn(`[server] local agent ${this.agent.id} exited (${signal ?? code ?? "unknown"})`)
     if (this.stopping) return
+    if (this.healthyAt > 0 && Date.now() - this.healthyAt >= STABLE_RUNTIME_MS) {
+      this.restartDelayMs = 1_000
+    }
+    this.healthyAt = 0
     this.scheduleRestart()
   }
 

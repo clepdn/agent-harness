@@ -19,7 +19,7 @@ import {
   configureNodeToolRuntime,
   type NodeToolRuntimeOptions,
 } from "./config.js"
-import { closeBash, currentWorkingDirectory, openBash } from "./shell.js"
+import { currentWorkingDirectory } from "./shell.js"
 import { editFile, readFile, readFileBytes, readImageForModel, runCommand } from "./tools.js"
 import { executeComputerAction, parseComputerAction } from "./computer.js"
 import { hashlineEdit, hashlineRead } from "./hashline/index.js"
@@ -65,11 +65,19 @@ function boundedText(output: string): string {
   return `${prefix}\n[truncated at ${MAX_RESULT_BYTES} bytes for transport]`
 }
 
+function effectiveTimeout(args: Record<string, unknown>, remainingMs: number): number {
+  const requested = typeof args.timeout_ms === "number" && Number.isFinite(args.timeout_ms) && args.timeout_ms > 0
+    ? Math.trunc(args.timeout_ms)
+    : remainingMs
+  return Math.max(1, Math.min(requested, remainingMs))
+}
+
 export class NodeToolHost implements ClientToolHost {
   private readonly capabilities: ToolCapability[]
   private readonly workspace: WorkspaceDescriptor
   private readonly runtimeGeneration: number
   private readonly hashline: boolean
+  private readonly activeInvocations = new Set<AbortController>()
   private started = false
 
   constructor(options: NodeToolHostOptions = {}) {
@@ -94,7 +102,7 @@ export class NodeToolHost implements ClientToolHost {
       home: CLIENT_HOME,
       imageRoot: IMAGE_ROOT,
       platform: options.workspace?.platform?.trim() || process.platform,
-      persistentShell: this.capabilities.includes("shell"),
+      persistentShell: false,
       hashline: this.hashline,
     }
   }
@@ -110,12 +118,13 @@ export class NodeToolHost implements ClientToolHost {
   async start(): Promise<void> {
     if (this.started) return
     this.assertActiveRuntime()
-    if (this.capabilities.includes("shell")) await openBash()
     this.started = true
   }
 
   async stop(): Promise<void> {
-    if (this.runtimeGeneration === NODE_TOOL_RUNTIME_GENERATION) closeBash()
+    for (const controller of this.activeInvocations) {
+      controller.abort(new Error("tool host stopped"))
+    }
     this.started = false
   }
 
@@ -123,17 +132,27 @@ export class NodeToolHost implements ClientToolHost {
     if (!this.capabilities.includes(invocation.tool)) {
       return errorResult(invocation, new Error(`client does not expose ${invocation.tool}`))
     }
-    if (Date.now() >= Date.parse(invocation.deadlineAt)) {
+    const deadlineMs = Date.parse(invocation.deadlineAt)
+    if (Date.now() >= deadlineMs) {
       return {
         ...errorResult(invocation, new Error("tool call expired before execution")),
         status: "cancelled",
       }
     }
 
+    const controller = new AbortController()
+    this.activeInvocations.add(controller)
+    const deadlineTimer = setTimeout(
+      () => controller.abort(new Error("tool call deadline exceeded")),
+      Math.max(1, deadlineMs - Date.now()),
+    )
+    deadlineTimer.unref?.()
+
     try {
       this.assertActiveRuntime()
       await this.start()
-      const output = await this.executeTool(invocation.tool, invocation.args)
+      const remainingMs = Math.max(1, deadlineMs - Date.now())
+      const output = await this.executeTool(invocation.tool, invocation.args, remainingMs, controller.signal)
       const artifact =
         typeof output === "string"
           ? { output: boundedText(output) }
@@ -149,7 +168,13 @@ export class NodeToolHost implements ClientToolHost {
         completedAt: new Date().toISOString(),
       }
     } catch (error) {
-      return errorResult(invocation, error)
+      return {
+        ...errorResult(invocation, error),
+        ...(controller.signal.aborted ? { status: "cancelled" as const } : {}),
+      }
+    } finally {
+      clearTimeout(deadlineTimer)
+      this.activeInvocations.delete(controller)
     }
   }
 
@@ -159,13 +184,21 @@ export class NodeToolHost implements ClientToolHost {
     }
   }
 
-  private async executeTool(tool: ClientToolName, args: Record<string, unknown>): Promise<string | ClientImageArtifact> {
+  private async executeTool(
+    tool: ClientToolName,
+    args: Record<string, unknown>,
+    remainingMs: number,
+    signal: AbortSignal,
+  ): Promise<string | ClientImageArtifact> {
+    const timeoutMs = effectiveTimeout(args, remainingMs)
     switch (tool) {
       case "shell": {
         const output = await runCommand(
           String(args.command ?? ""),
           typeof args.max_lines === "number" ? args.max_lines : undefined,
-          typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
+          timeoutMs,
+          args.pty === true,
+          signal,
         )
         return output || "(no output)"
       }
@@ -183,7 +216,7 @@ export class NodeToolHost implements ClientToolHost {
           String(args.path ?? ""),
           typeof args.start_line === "number" ? args.start_line : undefined,
           typeof args.end_line === "number" ? args.end_line : undefined,
-          typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
+          timeoutMs,
         )
         return output || "(empty file)"
       }
@@ -201,7 +234,7 @@ export class NodeToolHost implements ClientToolHost {
           String(args.path ?? ""),
           String(args.old_text ?? ""),
           String(args.new_text ?? ""),
-          typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
+          timeoutMs,
         )
         if (!result.ok) throw new Error(result.message)
         return result.message
@@ -209,17 +242,17 @@ export class NodeToolHost implements ClientToolHost {
       case "image_tool": {
         return readImageForModel(
           String(args.path ?? ""),
-          typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
+          timeoutMs,
         )
       }
       case "computer": {
-        return executeComputerAction(parseComputerAction(args))
+        return executeComputerAction(parseComputerAction(args), timeoutMs, signal)
       }
       case "read_bytes": {
         return readFileBytes(
           String(args.path ?? ""),
           typeof args.max_bytes === "number" ? args.max_bytes : undefined,
-          typeof args.timeout_ms === "number" ? args.timeout_ms : undefined,
+          timeoutMs,
         )
       }
     }

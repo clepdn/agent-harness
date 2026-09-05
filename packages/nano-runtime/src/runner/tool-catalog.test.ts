@@ -57,6 +57,19 @@ test("Discord and client tools are independently gated", () => {
   assert.equal(names.includes("discord_send"), true)
 })
 
+test("shell catalog exposes explicit per-command PTY allocation", () => {
+  const shell = createNiriToolCatalog({
+    clientCapabilities: ["shell"],
+    workspace: { id: "client", root: "/client", persistentShell: false },
+  }).find((tool) => tool.function.name === "shell")
+  const properties = shell?.function.parameters.properties as Record<string, unknown>
+  assert.deepEqual(properties.pty, {
+    type: "boolean",
+    description: "Allocate a fresh PTY for this command. Defaults to false.",
+  })
+  assert.match(shell?.function.description ?? "", /fresh process/)
+})
+
 test("web_search is gated on the webSearch option", () => {
   const off = createNiriToolCatalog({}).map((tool) => tool.function.name)
   assert.equal(off.includes("web_search"), false)

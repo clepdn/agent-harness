@@ -5,7 +5,8 @@ export interface EditResult {
 
 export interface RunRawOptions {
   timeoutMs?: number
-  redirectStdinToDevNull?: boolean
+  pty?: boolean
+  signal?: AbortSignal
 }
 
 export interface ImageToolPayload {

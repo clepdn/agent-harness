@@ -138,9 +138,9 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
     shell: (ctx) =>
       runStandardTool(ctx, {
         name: "shell",
-        logArgKeys: ["command", "timeout_ms"] as const,
-        runArgKeys: ["command", "max_lines", "timeout_ms"] as const,
-        run: (command, max_lines, timeout_ms) => runClientTool("shell", { command, max_lines, timeout_ms }),
+        logArgKeys: ["command", "timeout_ms", "pty"] as const,
+        runArgKeys: ["command", "max_lines", "timeout_ms", "pty"] as const,
+        run: (command, max_lines, timeout_ms, pty) => runClientTool("shell", { command, max_lines, timeout_ms, pty }),
         emptyFallback: "(no output)",
       }),
 
@@ -660,4 +660,3 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
     },
   }
 }
-

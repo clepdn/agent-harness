@@ -13,7 +13,7 @@ import { setRunnerPresence } from "./presence"
 import { createNiriToolCatalog } from "./tool-catalog"
 import { archiveContextMessages } from "./context-store"
 import type { RunnerStateInternal } from "./types"
-import { BOREDOM_WAKE_MS, clearSession, loadRestSnapshot, loadSession, saveRestSnapshot, saveSession } from "./util"
+import { BOREDOM_WAKE_MS, clearSession, loadRestSnapshot, loadSession, quarantineSession, saveRestSnapshot, saveSession } from "./util"
 import type { UserMessage, Message } from "../types"
 import type { ToolDefinition } from "@nano/harness-core"
 import { fromBoredom } from "../triggers/boredom"
@@ -443,9 +443,10 @@ export async function wake(event: UserMessage): Promise<void> {
     console.error(`[runner] loop aborted: ${message}`)
     if (err instanceof Error && err.stack) console.error(err.stack)
     try {
-      await saveRuntimeSnapshot()
-    } catch (saveErr) {
-      console.warn(`[runner] failed to persist session after abort: ${saveErr instanceof Error ? saveErr.message : String(saveErr)}`)
+      const quarantined = await quarantineSession()
+      console.warn(`[runner] discarded resumable session after fatal loop abort${quarantined.length ? `; quarantined ${quarantined.join(", ")}` : ""}`)
+    } catch (quarantineErr) {
+      console.warn(`[runner] failed to quarantine session after abort: ${quarantineErr instanceof Error ? quarantineErr.message : String(quarantineErr)}`)
     }
   } finally {
     const wasShutdownRequested = state.shutdownRequested

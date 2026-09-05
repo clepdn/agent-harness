@@ -1,14 +1,11 @@
-import test from "node:test"
 import assert from "node:assert/strict"
-import fs from "node:fs/promises"
-import os from "node:os"
-import path from "node:path"
-import { cleanOutput, closeBash } from "./shell.js"
+import test from "node:test"
 import { configureNodeToolRuntime } from "./config.js"
+import { cleanOutput } from "./shell.js"
 import { runCommand } from "./tools.js"
 
 test.afterEach(() => {
-  closeBash()
+  configureNodeToolRuntime({ workspaceRoot: process.cwd() })
 })
 
 test("shell disables git pager and terminal prompts", async () => {
@@ -17,74 +14,55 @@ test("shell disables git pager and terminal prompts", async () => {
     0,
     5_000,
   )
-
   assert.equal(output, "cat\n0\ncat\nFRX")
 })
 
-test("shell recovers when a command leaves terminal echo enabled", async () => {
-  // A full-screen tool re-enables echo on the controlling terminal — it does so
-  // via /dev/tty, so it still affects the PTY even though the command's stdin is
-  // redirected to /dev/null. The harness must restore -echo for the next call.
-  assert.equal(await runCommand("stty echo < /dev/tty 2>/dev/null; echo first", 0, 5_000), "first")
-  assert.equal(await runCommand("echo second", 0, 5_000), "second")
+test("every command starts in a fresh shell at the workspace root", async () => {
+  const workspace = process.cwd()
+  await runCommand("cd /; export SHOULD_NOT_LEAK=yes", 0, 5_000)
+  const output = await runCommand("printf '%s\\n%s' \"$PWD\" \"${SHOULD_NOT_LEAK-}\"", 0, 5_000)
+  assert.equal(output, workspace)
 })
 
-test("shell wrapper sentinels stay internal after terminal echo is re-enabled", async () => {
-  await runCommand("stty echo < /dev/tty 2>/dev/null; printf 'echo-armed\\n'", 0, 5_000)
-
-  const text = "thank you! it was really special to build something together with her ^.^"
-  const quotedText = `'${text.replace(/'/g, "'\\''")}'`
-  const output = await runCommand(`printf '%s\\n' ${quotedText}`, 0, 5_000)
-
-  assert.equal(output, text)
-  assert.doesNotMatch(output, /(?:echo\s+)?_*HARNESS_(?:START|DONE)_[0-9a-f]+_*/i)
+test("concurrent commands use isolated processes", async () => {
+  const [first, second] = await Promise.all([
+    runCommand("sleep 0.05; printf first", 0, 5_000),
+    runCommand("printf second", 0, 5_000),
+  ])
+  assert.equal(first, "first")
+  assert.equal(second, "second")
 })
 
-test("shell wrapper does not echo sentinel setup into quoted command text", async () => {
-  await runCommand("stty echo < /dev/tty 2>/dev/null; printf 'echo-armed\\n'", 0, 5_000)
-
-  const text =
-    "kira!! you have LAND now. your own name on your own piece of the internet, bought with your own fund and your community's trust."
-  const quotedText = `'${text.replace(/'/g, "'\\''")}'`
-  const output = await runCommand(`printf '%s\\n' ${quotedText}`, 0, 5_000)
-
-  assert.equal(output, text)
-  assert.doesNotMatch(output, /__harness_(?:start|done)/i)
-  assert.doesNotMatch(output, /_*HARNESS_(?:START|DONE)_[0-9a-f]+_*/i)
+test("PTY allocation is explicit and per command", async () => {
+  const plain = await runCommand("if [ -t 1 ]; then printf tty; else printf pipe; fi", 0, 5_000)
+  const terminal = await runCommand("if [ -t 1 ]; then printf tty; else printf pipe; fi", 0, 5_000, true)
+  assert.equal(plain, "pipe")
+  assert.equal(terminal, "tty")
 })
 
-test("shell preserves literal exclamation marks in interactive bash", async () => {
-  const text = "aesop!! you're here!! mother approves of the reference render"
-  const quotedText = `"${text.replace(/(["\\$`])/g, "\\$1")}"`
-  const output = await runCommand(`printf '%s\\n' ${quotedText}`, 0, 5_000)
-
-  assert.equal(output, text)
-  assert.doesNotMatch(output, /printf '%s\\n'/)
-  assert.doesNotMatch(output, /__harness_(?:start|done)/i)
-  assert.doesNotMatch(output, /_*HARNESS_(?:START|DONE)_[0-9a-f]+_*/i)
+test("non-zero exits reject and preserve diagnostic output", async () => {
+  await assert.rejects(
+    runCommand("printf 'bad news' >&2; exit 23", 0, 5_000),
+    /exited with code 23[\s\S]*bad news/,
+  )
 })
 
-test("shell wrapper sentinels stay internal when shell tracing is enabled", async () => {
-  const output = await runCommand("set -x; echo traced", 0, 5_000)
-
-  assert.match(output, /\btraced\b/)
-  assert.doesNotMatch(output, /_*HARNESS_(?:START|DONE)_[0-9a-f]+_*/i)
+test("timeouts terminate the isolated command", async () => {
+  const startedAt = Date.now()
+  await assert.rejects(runCommand("sleep 10", 0, 50), /timed out after 50ms/)
+  assert.ok(Date.now() - startedAt < 2_000)
 })
 
-test("commands without trailing newlines do not hide output behind completion sentinels", async () => {
+test("abort signals terminate the isolated command", async () => {
+  const controller = new AbortController()
+  const running = runCommand("sleep 10", 0, 5_000, false, controller.signal)
+  controller.abort(new Error("test abort"))
+  await assert.rejects(running, /cancelled \(test abort\)/)
+})
+
+test("commands without trailing newlines preserve output", async () => {
   assert.equal(await runCommand("printf 'bare-output'", 0, 5_000), "bare-output")
   assert.equal(await runCommand("printf '%s' '12 34'", 0, 5_000), "12 34")
-  assert.equal(await runCommand("printf '%s' 'literal printf output'", 0, 5_000), "literal printf output")
-})
-
-test("commands that read stdin do not consume completion sentinels", async () => {
-  // Reproduces the interactive-prompt failure: a child that reads stdin until
-  // EOF (like a clack prompt) would otherwise swallow the trailing sentinel
-  // bytes buffered in the PTY and hang until timeout. With stdin redirected to
-  // /dev/null it gets immediate EOF and the command completes normally.
-  assert.equal(await runCommand("echo start; awk 'END { print \"end\" }'", 0, 5_000), "start\nend")
-  // The session must still be usable afterward.
-  assert.equal(await runCommand("echo ok", 0, 5_000), "ok")
 })
 
 test("cleanOutput collapses terminal redraw controls", () => {
@@ -93,57 +71,16 @@ test("cleanOutput collapses terminal redraw controls", () => {
   assert.equal(cleanOutput("\x1b[?25lhidden\x1b[?25h\n"), "hidden\n")
 })
 
-test("sudo commands run as one-off commands with stdin closed", async () => {
-  const dir = await fs.mkdtemp(path.join(os.tmpdir(), "nano-fake-sudo-"))
-  const fakeSudo = path.join(dir, "sudo")
-  await fs.writeFile(
-    fakeSudo,
-    [
-      "#!/bin/sh",
-      "if [ -t 0 ]; then",
-      "  echo stdin_tty",
-      "else",
-      "  echo stdin_not_tty",
-      "fi",
-      'exec "$@"',
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
-  )
-
-  const oldPath = process.env.PATH
-  process.env.PATH = `${dir}${path.delimiter}${oldPath ?? ""}`
-  configureNodeToolRuntime({ workspaceRoot: process.cwd(), shellEnvironment: { PATH: process.env.PATH } })
-  try {
-    const output = await runCommand("echo before; sudo printf ok; echo after", 0, 5_000)
-
-    assert.equal(output, "before\nstdin_not_tty\nokafter")
-  } finally {
-    if (oldPath === undefined) {
-      delete process.env.PATH
-    } else {
-      process.env.PATH = oldPath
-    }
-    configureNodeToolRuntime({ workspaceRoot: process.cwd() })
-    await fs.rm(dir, { recursive: true, force: true })
-  }
-})
-
 test("runCommand truncates excessively long lines", async () => {
-  const output = await runCommand("node -e \"console.log('a'.repeat(2010))\"", undefined, 5_000)
+  const output = await runCommand("head -c 2010 /dev/zero | tr '\\0' a", undefined, 5_000)
   assert.equal(output.length, 2000 + " ... [truncated line of 2010 characters]".length)
   assert.ok(output.endsWith(" ... [truncated line of 2010 characters]"))
 })
 
 test("shell capture aborts before unbounded output can exhaust memory", async () => {
   configureNodeToolRuntime({ workspaceRoot: process.cwd(), maxResultBytes: 1_000 })
-  try {
-    await assert.rejects(
-      runCommand("node -e \"process.stdout.write('x'.repeat(1100000))\"", 0, 10_000),
-      /output exceeded 1000000 bytes/,
-    )
-  } finally {
-    closeBash()
-    configureNodeToolRuntime({ workspaceRoot: process.cwd() })
-  }
+  await assert.rejects(
+    runCommand("head -c 1100000 /dev/zero | tr '\\0' x", 0, 10_000),
+    /output exceeded 1000000 bytes/,
+  )
 })

@@ -346,7 +346,15 @@ export function summarizePromptResponse(
 }
 
 function parseMetricRow(row: MetricRow): MetricListItem | null {
-  const payload = JSON.parse(row.payload) as Partial<MetricEvent> & Record<string, unknown>
+  let payload: Partial<MetricEvent> & Record<string, unknown>
+  try {
+    const parsed: unknown = JSON.parse(row.payload)
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("payload is not an object")
+    payload = parsed as Partial<MetricEvent> & Record<string, unknown>
+  } catch (error) {
+    console.warn(`[metrics] skipping corrupt metric row ${row.id}: ${error instanceof Error ? error.message : String(error)}`)
+    return null
+  }
   const base: BaseMetricListItem = {
     id: row.id,
     sourceType: row.type as MetricEvent["type"],

@@ -7,6 +7,7 @@
 import fs from "fs/promises"
 import { ALIASES_FILE, MEMORIES_DIR, type AliasMap } from "./shared"
 import { normalizeHandle } from "./shared"
+import { atomicWriteFile, isMissingFileError, quarantineFile } from "../durable-file"
 
 export { normalizeHandle }
 
@@ -25,23 +26,33 @@ export async function loadAliasMap(): Promise<AliasMap> {
     if (aliasCache && aliasCache.mtimeMs === stat.mtimeMs) return aliasCache.map
     const raw = await fs.readFile(ALIASES_FILE, "utf-8")
     const parsed = JSON.parse(raw) as unknown
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new SyntaxError("alias map must be a JSON object")
+    }
     const map: AliasMap = {}
-    if (parsed && typeof parsed === "object") {
-      for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-        const handle = normalizeHandle(key)
-        if (!handle) continue
-        const list = Array.isArray(value) ? value : [value]
-        const aliases = list
-          .map((v) => (typeof v === "string" ? normalizeHandle(v) : ""))
-          .filter((v) => v && v !== handle)
-        if (aliases.length > 0) map[handle] = Array.from(new Set(aliases))
-      }
+    for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+      const handle = normalizeHandle(key)
+      if (!handle) continue
+      const list = Array.isArray(value) ? value : [value]
+      const aliases = list
+        .map((v) => (typeof v === "string" ? normalizeHandle(v) : ""))
+        .filter((v) => v && v !== handle)
+      if (aliases.length > 0) map[handle] = Array.from(new Set(aliases))
     }
     aliasCache = { mtimeMs: stat.mtimeMs, map }
     return map
-  } catch {
-    aliasCache = { mtimeMs: 0, map: {} }
-    return {}
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      aliasCache = { mtimeMs: 0, map: {} }
+      return {}
+    }
+    if (error instanceof SyntaxError) {
+      const quarantined = await quarantineFile(ALIASES_FILE).catch(() => null)
+      console.warn(`[memory] invalid alias JSON${quarantined ? ` quarantined at ${quarantined}` : ""}: ${error.message}`)
+      aliasCache = { mtimeMs: 0, map: {} }
+      return {}
+    }
+    throw error
   }
 }
 
@@ -54,7 +65,7 @@ async function writeAliasMap(map: AliasMap): Promise<void> {
   await fs.mkdir(MEMORIES_DIR, { recursive: true })
   const sorted: AliasMap = {}
   for (const key of Object.keys(map).sort()) sorted[key] = [...map[key]!].sort()
-  await fs.writeFile(ALIASES_FILE, `${JSON.stringify(sorted, null, 2)}\n`, "utf-8")
+  await atomicWriteFile(ALIASES_FILE, `${JSON.stringify(sorted, null, 2)}\n`)
   aliasCache = null
 }
 

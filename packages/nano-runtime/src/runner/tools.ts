@@ -18,7 +18,7 @@ export const TOOLS: Tool[] = [
   {
     name: "shell",
     description:
-      "Execute a bash command in your Linux environment. Stateful — cd, env vars, etc. persist. Stdin is generally attached to the PTY (more natural behavior), but for obviously interactive commands (REPLs, editors, pagers) we may redirect stdin to /dev/null to avoid accidental hangs. Output is automatically capped (default 150 lines, 40 for known-verbose commands like apt/pip/npm). Pass max_lines to override; use 0 for unlimited. You can also pass timeout_ms (default 30000, max 600000).",
+      "Execute a bash command in a fresh process in your Linux environment. Every call starts at the workspace root; cd and environment changes do not persist. Set pty=true only for commands that require terminal semantics. Output is automatically capped (default 150 lines, 40 for known-verbose commands like apt/pip/npm). Pass max_lines to override; use 0 for unlimited. You can also pass timeout_ms (default 30000, max 600000).",
     parameters: s({
       type: "object",
       properties: {
@@ -30,6 +30,10 @@ export const TOOLS: Tool[] = [
         timeout_ms: {
           type: "integer",
           description: "Execution timeout in milliseconds. Defaults to 30000. Max 600000.",
+        },
+        pty: {
+          type: "boolean",
+          description: "Allocate a fresh PTY for this command. Defaults to false.",
         },
       },
       required: ["command"],
