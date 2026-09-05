@@ -3,7 +3,7 @@ import { config } from "../config"
 import { normalizeTimeoutMs } from "../container/config"
 import type { ClientImageArtifact, ClientToolName } from "@nano/harness-protocol"
 import { AGENT_ID } from "../agent-config"
-import { grepMemory, listMemory, loadSkill, readMemory, writeMemory, writeSoul } from "../agent-state-tools"
+import { grepMemory, listMemory, loadSkill, readMemory, editMemoryResource } from "../agent-state-tools"
 import { clientTools } from "../client"
 import { logMessage } from "../db"
 import {
@@ -117,7 +117,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       // behind. Best-effort: the raw snapshot above already guarantees continuity.
       try {
         const compacted = await compactForShutdown(state)
-        if (compacted) {
+        if (compacted === "rewritten") {
           console.log("[runner] end_session compacted the conversation before resting")
           await saveRestSnapshot(state.conversation, note)
         }
@@ -159,9 +159,49 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       return result
     },
 
-    // Anchored (`edits`) and exact-text (`old_text`/`new_text`) payloads are both
-    // forwarded as-is; the attached client decides which contract it serves.
     edit_file: async (ctx) => {
+      const args = ctx.args
+      const pathArg = args.path
+      const hasExact = Object.prototype.hasOwnProperty.call(args, "old_text") || Object.prototype.hasOwnProperty.call(args, "new_text")
+      const hasHashline = Object.prototype.hasOwnProperty.call(args, "edits")
+      const exactValid = typeof args.old_text === "string" && typeof args.new_text === "string"
+      const hashlineValid = Array.isArray(args.edits) && args.edits.length > 0
+      if ((hasExact && hasHashline) || (!hasExact && !hasHashline) || (hasExact && !exactValid) || (hasHashline && !hashlineValid)) {
+        return runStandardTool(ctx, {
+          name: "edit_file",
+          logArgKeys: ["path"] as const,
+          runArgKeys: [] as const,
+          run: async () => { throw new Error("edit_file requires exactly one edit contract: old_text/new_text or a non-empty edits array") },
+          emitArgKeys: ["path"] as const,
+          previewChars: 0,
+        })
+      }
+      if (typeof pathArg !== "string" || !pathArg.trim()) {
+        return runStandardTool(ctx, {
+          name: "edit_file", logArgKeys: ["path"] as const, runArgKeys: [] as const,
+          run: async () => { throw new Error("path is required") }, emitArgKeys: ["path"] as const, previewChars: 0,
+        })
+      }
+      if (pathArg.startsWith("memory://")) {
+        if (!exactValid) {
+          return runStandardTool(ctx, {
+            name: "edit_file", logArgKeys: ["path"] as const, runArgKeys: [] as const,
+            run: async () => { throw new Error("memory:// resources accept only old_text/new_text") }, emitArgKeys: ["path"] as const, previewChars: 0,
+          })
+        }
+        return runStandardTool(ctx, {
+          name: "edit_file", logArgKeys: ["path"] as const,
+          runArgKeys: ["path", "old_text", "new_text", "expected_hash"] as const,
+          run: (uri, oldText, newText, expectedHash) => editMemoryResource(uri, oldText, newText, expectedHash),
+          emitArgKeys: ["path"] as const, previewChars: 0,
+        })
+      }
+      if (!clientTools.getCapabilities().includes("edit_file")) {
+        return runStandardTool(ctx, {
+          name: "edit_file", logArgKeys: ["path"] as const, runArgKeys: [] as const,
+          run: async () => { throw new Error("edit_file is unavailable on the attached client") }, emitArgKeys: ["path"] as const, previewChars: 0,
+        })
+      }
       const result = await runStandardTool(ctx, {
         name: "edit_file",
         logArgKeys: ["path", "timeout_ms"] as const,
@@ -171,9 +211,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         emitArgKeys: ["path"] as const,
         previewChars: 0,
       })
-      if (GIT_UPSTREAM_NAG) {
-        checkGitUpstream(ctx.args.path as string, ctx.convId, ctx.state)
-      }
+      if (GIT_UPSTREAM_NAG) checkGitUpstream(pathArg, ctx.convId, ctx.state)
       return result
     },
 
@@ -239,22 +277,6 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
           }
           return JSON.stringify({ ok: false, error: `unknown action: ${op}` })
         },
-      }),
-
-    memory_write: (ctx) =>
-      runStandardTool(ctx, {
-        name: "memory_write",
-        logArgKeys: ["path", "mode"] as const,
-        runArgKeys: ["path", "content", "mode", "target"] as const,
-        run: (path, content, mode, target) => writeMemory(path, content, mode, target),
-      }),
-
-    soul_write: (ctx) =>
-      runStandardTool(ctx, {
-        name: "soul_write",
-        logArgKeys: ["mode"] as const,
-        runArgKeys: ["content", "mode", "target"] as const,
-        run: (content, mode, target) => writeSoul(content, mode, target),
       }),
 
     memory_read: (ctx) =>

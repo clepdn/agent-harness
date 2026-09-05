@@ -28,7 +28,10 @@ function makeState(): LoopState {
     pendingInputs: [],
     tokenCount: 0,
     contextSize: 0,
+    toolCatalog: [],
     toolInFlight: false,
+    toolCatalogEpoch: 1,
+    toolCatalogFingerprint: "",
     memoryRecallCooldowns: {},
     memoryRecallTurn: 0,
     memoryRecallPending: false,
@@ -238,7 +241,7 @@ test("applyLoopGuardNudge appends an in-band user nudge", async () => {
     state,
     {
       clientTools: testClientTools,
-      getTools: () => [],
+      refreshToolCatalog: () => {},
       waitForEvent: async () => {
         throw new Error("unexpected wait")
       },
@@ -277,7 +280,7 @@ test("waitForNextEvent waits for and injects the next external event", async () 
   // the timeout variant. Return the event immediately to exercise the inject.
   await __loopTest.waitForNextEvent(42, makeState(), {
     clientTools: testClientTools,
-    getTools: () => [],
+    refreshToolCatalog: () => {},
     waitForEvent: async () => {
       calls.push("wait")
       return event
@@ -311,7 +314,7 @@ test("waitForNextEvent returns after successful compaction for immediate reactiv
   try {
     await __loopTest.waitForNextEvent(7, state, {
       clientTools: testClientTools,
-      getTools: () => [],
+      refreshToolCatalog: () => {},
       waitForEvent: async () => {
         calls.push("wait")
         return null
@@ -329,7 +332,7 @@ test("waitForNextEvent returns after successful compaction for immediate reactiv
       resolveShutdown: () => {},
     }, async () => {
       calls.push("compact")
-      return true
+      return "rewritten"
     })
   } finally {
     modelState.idleCompactionMs = savedIdle
@@ -349,7 +352,7 @@ test("waitForNextEvent bails out on shutdown instead of looping the idle timer",
 
   await __loopTest.waitForNextEvent(7, makeState(), {
     clientTools: testClientTools,
-    getTools: () => [],
+    refreshToolCatalog: () => {},
     waitForEvent: async () => null,
     // First timeout returns null (no event); the loop should then see shutdown
     // and return without ever injecting or looping again.
@@ -388,7 +391,7 @@ test("waitForNextEvent clears a manual compaction request after running the idle
   let timeouts = 0
   await __loopTest.waitForNextEvent(9, state, {
     clientTools: testClientTools,
-    getTools: () => [],
+    refreshToolCatalog: () => {},
     waitForEvent: async () => null,
     // First "timeout" (interrupt) returns null with the flag set; the loop
     // clears the flag and runs the idle pass, then loops. On the second
@@ -432,12 +435,8 @@ test("applyCompaction attempts an idle burn even below the token trigger", async
     makeAssistantMessage("hi there"),
   ]
 
-  // No summary model is configured in the test env, so the forced LLM path
-  // returns false at its "no summary model" guard rather than short-circuiting
-  // on the token check. The point: it doesn't throw and returns a boolean,
-  // proving idle reached the forced path instead of the below-trigger no-op.
   const result = await __loopTest.applyCompaction(state, "idle")
-  assert.equal(typeof result, "boolean")
+  assert.equal(result, "none")
 
   modelState.compactionStrategy = savedStrategy
   modelState.compactTriggerTokens = savedTrigger

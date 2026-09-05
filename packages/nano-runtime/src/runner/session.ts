@@ -63,17 +63,39 @@ export async function loadRestSnapshot(): Promise<RestSnapshot | null> {
 
 // ── Session persistence ───────────────────────────────────────────────────────
 
-export async function saveSession(messages: Message[]): Promise<void> {
-  await ensureDataDir()
-  await fs.writeFile(SESSION_FILE, JSON.stringify(messages), { encoding: "utf-8", mode: 0o666 })
+export const SESSION_SNAPSHOT_VERSION = 1 as const
+
+export type SessionSnapshot = {
+  version: typeof SESSION_SNAPSHOT_VERSION
+  messages: Message[]
+  toolCatalog: import("@nano/harness-core").ToolDefinition[]
+  toolCatalogEpoch: number
+  toolCatalogFingerprint: string
 }
 
-export async function loadSession(): Promise<Message[] | null> {
+/** Persist the active conversation together with its pinned tool catalog epoch. */
+export async function saveSession(snapshot: SessionSnapshot): Promise<void> {
+  await ensureDataDir()
+  await fs.writeFile(SESSION_FILE, JSON.stringify(snapshot), { encoding: "utf-8", mode: 0o666 })
+}
+
+/** Load a valid pinned session; legacy message arrays intentionally do not resume. */
+export async function loadSession(): Promise<SessionSnapshot | null> {
   try {
     const raw = await fs.readFile(SESSION_FILE, "utf-8")
-    const msgs = JSON.parse(raw) as Message[]
-    console.log(`[runner] found saved session (${msgs.length} messages)`)
-    return msgs
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") return null
+    const candidate = parsed as Partial<SessionSnapshot>
+    if (
+      !Array.isArray(candidate.messages) ||
+      !Array.isArray(candidate.toolCatalog) ||
+      !Number.isInteger(candidate.toolCatalogEpoch) ||
+      (candidate.toolCatalogEpoch as number) < 1 ||
+      typeof candidate.toolCatalogFingerprint !== "string" ||
+      candidate.toolCatalogFingerprint.length === 0
+    ) return null
+    console.log(`[runner] found saved session (${candidate.messages.length} messages, catalog epoch ${candidate.toolCatalogEpoch})`)
+    return candidate as SessionSnapshot
   } catch {
     return null
   }

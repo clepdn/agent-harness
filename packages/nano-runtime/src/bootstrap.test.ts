@@ -21,6 +21,13 @@ test("bootstrap explains immutable context recovery tools", async () => {
   assert.match(system, /Describe or search before expanding\./)
   assert.match(system, /not a substitute for journaling/i)
 })
+test("bootstrap documents unified memory editing", async () => {
+  const messages = await buildBootstrap({ source: "chat", triggeredAt: new Date().toISOString(), content: "hello", raw: null })
+  const system = String(messages[0]?.content)
+  assert.match(system, /Use `edit_file`.*memory:.*old_text.*new_text/i)
+  assert.match(system, /documentHash.*expected_hash/i)
+  assert.doesNotMatch(system, /memory_write|soul_write/)
+})
 
 test("bootstrap injects a skills index from frontmatter descriptions", async (t) => {
   await fs.mkdir(NANO_HOME, { recursive: true })

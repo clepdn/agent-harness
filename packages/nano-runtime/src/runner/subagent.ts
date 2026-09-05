@@ -30,6 +30,7 @@ const SUBAGENT_HOOKS: LoopHooks = {
   },
   injectIncomingEvent: () => {},
   flushDeferredEvents: () => {},
+  refreshToolCatalog: () => {},
   clearSession: async () => {},
   saveSession: async () => {},
   saveShutdownSnapshot: async () => {},
@@ -107,13 +108,16 @@ export async function runSubagent(
 
   // Fresh conversation state
   const state: LoopState = {
+    pendingInputs: [],
     systemPrompt,
     conversation: [
       { role: "user", content: task, timestamp: Date.now() } as Message,
     ],
-    pendingInputs: [],
     tokenCount: 0,
     contextSize: 0,
+    toolCatalog: [],
+    toolCatalogEpoch: 1,
+    toolCatalogFingerprint: "",
     toolInFlight: false,
     memoryRecallCooldowns: {},
     memoryRecallTurn: 0,

@@ -27,6 +27,7 @@ import {
   PEOPLE_DIR,
   tokensFromText,
   type MemoryHit,
+  type MemorySearchResult,
   type MemorySearchProfile,
   type SemanticQuerySignal,
 } from "./shared"
@@ -471,6 +472,7 @@ function semanticHitsForQuery(vector: number[], limit: number): MemoryHit[] {
       select
         c.id as chunkId,
         d.path as path,
+        d.content_hash as documentHash,
         d.kind as kind,
         d.title as documentTitle,
         c.title as title,
@@ -526,6 +528,7 @@ function exactPersonHits(profile: MemorySearchProfile): MemoryHit[] {
     select
       c.id as chunkId,
       d.path as path,
+      d.content_hash as documentHash,
       d.kind as kind,
       d.title as documentTitle,
       c.title as title,
@@ -586,6 +589,7 @@ export async function searchMemory(
       select
         c.id as chunkId,
         d.path as path,
+        d.content_hash as documentHash,
         d.kind as kind,
         d.title as documentTitle,
         c.title as title,
@@ -717,17 +721,18 @@ export function formatMemorySource(hit: MemoryHit): string {
  * @param hit - Memory hit.
  * @returns Search result with full chunk text.
  */
-export function toMemorySearchResult(hit: MemoryHit): import("./shared").MemorySearchResult {
-  const content = normalizeText(hit.text)
+export function toMemorySearchResult(hit: MemoryHit): MemorySearchResult {
+  const relativePath = path.relative(path.join(HOME_DIR, "memories"), hit.path).split(path.sep).join("/")
   return {
     chunkId: hit.chunkId,
     kind: hit.kind,
-    path: hit.path,
+    uri: `memory://${relativePath}`,
+    documentHash: hit.documentHash,
     source: formatMemorySource(hit),
     title: hit.title,
     headingPath: hit.headingPath,
-    content,
-    preview: content,
+    content: hit.text,
+    preview: normalizeText(hit.text),
   }
 }
 

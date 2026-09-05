@@ -349,6 +349,10 @@ export function endConversation(id: number, tokens: number): void {
   })
 }
 
+export function isDbInitialized(): boolean {
+  return db !== undefined
+}
+
 export function getDb(): Database.Database {
   if (!db) throw new Error("Database not initialized")
   return db

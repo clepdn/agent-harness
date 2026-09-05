@@ -1,3 +1,4 @@
+import { SessionSnapshot } from "./session"
 import assert from "node:assert/strict"
 import { createRequire } from "node:module"
 import os from "node:os"
@@ -54,7 +55,7 @@ test("runner persistence uses NANO_HOME when cwd is read-only", async (t) => {
       import { saveSession, saveRestSnapshot } from ${JSON.stringify(sessionUrl)}
       import { initMetricsDb } from ${JSON.stringify(metricsUrl)}
       const messages = [{ role: "user", content: "hello", timestamp: 1 }]
-      await saveSession(messages)
+      await saveSession({ version: 1, messages, toolCatalog: [], toolCatalogEpoch: 1, toolCatalogFingerprint: "test" })
       await saveRestSnapshot(messages, "checkpoint")
       initMetricsDb()
     `,
@@ -62,9 +63,10 @@ test("runner persistence uses NANO_HOME when cwd is read-only", async (t) => {
     { ...process.env, NANO_CONFIG: testConfig, NANO_HOME: home, HOME: home },
   )
 
-  const savedSession = JSON.parse(await fs.readFile(path.join(home, "session.json"), "utf8"))
+  const savedSession = JSON.parse(await fs.readFile(path.join(home, "session.json"), "utf8")) as SessionSnapshot
   const savedRest = JSON.parse(await fs.readFile(path.join(home, ".nano-rest-snapshot.json"), "utf8"))
-  assert.equal(savedSession[0].content, "hello")
+  assert.equal(savedSession.version, 1)
+  assert.equal(savedSession.messages[0]?.content, "hello")
   assert.equal(savedRest.note, "checkpoint")
   assert.equal(await fs.stat(path.join(home, "metrics.db")).then(() => true).catch(() => false), true)
   assert.equal(await fs.stat(path.join(readOnlyCwd, "session.json")).then(() => true).catch(() => false), false)

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { buildBootstrap } from "../bootstrap"
 import { config } from "../config"
 import { clientTools } from "../client"
@@ -14,13 +15,17 @@ import { archiveContextMessages } from "./context-store"
 import type { RunnerStateInternal } from "./types"
 import { BOREDOM_WAKE_MS, clearSession, loadRestSnapshot, loadSession, saveRestSnapshot, saveSession } from "./util"
 import type { UserMessage, Message } from "../types"
+import type { ToolDefinition } from "@nano/harness-core"
 import { fromBoredom } from "../triggers/boredom"
 
-let eventResolvers: Array<(event: UserMessage | null) => void> = []
 let shutdownResolvers: Array<() => void> = []
 const PROCESS_STARTED_AT = new Date().toISOString()
+let eventResolvers: Array<(event: UserMessage | null) => void> = []
+function catalogFingerprint(catalog: ToolDefinition[]): string {
+  return createHash("sha256").update(JSON.stringify(catalog)).digest("hex")
+}
 
-function currentToolCatalog() {
+function buildCurrentCatalog(): ToolDefinition[] {
   return createNiriToolCatalog({
     clientCapabilities: clientTools.getCapabilities(),
     workspace: clientTools.getWorkspace(),
@@ -32,6 +37,20 @@ function currentToolCatalog() {
   })
 }
 
+function refreshToolCatalog(reason: "new-session" | "post-compaction"): void {
+  const catalog = buildCurrentCatalog()
+  state.toolCatalog = catalog
+  state.toolCatalogFingerprint = catalogFingerprint(catalog)
+  state.toolCatalogEpoch += 1
+  if (reason === "post-compaction") {
+    state.conversation.push({
+      role: "user",
+      content: `[tool environment epoch ${state.toolCatalogEpoch}] Tool catalog refreshed after context rewrite. Active workspace and client capabilities are now those captured at this epoch.`,
+      timestamp: Date.now(),
+    } as Message)
+  }
+}
+
 const state: RunnerStateInternal = {
   contextSize: 0,
   running: false,
@@ -39,6 +58,9 @@ const state: RunnerStateInternal = {
   conversation: [],
   pendingInputs: [],
   tokenCount: 0,
+  toolCatalog: [],
+  toolCatalogEpoch: 0,
+  toolCatalogFingerprint: "",
   toolInFlight: false,
   memoryRecallCooldowns: {},
   memoryRecallTurn: 0,
@@ -49,10 +71,7 @@ const state: RunnerStateInternal = {
   restRequested: false,
   restReason: "",
 }
-
 /**
- * Returns whether a runner session is currently active.
- *
  * @returns `true` when the wake loop is running, otherwise `false`.
  */
 export function isRunning(): boolean {
@@ -257,16 +276,20 @@ function resolveShutdown(): void {
 
 async function saveRuntimeSnapshot(): Promise<void> {
   archiveContextMessages(state.conversation, "runtime-checkpoint")
-  await saveSession(state.conversation)
+  await saveSession({
+    version: 1,
+    messages: state.conversation,
+    toolCatalog: state.toolCatalog,
+    toolCatalogEpoch: state.toolCatalogEpoch,
+    toolCatalogFingerprint: state.toolCatalogFingerprint,
+  })
   await saveRestSnapshot(state.conversation, "runtime checkpoint")
 }
 
 /** Wait until the next event arrives (or return immediately if one is pending). */
 function waitForEvent(): Promise<UserMessage | null> {
   if (state.shutdownRequested || state.restRequested) return Promise.resolve(null)
-  if (state.pendingInputs.length > 0) {
-    return Promise.resolve(state.pendingInputs.shift()!)
-  }
+  if (state.pendingInputs.length > 0) return Promise.resolve(state.pendingInputs.shift()!)
   return new Promise<UserMessage | null>((resolve) => {
     eventResolvers.push(resolve)
   })
@@ -375,7 +398,10 @@ export async function wake(event: UserMessage): Promise<void> {
 
   const saved = await loadSession()
   if (saved) {
-    state.conversation = saved
+    state.conversation = saved.messages
+    state.toolCatalog = saved.toolCatalog
+    state.toolCatalogEpoch = saved.toolCatalogEpoch
+    state.toolCatalogFingerprint = saved.toolCatalogFingerprint
     autoSeeDiscordEvent(event)
     state.conversation.push({
       role: "user",
@@ -391,22 +417,16 @@ export async function wake(event: UserMessage): Promise<void> {
       workspace: clientTools.getWorkspace(),
       discord: areDiscordToolsAvailable(),
     })
+    state.toolCatalogEpoch = 0
+    refreshToolCatalog("new-session")
   }
-
   const convId = startConversation(event.source, event.triggeredAt)
-
-  const wakeMsg = state.conversation[state.conversation.length - 1]
-  if (wakeMsg && wakeMsg.role === "user") {
-    logMessage(convId, "user", typeof wakeMsg.content === "string" ? wakeMsg.content : JSON.stringify(wakeMsg.content))
-    emitUserEvent(event)
-  }
-
   console.log("[runner] nano is awake")
 
   try {
     const exit = await runLoop(convId, state, {
       clientTools,
-      getTools: currentToolCatalog,
+      refreshToolCatalog: () => refreshToolCatalog("post-compaction"),
       waitForEvent,
       waitForEventWithTimeout,
       injectIncomingEvent,

@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto"
-import { constants } from "node:fs"
+import { createHash, randomUUID } from "node:crypto"
+import { constants, type Stats } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { NANO_HOME } from "./agent-config"
-
+import { isDbInitialized } from "./db"
+import { syncMemoryIndex } from "./memory"
 const MAX_STATE_WRITE_BYTES = 256_000
 const MEMORY_ROOT = path.join(NANO_HOME, "memories")
 
@@ -18,8 +19,8 @@ function validateMarkdown(content: string): void {
   }
 }
 
-function validateContent(content: unknown): string {
-  if (typeof content !== "string" || !content.trim()) throw new Error("content is required")
+function validateContent(content: unknown, allowEmpty = false): string {
+  if (typeof content !== "string" || (!allowEmpty && !content.trim())) throw new Error("content is required")
   if (Buffer.byteLength(content, "utf8") > MAX_STATE_WRITE_BYTES) {
     throw new Error(`content exceeds ${MAX_STATE_WRITE_BYTES} bytes`)
   }
@@ -29,7 +30,12 @@ function validateContent(content: unknown): string {
 
 function memoryPath(relativePath: unknown): string {
   if (typeof relativePath !== "string" || !relativePath.trim()) throw new Error("path is required")
-  const normalized = relativePath.trim().replace(/\\/g, "/")
+  const raw = relativePath.trim()
+  const resource = raw.startsWith("memory://") ? raw.slice("memory://".length) : raw
+  if (!resource || resource.includes("?") || resource.includes("#")) {
+    throw new Error("memory URI must identify a Markdown file without a query or fragment")
+  }
+  const normalized = resource.replace(/\\/g, "/")
   if (path.posix.isAbsolute(normalized) || path.posix.extname(normalized).toLowerCase() !== ".md") {
     throw new Error("memory path must be a relative Markdown file")
   }
@@ -101,6 +107,108 @@ async function prepareMemoryFile(filePath: string): Promise<void> {
   }
 }
 
+async function syncMemoryAfterWrite(): Promise<void> {
+  if (isDbInitialized()) await syncMemoryIndex()
+}
+
+type MemoryResource = { filePath: string; indexed: boolean; backup: boolean; root: string }
+
+function memoryResourcePath(uri: unknown): MemoryResource {
+  if (typeof uri !== "string" || !uri.trim()) throw new Error("memory URI is required")
+  const raw = uri.trim()
+  if (!raw.startsWith("memory://")) throw new Error("path must be a memory:// URI")
+  const resource = raw.slice("memory://".length)
+  if (!resource || resource.includes("?") || resource.includes("#")) {
+    throw new Error("memory URI must identify a Markdown file without a query or fragment")
+  }
+  const normalized = resource.replace(/\\/g, "/")
+  if (path.posix.isAbsolute(normalized) || path.posix.extname(normalized).toLowerCase() !== ".md") {
+    throw new Error("memory path must be a relative Markdown file")
+  }
+  if (normalized === "soul.md") {
+    return { filePath: path.join(NANO_HOME, "soul.md"), indexed: false, backup: true, root: NANO_HOME }
+  }
+  const resolved = path.resolve(MEMORY_ROOT, normalized)
+  const relative = path.relative(MEMORY_ROOT, resolved)
+  if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("memory path escapes the agent memory directory")
+  return { filePath: resolved, indexed: true, backup: relative === "core.md", root: MEMORY_ROOT }
+}
+
+async function prepareExistingMemoryResource(resource: MemoryResource): Promise<void> {
+  let rootStat: Stats
+  try {
+    rootStat = await fs.lstat(resource.root)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`memory file does not exist: ${resource.filePath}`)
+    throw error
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error("memory root must be a real directory")
+
+  const parent = path.dirname(resource.filePath)
+  const relativeParent = path.relative(resource.root, parent)
+  let current = resource.root
+  for (const component of relativeParent.split(path.sep).filter(Boolean)) {
+    current = path.join(current, component)
+    let stat: Stats
+    try {
+      stat = await fs.lstat(current)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`memory file does not exist: ${resource.filePath}`)
+      throw error
+    }
+    if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error("memory path contains a non-directory or symbolic link")
+  }
+  const [realRoot, realParent] = await Promise.all([fs.realpath(resource.root), fs.realpath(parent)])
+  const realRelative = path.relative(realRoot, realParent)
+  if (realRelative.startsWith("..") || path.isAbsolute(realRelative)) {
+    throw new Error("memory path resolves outside the agent memory directory")
+  }
+  let targetStat: Stats
+  try {
+    targetStat = await fs.lstat(resource.filePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`memory file does not exist: ${resource.filePath}`)
+    throw error
+  }
+  if (targetStat.isSymbolicLink()) throw new Error("memory file must not be a symbolic link")
+  if (!targetStat.isFile()) throw new Error("memory target must be a regular file")
+}
+
+/** Replace one exact source fragment in a server-owned memory resource. */
+export async function editMemoryResource(
+  uri: unknown,
+  oldText: unknown,
+  newText: unknown,
+  expectedHash?: unknown,
+): Promise<string> {
+  const resource = memoryResourcePath(uri)
+  if (typeof oldText !== "string" || !oldText) throw new Error("old_text is required")
+  if (typeof newText !== "string") throw new Error("new_text is required")
+  if (expectedHash !== undefined && (typeof expectedHash !== "string" || !/^[a-f0-9]{40}$/i.test(expectedHash))) {
+    throw new Error("expected_hash must be a SHA-1 document hash")
+  }
+  await prepareExistingMemoryResource(resource)
+  const existing = await fs.readFile(resource.filePath, "utf8")
+  if (expectedHash !== undefined) {
+    const actualHash = createHash("sha1").update(existing).digest("hex")
+    if (actualHash !== expectedHash.toLowerCase()) {
+      throw new Error(`memory document changed since search (${resource.filePath})`)
+    }
+  }
+  const index = existing.indexOf(oldText)
+  if (index === -1) throw new Error(`edit failed: old_text not found in ${resource.filePath}`)
+  if (existing.indexOf(oldText, index + oldText.length) !== -1) {
+    throw new Error(`edit failed: old_text is not unique in ${resource.filePath}`)
+  }
+  const content = existing.slice(0, index) + newText + existing.slice(index + oldText.length)
+  validateContent(content, true)
+  if (resource.backup) await backupFile(resource.filePath)
+  await replaceFile(resource.filePath, content)
+  if (resource.indexed) await syncMemoryAfterWrite()
+  const warning = await getWarningForFile(resource.filePath)
+  return `edited ${resource.filePath}${warning}`
+}
+
 export async function writeSoul(content: unknown, mode: unknown, target?: unknown): Promise<string> {
   const filePath = path.join(NANO_HOME, "soul.md")
   const value = validateContent(content)
@@ -158,9 +266,10 @@ export async function writeMemory(
   content: unknown,
   mode: unknown,
   target?: unknown,
+  expectedHash?: unknown,
 ): Promise<string> {
   const filePath = memoryPath(relativePath)
-  const value = validateContent(content)
+  const value = validateContent(content, mode === "patch")
   await prepareMemoryFile(filePath)
   if (filePath.endsWith("core.md")) {
     await backupFile(filePath)
@@ -179,6 +288,7 @@ export async function writeMemory(
       await handle.close()
     }
     await fs.chmod(filePath, 0o600)
+    await syncMemoryAfterWrite()
     const warning = await getWarningForFile(filePath)
     return `appended ${filePath}${warning}`
   } else if (mode === "patch") {
@@ -194,6 +304,15 @@ export async function writeMemory(
       }
       throw error
     }
+    if (expectedHash !== undefined) {
+      if (typeof expectedHash !== "string" || !/^[a-f0-9]{40}$/i.test(expectedHash)) {
+        throw new Error("expected_hash must be a SHA-1 document hash")
+      }
+      const actualHash = createHash("sha1").update(existing).digest("hex")
+      if (actualHash !== expectedHash.toLowerCase()) {
+        throw new Error(`patch failed: memory document changed since search (${filePath})`)
+      }
+    }
 
     const index = existing.indexOf(target)
     if (index === -1) {
@@ -204,7 +323,9 @@ export async function writeMemory(
     }
 
     const newContent = existing.slice(0, index) + value + existing.slice(index + target.length)
+    validateContent(newContent, true)
     await replaceFile(filePath, newContent)
+    await syncMemoryAfterWrite()
     const warning = await getWarningForFile(filePath)
     return `patched ${filePath}${warning}`
   } else {
@@ -293,7 +414,6 @@ export async function readMemory(relativePath: unknown, startLine?: unknown, end
       selected += `\n\n[Note: Content stopped due to the 100-line read limit. To read further, call 'memory_read' with start_line=${effectiveEnd + 1}.]`
     }
   }
-
   const rangeStr = `lines ${start}–${effectiveEnd}`
   const totalStr = totalLines > 0 ? ` of ${totalLines} total` : ""
   return `[${relativePath}  ${rangeStr}${totalStr}]\n${selected}`

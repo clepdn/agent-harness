@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import { config } from "../config"
 import { recordMetric } from "../metrics"
 import { emit } from "../stream"
@@ -28,8 +29,8 @@ import { addAssistantMessage, applyUsage, configuredSummaryProvider, emitThinkin
 import { assistantContentText, isFunctionToolCall } from "./loop-content"
 import type { AssistantMessage, TextContent, ToolCall } from "../llm"
 import { buildTurnSignature, hasIncomingUserMessage } from "./loop-signatures"
+import type { CompactionResult, LoopHooks, LoopState } from "./types"
 import { processToolCalls } from "./loop-tools"
-import type { LoopHooks, LoopState } from "./types"
 
 const LLM_RECENT_MIN_KEEP = 6
 const LLM_RECENT_MAX_KEEP = 40
@@ -49,7 +50,7 @@ async function waitForNextEvent(
   convId: number,
   state: LoopState,
   hooks: LoopHooks,
-  compact: (state: LoopState) => Promise<boolean> = (currentState) => applyCompaction(currentState, "idle"),
+  compact: (state: LoopState) => Promise<CompactionResult> = (currentState) => applyCompaction(currentState, "idle"),
 ): Promise<void> {
   // When idle compaction is disabled, just block until the next event.
   // Read from modelState so it swaps with the model preset at runtime.
@@ -82,12 +83,12 @@ async function waitForNextEvent(
     if (manual) state.compactionRequested = false
 
     const compacted = await compact(state)
-    if (compacted) {
-      console.log(
-        `[runner] idle compaction ran while waiting for the next event${manual ? " (manual /compact)" : ""}`,
-      )
+    if (compacted === "rewritten") {
+      hooks.refreshToolCatalog("post-compaction")
+      console.log(`[runner] idle compaction rewrote context while waiting for the next event${manual ? " (manual /compact)" : ""}`)
       return
     }
+    if (compacted === "suppressed") console.log("[runner] idle compaction suppressed after no tool result reduction")
     if (manual) {
       console.log("[runner] manual /compact requested but nothing to compact (summary not smaller)")
     }
@@ -107,9 +108,12 @@ async function applyLoopGuardNudge(state: LoopState, _hooks: LoopHooks, reason: 
 }
 
 async function processAssistantTurn(convId: number, state: LoopState, hooks: LoopHooks): Promise<CycleOutcome> {
-  state.memoryRecallTurn += 1
-  const response = await fetchCompletion(state, hooks.getTools?.())
-  // Recall (if any) has been applied for this turn; don't re-recall on the
+  const serializedTools = JSON.stringify(state.toolCatalog)
+  const fingerprint = createHash("sha256").update(serializedTools).digest("hex")
+  if (state.toolCatalogFingerprint && fingerprint !== state.toolCatalogFingerprint) {
+    throw new Error(`tool catalog epoch ${state.toolCatalogEpoch} mutated in place`)
+  }
+  const response = await fetchCompletion(state, state.toolCatalog)
   // follow-up iterations that work through the same incoming event.
   state.memoryRecallPending = false
   applyUsage(state, response.usage, {
@@ -212,8 +216,8 @@ function applyDiscordSendNudge(
  * Proactively summarizes old, large tool results once enough of the active
  * model's context window is occupied.
  */
-async function applyProactiveCompaction(state: LoopState): Promise<boolean> {
-  if (modelState.respectPromptCache) return false
+async function applyProactiveCompaction(state: LoopState): Promise<CompactionResult> {
+  if (modelState.respectPromptCache) return "none"
 
   const activeModel = modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel
   if (
@@ -224,11 +228,11 @@ async function applyProactiveCompaction(state: LoopState): Promise<boolean> {
       TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT,
     )
   ) {
-    return false
+    return "none"
   }
 
   const provider = configuredSummaryProvider()
-  if (!provider.model) return false
+  if (!provider.model) return "none"
 
   const { messages, compacted, attempted } = await proactiveCompaction(
     state.conversation,
@@ -238,11 +242,11 @@ async function applyProactiveCompaction(state: LoopState): Promise<boolean> {
     TOOL_RESULT_COMPACTION_MIN_CHARS,
   )
 
-  if (attempted === 0) return false
+  if (attempted === 0) return "none"
   state.conversation = messages
   if (compacted === 0) {
     console.warn("[context] proactive: tool result could not be reduced; suppressing repeat attempts")
-    return true
+    return "suppressed"
   }
 
   const beforeEstimate = state.contextSize
@@ -261,7 +265,7 @@ async function applyProactiveCompaction(state: LoopState): Promise<boolean> {
     summary: undefined,
   })
 
-  return true
+  return "rewritten"
 }
 
 /** Pull the summary text out of a compacted conversation, if present. */
@@ -288,15 +292,10 @@ function discardedMessages(before: Message[], after: Message[]): Message[] {
  * pipeline once the trigger threshold is crossed. Runs on every loop iteration;
  * cheap no-op below threshold.
  */
-async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn" | "idle"): Promise<boolean> {
-  // Read from modelState so strategy + trigger swap with the model preset.
-  const strategy = modelState.compactionStrategy
-  if (strategy === "off") return false
 
-  // Idle is special: we compact NO MATTER WHAT the token count is, so the next
-  // event doesn't pay to prefill a fat raw conversation. Force through the LLM
-  // path (same as compactForShutdown). The afterEstimate<beforeEstimate guard
-  // inside applyLLMCompaction still protects against a summary that isn't smaller.
+async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn" | "idle"): Promise<CompactionResult> {
+  const strategy = modelState.compactionStrategy
+  if (strategy === "off") return "none"
   if (phase === "idle") {
     const idleStrategy = strategy === "snapcompact" ? "context-full" : strategy
     return applyLLMCompaction(state, phase, idleStrategy, true)
@@ -319,7 +318,7 @@ async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn"
 
   // Below the cliff: keep tool-result spam in check (except companion, which
   // defers all rewriting to the single cliff-defense burn to protect cache).
-  if (strategy === "companion") return false
+  if (strategy === "companion") return "none"
   return applyProactiveCompaction(state)
 }
 
@@ -328,13 +327,13 @@ async function applyLLMCompaction(
   phase: "pre-turn" | "post-turn" | "idle" | "shutdown",
   strategy: CompactionStrategy = modelState.compactionStrategy,
   force = false,
-): Promise<boolean> {
+): Promise<CompactionResult> {
   // Gate strictly on the model-reported prompt_tokens (state.contextSize).
   // The char-based estimatePromptTokens inflates the tools schema ~3×, which
   // used to fire compaction at ~22-31k real tokens and produce nonsense summaries.
   // `force` bypasses the gate — used on a clean end_session so the goodbye
   // leaves a real summary behind even below the trigger.
-  if (!force && state.contextSize < modelState.compactTriggerTokens) return false
+  if (!force && state.contextSize < modelState.compactTriggerTokens) return "none"
   const beforeEstimate = estimatePromptTokens(state.conversation)
 
   // companion + context-full salvage lessons from the same head that generated
@@ -345,7 +344,7 @@ async function applyLLMCompaction(
   const summaryProvider = configuredSummaryProvider(preferActiveModel)
   if (!summaryProvider.model) {
     console.warn(`[context] ${phase}: no summary model available; skipping llm compaction`)
-    return false
+    return "none"
   }
 
   const beforeCount = state.conversation.length
@@ -364,13 +363,13 @@ async function applyLLMCompaction(
   )
   if (!summarized) {
     console.warn(`[context] ${phase}: llm summary unavailable; keeping raw conversation`)
-    return false
+    return "none"
   }
 
   const afterEstimate = estimatePromptTokens(summarized)
   if (afterEstimate >= beforeEstimate) {
     console.warn(`[context] ${phase}: llm summary not smaller (${beforeEstimate} -> ${afterEstimate}); keeping raw conversation`)
-    return false
+    return "none"
   }
 
   // Companion layers 1 + 3 wrap the summary that summarize.ts produced.
@@ -416,7 +415,7 @@ async function applyLLMCompaction(
     method: `${phase}-llm`,
     summary,
   })
-  return true
+  return "rewritten"
 }
 
 /**
@@ -427,14 +426,11 @@ async function applyLLMCompaction(
  * compacting (the summary wouldn't be smaller) or no summary model is available.
  * Returns true if a summary was produced.
  */
-export async function compactForShutdown(state: LoopState): Promise<boolean> {
+export async function compactForShutdown(state: LoopState): Promise<CompactionResult> {
   const strategy = modelState.compactionStrategy === "off" ? "companion" : modelState.compactionStrategy
-  if (strategy === "snapcompact") {
-    return applyLLMCompaction(state, "shutdown", "context-full", true)
-  }
+  if (strategy === "snapcompact") return applyLLMCompaction(state, "shutdown", "context-full", true)
   return applyLLMCompaction(state, "shutdown", strategy, true)
 }
-
 function pendingDiscordChannel(conversation: Message[], endExclusive: number): string | undefined {
   for (let index = endExclusive - 1; index >= 0; index -= 1) {
     const message = conversation[index]
@@ -474,7 +470,8 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       return "rest"
     }
 
-    await applyCompaction(state, "pre-turn")
+    const compacted = await applyCompaction(state, "pre-turn")
+    if (compacted === "rewritten") hooks.refreshToolCatalog("post-compaction")
 
     const turnStart = state.conversation.length
     const typingTurnId = state.discordTypingTurnId ?? `${convId}:${turnCount + 1}`

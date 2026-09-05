@@ -10,10 +10,18 @@ test("Niri catalog keeps server tools separate from client capabilities", () => 
   assert.equal(names.includes("discord_send"), false)
 })
 
-test("memory catalog exposes durable read and write tools", () => {
-  const names = createNiriToolCatalog({ memory: true }).map((tool) => tool.function.name)
-  assert.equal(names.includes("memory_write"), true)
+test("memory catalog exposes unified edit and read tools", () => {
+  const tools = createNiriToolCatalog({ memory: true })
+  const names = tools.map((tool) => tool.function.name)
+  assert.equal(names.includes("edit_file"), true)
+  assert.equal(names.filter((name) => name === "edit_file").length, 1)
+  assert.equal(names.includes("memory_write"), false)
+  assert.equal(names.includes("soul_write"), false)
   assert.equal(names.includes("memory_read"), true)
+  const edit = tools.find((tool) => tool.function.name === "edit_file")!
+  assert.deepEqual(edit.function.parameters.required, ["path"])
+  assert.ok((edit.function.parameters.properties as Record<string, unknown>).old_text)
+  assert.ok((edit.function.parameters.properties as Record<string, unknown>).edits)
 })
 
 test("disabled optional services stay out of the catalog", () => {

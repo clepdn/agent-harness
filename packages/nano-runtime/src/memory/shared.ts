@@ -76,6 +76,7 @@ export type MemoryChunkInput = {
 export type MemoryHit = {
   chunkId: number
   path: string
+  documentHash: string
   kind: MemoryKind
   documentTitle: string
   title: string
@@ -89,10 +90,14 @@ export type MemoryHit = {
 export type MemorySearchResult = {
   chunkId: number
   kind: MemoryKind
-  path: string
+  /** Stable model-facing source URI. Edit this resource to correct or expunge a result. */
+  uri: string
+  /** SHA-1 of the indexed source document. Changes whenever the source changes. */
+  documentHash: string
   source: string
   title: string
   headingPath: string | null
+  /** Exact source text suitable for an exact replacement/deletion. */
   content: string
   preview: string
 }

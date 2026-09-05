@@ -23,7 +23,44 @@ const functionTool = (name: string, description: string, parameters: JsonSchema)
 const emptyParameters: JsonSchema = { type: "object", additionalProperties: false, properties: {} }
 
 export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): ToolDefinition[] {
-  const tools = createClientToolCatalog(options)
+  // edit_file is server-owned for memory:// resources and therefore always
+  // advertised. Remove the capability-gated client definition to avoid a duplicate.
+  const tools = createClientToolCatalog(options).filter((tool) => tool.function.name !== "edit_file")
+  tools.push(
+    functionTool(
+      "edit_file",
+      "Edit a client file or server-owned memory by replacing exactly one old_text occurrence. For memory:// URIs, use the exact content and documentHash returned by memory_search; set new_text to an empty string to expunge a bad fact.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          path: { type: "string", description: "A client path or memory:// Markdown URI." },
+          old_text: { type: "string", minLength: 1, description: "Exact text to replace; it must occur once." },
+          new_text: { type: "string", description: "Replacement text; may be empty to delete." },
+          edits: {
+            type: "array",
+            minItems: 1,
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                op: { type: "string", enum: ["replace", "append", "prepend", "replace_text"] },
+                pos: { type: "string" },
+                end: { type: "string" },
+                lines: { type: "array", items: { type: "string" } },
+                oldText: { type: "string" },
+                newText: { type: "string" },
+              },
+              required: ["op"],
+            },
+          },
+          expected_hash: { type: "string", description: "Optional SHA-1 document hash for stale memory-source protection." },
+          timeout_ms: { type: "integer", minimum: 1000, maximum: 600000 },
+        },
+        required: ["path"],
+      },
+    ),
+  )
 
   if (options.memory !== false) {
     tools.push(
@@ -55,53 +92,20 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
         },
       ),
       functionTool(
-        "memory_write",
-        "Append content to or patch (replace exact substring) within one Markdown file in this agent's server-owned memory directory.",
-        {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            path: { type: "string", description: "Relative path such as journal/2026-07-09.md or core.md." },
-            content: { type: "string", description: "The content to append or use as replacement text." },
-            mode: { type: "string", enum: ["append", "patch"] },
-            target: { type: "string", description: "Only required when mode is 'patch'. The exact text sequence in the file to be replaced." },
-          },
-          required: ["path", "content", "mode"],
-        },
-      ),
-      functionTool(
-        "soul_write",
-        "Append content to or patch (replace exact substring) this agent's server-owned soul.md.",
-        {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            content: { type: "string", description: "The content to append or use as replacement text." },
-            mode: { type: "string", enum: ["append", "patch"] },
-            target: { type: "string", description: "Only required when mode is 'patch'. The exact text sequence in the file to be replaced." },
-          },
-          required: ["content", "mode"],
-        },
-      ),
-      functionTool(
         "memory_read",
         "Read a Markdown file in this agent's server-owned memory directory, with optional inclusive line bounds.",
         {
           type: "object",
           additionalProperties: false,
           properties: {
-            path: { type: "string", description: "Relative path such as journal/2026-07-09.md or core.md." },
+            path: { type: "string" },
             start_line: { type: "integer", minimum: 1 },
             end_line: { type: "integer", minimum: 1 },
           },
           required: ["path"],
         },
       ),
-      functionTool(
-        "memory_ls",
-        "List all Markdown files under the server-owned memory directory recursively.",
-        emptyParameters,
-      ),
+      functionTool("memory_ls", "List all Markdown files under the server-owned memory directory recursively.", emptyParameters),
       functionTool(
         "memory_grep",
         "Search memories using exact substring matching, returning matching lines and numbers.",
@@ -109,8 +113,8 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
           type: "object",
           additionalProperties: false,
           properties: {
-            query: { type: "string", description: "Search query text." },
-            case_insensitive: { type: "boolean", description: "Whether to perform case-insensitive search. Default is false." },
+            query: { type: "string" },
+            case_insensitive: { type: "boolean" },
           },
           required: ["query"],
         },

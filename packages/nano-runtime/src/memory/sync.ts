@@ -321,6 +321,9 @@ type MemoryEmbeddingRow = {
 
 async function syncMemoryEmbeddings(): Promise<void> {
   if (!isVecAvailable()) return
+  const db = getDb()
+  db.prepare("delete from memory_embedding_meta where chunk_id not in (select id from memory_chunks)").run()
+  db.prepare("delete from memory_chunk_vec where rowid not in (select id from memory_chunks)").run()
   if (!embeddingsConfigured()) {
     if (!embeddingSkipWarned) {
       console.warn("[memory] embeddings disabled: set EMBEDDING_API_KEY")
@@ -338,15 +341,12 @@ async function syncMemoryEmbeddings(): Promise<void> {
     return
   }
 
-  const db = getDb()
   try {
     await syncMemoryEmbeddingPrototypes()
   } catch (err: any) {
     console.warn(`[memory] prototype embedding sync failed: ${err?.message ?? String(err)}`)
     return
   }
-  db.prepare("delete from memory_embedding_meta where chunk_id not in (select id from memory_chunks)").run()
-  db.prepare("delete from memory_chunk_vec where rowid not in (select id from memory_chunks)").run()
 
   const rows = db
     .prepare(`

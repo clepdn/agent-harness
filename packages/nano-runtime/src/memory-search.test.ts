@@ -32,7 +32,7 @@ test("searchMemory includes semantic-only vector candidates and recall accepts t
       db
         .prepare(\`
           insert into memory_documents (path, kind, title, mtime_ms, content_hash, updated_at)
-          values (?, 'journal', 'capsule notes', 1, 'hash', datetime('now'))
+          values (?, 'journal', 'capsule notes', 1, '0123456789012345678901234567890123456789', datetime('now'))
         \`)
         .run(docPath).lastInsertRowid,
     )
@@ -72,6 +72,8 @@ test("searchMemory includes semantic-only vector candidates and recall accepts t
     assert.equal(search.isRelevant(hits, profile), true)
 
     const result = search.toMemorySearchResult(hits[0])
+    assert.equal(result.uri, "memory://journal/2026-06-06.md")
+    assert.equal(result.documentHash, "0123456789012345678901234567890123456789")
     assert.ok(result.content.endsWith("semantic-tail-marker"))
     assert.equal(result.preview, result.content)
     assert.ok(search.buildMemoryRecallMessage(hits).includes("semantic-tail-marker"))

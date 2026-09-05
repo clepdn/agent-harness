@@ -88,6 +88,73 @@ test("memory patch mode edits successfully and enforces unique target presence",
   assert.equal(finalContent, "# Journal\n\n## today\n\nsome new text\n\n## today\n\nother text\n")
 })
 
+test("memory URI patch expunges source text and synchronizes the search index", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-memory-expunge-"))
+  const home = path.join(root, "home")
+  const memoriesDir = path.join(home, "memories", "journal")
+  const dbPath = path.join(home, "nano.db")
+  await fs.mkdir(memoriesDir, { recursive: true })
+  await fs.writeFile(
+    path.join(memoriesDir, "bad.md"),
+    "# Notes\n\nThe moon is made of cheddar.\n\nThe moon has craters.\n",
+    "utf8",
+  )
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+
+  const script = `
+    import assert from "node:assert/strict"
+
+    const [{ initDb, getDb }, memory, { writeMemory }] = await Promise.all([
+      import(${JSON.stringify(new URL("./db.ts", import.meta.url).href)}),
+      import(${JSON.stringify(new URL("./memory/index.ts", import.meta.url).href)}),
+      import(${JSON.stringify(new URL("./agent-state-tools.ts", import.meta.url).href)}),
+    ])
+    initDb(process.env.NANO_DB_PATH)
+    await memory.syncMemoryIndex()
+
+    const before = getDb().prepare("select count(*) as count from memory_chunks where chunk_text like '%cheddar%'").get()
+    assert.equal(before.count, 1)
+    const [result] = await memory.searchMemories("moon cheddar", 5)
+    const indexedChunk = getDb().prepare("select id from memory_chunks where chunk_text like '%cheddar%'").get()
+    if (getDb().prepare("select count(*) as count from sqlite_master where name = 'memory_chunk_vec'").get().count > 0) {
+      getDb().prepare("insert into memory_chunk_vec(rowid, embedding) values (?, ?)").run(
+        BigInt(indexedChunk.id),
+        new Float32Array(3072),
+      )
+    }
+    assert.equal(result.uri, "memory://journal/bad.md")
+    assert.equal(result.content, "The moon is made of cheddar.\\n\\nThe moon has craters.")
+    assert.match(result.documentHash, /^[a-f0-9]{40}$/)
+
+    await writeMemory(result.uri, "", "patch", "The moon is made of cheddar.\\n\\n", result.documentHash)
+
+    const after = getDb().prepare("select count(*) as count from memory_chunks where chunk_text like '%cheddar%'").get()
+    assert.equal(after.count, 0)
+    const orphanVector = getDb().prepare("select count(*) as count from memory_chunk_vec where rowid = ?").get(BigInt(indexedChunk.id))
+    assert.equal(orphanVector.count, 0)
+    assert.equal((await memory.searchMemories("moon cheddar", 5)).some((item) => item.content.includes("cheddar")), false)
+    await assert.rejects(
+      () => writeMemory(result.uri, "", "patch", "The moon has craters.", result.documentHash),
+      /changed since search/,
+    )
+  `
+
+  const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      env: { ...process.env, NANO_HOME: home, NANO_DB_PATH: dbPath },
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    let stdout = ""
+    let stderr = ""
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk })
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk })
+    child.on("error", reject)
+    child.on("close", (code) => resolve({ code, stdout, stderr }))
+  })
+
+  assert.equal(result.code, 0, [result.stdout, result.stderr].filter(Boolean).join("\n"))
+})
+
 test("soul patch mode edits successfully and enforces unique target presence", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-soul-patch-"))
   const home = path.join(root, "home")

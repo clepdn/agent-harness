@@ -1,6 +1,8 @@
 import type { Message, UserMessage, RunnerState } from "../types"
 import type { ClientToolExecutor, ToolDefinition } from "@nano/harness-core"
 
+export type CompactionResult = "none" | "rewritten" | "suppressed"
+
 export type ImageDetail = "auto" | "low" | "high"
 
 /** Mutable state consumed by the runner loop on each turn. */
@@ -10,6 +12,12 @@ export interface LoopState {
   pendingInputs: UserMessage[]
   tokenCount: number
   contextSize: number
+  /** Tool definitions pinned for this session/catalog epoch. */
+  toolCatalog: ToolDefinition[]
+  /** Monotonic catalog epoch, incremented only at session/rewrite boundaries. */
+  toolCatalogEpoch: number
+  /** Canonical serialization fingerprint guarding against in-place mutation. */
+  toolCatalogFingerprint: string
   toolInFlight: boolean
   memoryRecallCooldowns: Record<number, number>
   memoryRecallTurn: number
@@ -43,7 +51,7 @@ export interface LoopHooks {
   /** Flushes events deferred while a tool call was in flight. */
   flushDeferredEvents: () => void
   clientTools?: ClientToolExecutor
-  getTools?: () => ToolDefinition[]
+  refreshToolCatalog: (reason: "post-compaction") => void
   clearSession: () => Promise<void>
   saveSession: () => Promise<void>
   saveShutdownSnapshot: () => Promise<void>
@@ -51,8 +59,10 @@ export interface LoopHooks {
   resolveShutdown: () => void
 }
 
-/** Internal runtime state for the runner service. */
 export interface RunnerStateInternal extends RunnerState {
+  toolCatalog: ToolDefinition[]
+  toolCatalogEpoch: number
+  toolCatalogFingerprint: string
   toolInFlight: boolean
   shutdownRequested: boolean
   turnInFlight: boolean
