@@ -141,6 +141,10 @@ export type DiscordImageAttachment = {
   contentType: string | null
 }
 
+export type DiscordFileAttachment = DiscordImageAttachment & {
+  size: number | null
+}
+
 const IMAGE_EXTENSION_RE = /\.(png|jpe?g|gif|webp|bmp|heic|heif|tiff?|avif)$/i
 
 /**
@@ -189,6 +193,36 @@ export function extractImageAttachments(payload: unknown): DiscordImageAttachmen
 }
 
 /**
+ * Extracts non-image attachment download links from a Discord message object.
+ *
+ * Images remain available through {@link extractImageAttachments}; keeping the
+ * two groups separate avoids repeating image URLs in model context.
+ *
+ * @param payload - Raw event payload or message object.
+ * @returns Array of non-image attachments with Discord CDN download URLs.
+ */
+export function extractFileAttachments(payload: unknown): DiscordFileAttachment[] {
+  const root = asObject(payload)
+  if (!root) return []
+  const message = asObject(root.message) ?? root
+  const attachments = Array.isArray(message.attachments) ? message.attachments : []
+  const out: DiscordFileAttachment[] = []
+  for (const entry of attachments) {
+    const attachment = asObject(entry)
+    if (!attachment || isImageAttachment(attachment)) continue
+    const url = asString(attachment.url) ?? asString(attachment.proxy_url)
+    if (!url) continue
+    out.push({
+      url,
+      filename: asString(attachment.filename),
+      contentType: asString(attachment.content_type),
+      size: asNumber(attachment.size),
+    })
+  }
+  return out
+}
+
+/**
  * Extracts image attachment CDN links from a stored raw JSON payload.
  *
  * @param rawJson - Stored raw JSON for a Discord message.
@@ -197,6 +231,15 @@ export function extractImageAttachments(payload: unknown): DiscordImageAttachmen
 export function extractImageAttachmentsFromRawJson(rawJson: string): DiscordImageAttachment[] {
   try {
     return extractImageAttachments(JSON.parse(rawJson))
+  } catch {
+    return []
+  }
+}
+
+/** Extracts non-image attachment download links from stored Discord JSON. */
+export function extractFileAttachmentsFromRawJson(rawJson: string): DiscordFileAttachment[] {
+  try {
+    return extractFileAttachments(JSON.parse(rawJson))
   } catch {
     return []
   }

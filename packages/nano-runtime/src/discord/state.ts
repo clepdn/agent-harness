@@ -12,6 +12,7 @@ import { config } from "../config"
 import {
   asNumber,
   asString,
+  extractFileAttachmentsFromRawJson,
   extractImageAttachmentsFromRawJson,
   parseChannelIds,
   parseChannelRecord,
@@ -133,6 +134,16 @@ function formatBatchImages(rawJson: string): string {
   const images = extractImageAttachmentsFromRawJson(rawJson)
   if (images.length === 0) return ""
   return ` [images: ${images.map((img) => img.url).join(" ")}]`
+}
+
+function formatBatchFiles(rawJson: string): string {
+  const files = extractFileAttachmentsFromRawJson(rawJson)
+  if (files.length === 0) return ""
+  return ` [files: ${files.map((file) => `${file.filename ?? "attachment"}=${file.url}`).join(" ")}]`
+}
+
+function formatBatchAttachments(rawJson: string): string {
+  return `${formatBatchImages(rawJson)}${formatBatchFiles(rawJson)}`
 }
 
 function formatReplyContext(reply: DiscordReplyContext | undefined): string {
@@ -399,6 +410,9 @@ export function buildDiscordBatchDigest(params?: {
   const hasImages = [...visibleRecentMessages, ...visiblePendingPreview].some(
     (row) => extractImageAttachmentsFromRawJson(row.raw_json).length > 0,
   )
+  const hasFiles = [...visibleRecentMessages, ...visiblePendingPreview].some(
+    (row) => extractFileAttachmentsFromRawJson(row.raw_json).length > 0,
+  )
 
   const lines: string[] = [
     `[discord batch] ${formatBatchTimestamp(from)} -> ${formatBatchTimestamp(nowIso)}`,
@@ -407,6 +421,9 @@ export function buildDiscordBatchDigest(params?: {
       ? config.model.vision
         ? ["image attachments appear as [images: <discord cdn urls>]; download with shell, then inspect with image_tool if useful."]
         : ["image attachments appear as [images: <discord cdn urls>]; download with shell if needed."]
+      : []),
+    ...(hasFiles
+      ? ["file attachments appear as [files: <filename>=<discord cdn url>]; download with shell if useful."]
       : []),
     "",
     "recent messages:",
@@ -418,7 +435,7 @@ export function buildDiscordBatchDigest(params?: {
     const author = row.author_username ? `@${row.author_username}${pronounsSuffix}` : "@unknown"
     const ts = formatBatchTimestamp(row.created_at)
     const replyTo = replyContextByMessageId.get(row.message_id)
-    lines.push(`- source_item_id=${row.message_id} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${fullMessageText(row.content)}${formatBatchImages(row.raw_json)}`)
+    lines.push(`- source_item_id=${row.message_id} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${fullMessageText(row.content)}${formatBatchAttachments(row.raw_json)}`)
   }
 
   if (truncated) {
@@ -436,7 +453,7 @@ export function buildDiscordBatchDigest(params?: {
       const author = row.author_username ? `@${row.author_username}${pronounsSuffix}` : "@unknown"
       const ts = formatBatchTimestamp(row.created_at)
       const replyTo = replyContextByMessageId.get(row.message_id)
-      lines.push(`- source_item_id=${row.item_id} bucket=${row.bucket} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${compactText(row.content, 120)}${formatBatchImages(row.raw_json)}`)
+      lines.push(`- source_item_id=${row.item_id} bucket=${row.bucket} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${compactText(row.content, 120)}${formatBatchAttachments(row.raw_json)}`)
     }
   }
 
