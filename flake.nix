@@ -350,7 +350,7 @@ LockPersonality       = true;
 RemoveIPC             = true;
 CapabilityBoundingSet = "";
 SystemCallArchitectures = "native";
-RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" ];
+RestrictAddressFamilies = [ "AF_INET" "AF_INET6" "AF_UNIX" "AF_NETLINK" ];
     };
 in {
     description = if controlPlane then "Nano control plane" else "Nano harness runner";
