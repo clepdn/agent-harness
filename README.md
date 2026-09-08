@@ -12,6 +12,13 @@ npm start
 
 The server reads every `.toml` file in `agents/`. Files ending in `.example.toml` are skipped.
 
+The web dashboard is served by the control plane at `/ui/` on the same port.
+Nix packages include the built UI automatically. With `services.nano.agents`
+configured, open `http://<control-host>:<services.nano.controlPort>/ui/`
+(the default control port is `3000`). No separate web service is needed.
+For a source checkout, `npm start` builds the UI before starting the server;
+you can also build it explicitly with `npm run build:web`.
+
 ## Run a client
 
 ```sh

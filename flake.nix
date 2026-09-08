@@ -39,8 +39,9 @@
 
 		    # The app entry runs from src via tsx, but the workspace library packages
 		    # (@nano/harness-*, @nano/*) are consumed through their package.json exports,
-		    # which point at dist/. Compile those to dist so the runtime can import them.
-		    npmBuildScript = "build:packages";
+		    # which point at dist/. Build those and the web dashboard; nano-server
+		    # serves the installed apps/web/dist assets at /ui/ on the control port.
+		    npmBuildScript = "build";
 
 		    installPhase = ''
 			runHook preInstall
@@ -48,6 +49,7 @@
 			mkdir -p $out/lib/nano
 			cp -r packages apps node_modules package.json tsconfig.json tsconfig.base.json \
 			    $out/lib/nano/
+			test -f $out/lib/nano/apps/web/dist/index.html
 
 			# Worker — one process per agent, reads its TOML from --config
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/nano \
