@@ -156,6 +156,7 @@ async function createStreamedCompletion(
 
   const resolvedToolChoice = modelState.enableThinking && toolChoice === "required" ? "auto" : toolChoice
   const options: OpenAICompletionsOptions = {
+    includeContextImages: modelState.primaryVision,
     ...(apiKey ? { apiKey } : {}),
     toolChoice: resolvedToolChoice,
     ...(modelState.enableThinking ? { reasoningEffort: modelState.thinkingEffort } : {}),

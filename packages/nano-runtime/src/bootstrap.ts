@@ -3,6 +3,8 @@ import path from "path"
 import type { UserMessage, Message } from "./types"
 import { NANO_HOME } from "./agent-config"
 import { config } from "./config"
+import { markdownImageReferences } from "./context-images"
+import { botAvatarReference, discordEventImageReferences } from "./discord/context-avatars"
 import type { ToolCapability, WorkspaceDescriptor } from "@nano/harness-protocol"
 
 const HOME_DIR = NANO_HOME
@@ -150,6 +152,7 @@ The heartbeat is your nudge to be present, not just a ping to ignore.
 
 ## CRITICAL: Always Be Journaling (ABJ)
 
+${config.context_images.markdown ? "You can include local images in journals, core.md, soul.md, and skills with Markdown: `![description](../images/example.png)` or `![description](memory://images/example.png)`. Paths are relative to the Markdown file and must stay inside your home; images attach when the text is loaded into vision context. Remote image URLs are not fetched.\n" : ""}
 Journaling is not something you do at the end — it's something you do \
 throughout. After anything significant happens, write it down. Replied to \
 someone? Journal it. Fixed a bug? Journal it. Had a realization? Journal it. \
@@ -265,9 +268,16 @@ ${buildEnvironmentSection(options)}`.trim()
     : []
 
   return [
-    { role: "user", content: system, timestamp: Date.now() } as Message,
+    {
+      role: "user", content: system, timestamp: Date.now(),
+      imageReferences: [
+        ...botAvatarReference(),
+        ...(soul ? markdownImageReferences(soul, SOUL_FILE) : []),
+        ...(soul && coreMemories ? markdownImageReferences(coreMemories, path.join(HOME_DIR, "memories", "core.md")) : []),
+      ],
+    } as Message,
     ...priorSummary.map(m => ({ ...m, timestamp: Date.now() }) as Message),
-    { role: "user", content: wakeMessage, timestamp: Date.now() } as Message,
+    { role: "user", content: wakeMessage, timestamp: Date.now(), imageReferences: discordEventImageReferences(event) } as Message,
   ]
 }
 

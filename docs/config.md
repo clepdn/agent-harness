@@ -170,6 +170,20 @@ directory, which should be bind-mounted into the container.
 
 ---
 
+## `[context_images]`
+
+| Key | Default | Description |
+|---|---|---|
+| `markdown` | `true` | Attach local Markdown images from loaded soul/core files, journal and memory reads/search/recall, and loaded skills when the model supports vision. |
+| `max_bytes` | `5000000` | Maximum bytes per local image. Supports PNG, JPEG, GIF, and WebP. |
+| `max_per_message` | `8` | Maximum image references loaded per context message, including avatars. Clamped to 1–32. |
+
+Use standard Markdown such as `![portrait](../images/portrait.png)`. Relative paths resolve from the Markdown file's directory; `memory://images/portrait.png` resolves under the agent's memories directory. Absolute paths are also accepted within the agent home. Symlinks must resolve inside that home. Remote URLs are not fetched. Inline and reference-style images work; code examples are ignored. Missing, invalid, or oversized images produce a short note without failing the model request.
+
+The harness explains this capability when it assembles each fresh context. It does not modify `soul.md`. Image bytes are retained in saved context so resumed sessions keep their pictures.
+
+---
+
 ## `[discord]`
 
 ### Credentials & identity
@@ -178,6 +192,8 @@ directory, which should be bind-mounted into the container.
 |---|---|---|
 | `bot_token` *(secret)* | — | Discord bot token. **Required** for any Discord functionality. Without it the gateway and REST client are both disabled. |
 | `bot_user_id` | *(auto-detected)* | Bot user id. Auto-populated from the gateway READY payload on first connect. |
+| `include_user_avatars` | `false` | Attach an author's Discord avatar the first time their message enters vision context, including wake events, inbox, backread, and search results. Deduplicated while their avatar remains in context; the bot uses the separate option below. |
+| `include_bot_avatar` | `false` | Attach the bot user's Discord avatar on each fresh context. Resuming a saved context retains the existing image. |
 | `scan_channel_ids` | `[]` | Channel ids the bot treats as its inbox. DMs are always included regardless. Example: `["1234567890", "0987654321"]`. |
 
 ### Gateway (WebSocket listener)

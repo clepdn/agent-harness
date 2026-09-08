@@ -211,6 +211,7 @@ const contextT = table(merged.context)
 const remoteCompactionT = table(contextT.remote_compaction)
 const runnerT = table(merged.runner)
 const imageToolT = table(merged.image_tool)
+const contextImagesT = table(merged.context_images)
 const discordT = table(merged.discord)
 const metricsT = table(merged.metrics)
 const toolsT = table(merged.tools)
@@ -399,7 +400,14 @@ export const config = {
     max_bytes: int(imageToolT.max_bytes, 150000),
     root: str(imageToolT.root, "").trim(),
   },
+  context_images: {
+    markdown: bool(contextImagesT.markdown, true),
+    max_bytes: Math.max(1, int(contextImagesT.max_bytes, 5_000_000)),
+    max_per_message: Math.max(1, Math.min(32, int(contextImagesT.max_per_message, 8))),
+  },
   discord: {
+    include_user_avatars: bool(discordT.include_user_avatars, false),
+    include_bot_avatar: bool(discordT.include_bot_avatar, false),
     bot_token: str(discordT.bot_token, "").trim(),
     bot_user_id: str(discordT.bot_user_id, "").trim(),
     dm_whitelist: strArray(discordT.dm_whitelist),

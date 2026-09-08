@@ -20,7 +20,7 @@
 		    # NOTE: regenerate after any package-lock change — run
 		    # `nix run nixpkgs#prefetch-npm-deps -- package-lock.json`,
 		    # or `nix build` prints the correct value on mismatch.
-		    npmDepsHash = "sha256-H5osKmp3+FuK7RxeW4b9uv3+AeGNpg7IuR7g0sLsag0=";
+		    npmDepsHash = "sha256-SeiI5y4Fxig6RQJZmEqzb2oT9aaxI+lJNT+r5LZ/Wro=";
 
 		    nativeBuildInputs = with pkgs; [
 			python3      # node-gyp (better-sqlite3, node-pty)

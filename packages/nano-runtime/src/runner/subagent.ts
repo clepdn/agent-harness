@@ -155,6 +155,7 @@ export async function runSubagent(
 
     const resolvedToolChoice = modelState.enableThinking && toolChoice === "required" ? "auto" : toolChoice
     const options: OpenAICompletionsOptions = {
+      includeContextImages: modelState.primaryVision,
       ...(apiKey ? { apiKey } : {}),
       toolChoice: resolvedToolChoice as "required" | "auto" | "none",
       ...(modelState.enableThinking ? { reasoningEffort: modelState.thinkingEffort } : {}),

@@ -114,6 +114,20 @@ function validContentPart(value: unknown, allowed: ReadonlySet<string>): boolean
 function validMessage(value: unknown): value is Message {
   const message = record(value)
   if (!message || !finiteNumber(message.timestamp)) return false
+  if (message.imageReferences !== undefined && (!Array.isArray(message.imageReferences) || !message.imageReferences.every((value) => {
+    const ref = record(value)
+    return ref && typeof ref.label === "string" && (ref.kind === "markdown" ? typeof ref.path === "string"
+      : ref.kind === "discord-avatar" && typeof ref.userId === "string" &&
+        (ref.avatar === undefined || ref.avatar === null || typeof ref.avatar === "string") &&
+        (ref.discriminator === undefined || typeof ref.discriminator === "string") &&
+        (ref.own === undefined || typeof ref.own === "boolean"))
+  }))) return false
+  if (message.imageAttachments !== undefined && (!Array.isArray(message.imageAttachments) || !message.imageAttachments.every((value) => {
+    const image = record(value)
+    return image?.type === "image" && typeof image.data === "string" && typeof image.mimeType === "string" && typeof image.key === "string" && typeof image.label === "string"
+  }))) return false
+  if (message.imageNotes !== undefined && (!Array.isArray(message.imageNotes) || !message.imageNotes.every((note) => typeof note === "string"))) return false
+  if (message.imagesSuppressed !== undefined && typeof message.imagesSuppressed !== "boolean") return false
   if (message.role === "user") {
     return typeof message.content === "string" ||
       (Array.isArray(message.content) && message.content.every((part) => validContentPart(part, USER_CONTENT_TYPES)))

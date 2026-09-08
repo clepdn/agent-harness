@@ -14,6 +14,7 @@
 import type { Message } from "../types"
 import { recordMetric } from "../metrics"
 import { syncMemoryIndex } from "./sync"
+import { markdownExcerptImageReferences } from "../context-images"
 import {
   MEMORY_RECALL_COOLDOWN_TURNS,
   MEMORY_RECALL_MAX_CHUNKS,
@@ -158,6 +159,7 @@ export async function buildCompletionMessages(
   const recallMessage: Message = {
     role: "user",
     content: recallContent,
+    imageReferences: (await Promise.all(hits.map((hit) => markdownExcerptImageReferences(hit.text, hit.path)))).flat(),
     timestamp: Date.now(),
   }
 

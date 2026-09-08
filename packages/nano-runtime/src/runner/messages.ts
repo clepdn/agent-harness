@@ -1,6 +1,7 @@
 import type { ImageContent, TextContent, ToolCall, ToolResultMessage } from "../llm"
 import type { Message } from "../types"
 import { TOOLS, isToolEnabled } from "./tools"
+import { enabledContextImages } from "../context-images"
 
 // ── Shared constants ──────────────────────────────────────────────────────────
 
@@ -52,8 +53,21 @@ export function findSummaryMessageIndex(messages: Message[]): number {
  * Includes both messages and tool schema to mirror the actual completion payload.
  */
 export function estimatePromptTokens(messages: Message[]): number {
-  const jsonChars = JSON.stringify({ messages, tools: TOOLS.filter((t) => isToolEnabled(t.name)) }).length
-  return Math.ceil(jsonChars / 4)
+  let imageCount = 0
+  const estimatedMessages = messages.map((message) => {
+    if (message.role === "assistant") return message
+    const { imageReferences, imageAttachments, imageNotes, imagesSuppressed, ...textMessage } = message
+    return { ...textMessage, imageAttachments: enabledContextImages(message), imageNotes }
+  })
+  const jsonChars = JSON.stringify({ messages: estimatedMessages, tools: TOOLS.filter((t) => isToolEnabled(t.name)) }, (_key, value) => {
+    if (value?.type === "image" && typeof value.data === "string") {
+      imageCount++
+      return { ...value, data: "" }
+    }
+    return value
+  }).length
+  // Image token costs depend on the model and dimensions, not encoded file size.
+  return Math.ceil(jsonChars / 4) + imageCount * 1024
 }
 
 // ── sanitizeMessages ──────────────────────────────────────────────────────────
@@ -173,6 +187,12 @@ const SCRUBBED_IMAGE_PLACEHOLDER = "[the system has rejected this :( its not you
 export function scrubImagesFromConversation(msgs: Message[]): number {
   let scrubbed = 0
   for (const msg of msgs) {
+    if (msg.role !== "assistant" && (msg.imageAttachments?.length || msg.imageReferences?.length)) {
+      scrubbed += msg.imageAttachments?.length ?? 0
+      msg.imageAttachments = []
+      msg.imagesSuppressed = true
+      msg.imageNotes = [SCRUBBED_IMAGE_PLACEHOLDER]
+    }
     if (msg.role === "user") {
       if (typeof msg.content === "string") continue
       const parts = msg.content

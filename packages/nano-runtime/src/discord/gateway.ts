@@ -59,6 +59,8 @@ function buildIngressPayload(message: Message): Record<string, unknown> {
         id: message.author.id,
         username: message.author.username,
         global_name: message.author.globalName ?? null,
+        avatar: message.author.avatar,
+        discriminator: message.author.discriminator,
         bot: message.author.bot,
       },
       member: message.member

@@ -18,6 +18,7 @@ import type { UserMessage, Message } from "../types"
 import type { ToolDefinition } from "@nano/harness-core"
 import { fromBoredom } from "../triggers/boredom"
 import { createBoredomTimer } from "./boredom-timer"
+import { discordEventImageReferences } from "../discord/context-avatars"
 
 let shutdownResolvers: Array<() => void> = []
 const PROCESS_STARTED_AT = new Date().toISOString()
@@ -353,6 +354,7 @@ function injectIncomingEvent(convId: number, event: UserMessage): void {
   state.conversation.push({
     role: "user",
     content: incomingMessage,
+    imageReferences: discordEventImageReferences(event),
     timestamp: Date.now(),
   } as Message)
   logMessage(convId, "user", incomingMessage)
@@ -401,6 +403,7 @@ export async function wake(event: UserMessage): Promise<void> {
     state.conversation.push({
       role: "user",
       content: `[harness restarted — ${event.source} @ ${event.triggeredAt}]\n\n${event.content}`,
+      imageReferences: discordEventImageReferences(event),
       timestamp: Date.now(),
     } as Message)
   } else {

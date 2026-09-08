@@ -4,6 +4,7 @@ import { logMessage } from "../db"
 import { emit } from "../stream"
 import { beginDiscordToolWait, endDiscordToolWait } from "../discord/typing-lease"
 import { latestAssistantContent } from "./loop-content"
+import { toolContextImageReferences } from "../tool-context-images"
 import type {
   ArgTuple,
   FunctionToolCall,
@@ -100,6 +101,11 @@ export async function runStandardTool<
   const content = raw || spec.emptyFallback || raw
   const emitArgs = spec.emitArgKeys ? pickArgsByKeys(ctx.args, spec.emitArgKeys) : ctx.args
   recordToolResult(ctx.convId, ctx.state, ctx.call, spec.name, emitArgs, content)
+  const message = ctx.state.conversation.at(-1)
+  if (message?.role === "toolResult") {
+    const refs = await toolContextImageReferences(spec.name, ctx.args, content).catch(() => [])
+    if (refs.length) message.imageReferences = refs
+  }
   return {}
 }
 

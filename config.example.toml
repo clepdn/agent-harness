@@ -152,7 +152,18 @@ max_bytes = 150000
 # Absolute image root exposed to the agent. Defaults based on container/ssh mode.
 root = ""
 
+[context_images]
+# Attach local Markdown images when memories, soul.md, or skills enter vision context.
+markdown = true
+# PNG, JPEG, GIF, and WebP files must stay within the agent home, including symlinks.
+max_bytes = 5000000
+max_per_message = 8
+
 [discord]
+# Include each author's avatar once while their image remains in context.
+include_user_avatars = false
+# Include the bot's own avatar whenever a fresh context starts.
+include_bot_avatar = false
 gateway_enabled = true
 gateway_trace = false
 gateway_raw_fallback = true

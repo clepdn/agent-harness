@@ -7,6 +7,7 @@
 
 import OpenAI from "openai"
 import { codexServiceTier } from "./codex-fast-mode"
+import { enabledContextImages, prepareContextImages, type ContextImageState } from "./context-images"
 
 // ── Content part types ────────────────────────────────────────────────────────
 
@@ -60,7 +61,7 @@ export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted"
 
 // ── Message types ──────────────────────────────────────────────────────────────
 
-export interface UserMessage {
+export interface UserMessage extends ContextImageState {
   role: "user"
   content: string | (TextContent | ImageContent)[]
   timestamp: number
@@ -80,7 +81,7 @@ export interface AssistantMessage {
   timestamp: number
 }
 
-export interface ToolResultMessage<TDetails = any> {
+export interface ToolResultMessage<TDetails = any> extends ContextImageState {
   role: "toolResult"
   toolCallId: string
   toolName: string
@@ -134,6 +135,7 @@ export interface Context {
 // ── Stream options ─────────────────────────────────────────────────────────────
 
 export interface StreamOptions {
+  includeContextImages?: boolean
   temperature?: number
   maxTokens?: number
   signal?: AbortSignal
@@ -276,6 +278,7 @@ function createClient(model: Model, apiKey: string, options?: StreamOptions): Op
 function convertMessages(
   context: Context,
   model: Model,
+  includeContextImages = true,
 ): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
   const params: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = []
 
@@ -288,10 +291,24 @@ function convertMessages(
     })
   }
 
+  let pendingToolImages: OpenAI.Chat.Completions.ChatCompletionContentPart[] = []
+  const flushToolImages = () => {
+    if (pendingToolImages.length) params.push({ role: "user", content: pendingToolImages })
+    pendingToolImages = []
+  }
   for (const msg of context.messages) {
+    if (msg.role !== "toolResult") flushToolImages()
+    const attached: OpenAI.Chat.Completions.ChatCompletionContentPart[] = []
+    if (msg.role !== "assistant" && includeContextImages && model.input.includes("image") && !msg.imagesSuppressed) {
+      for (const image of enabledContextImages(msg)) attached.push(
+        { type: "text", text: image.label },
+        { type: "image_url", image_url: { url: `data:${image.mimeType};base64,${image.data}` } },
+      )
+      for (const note of msg.imageNotes ?? []) attached.push({ type: "text", text: note })
+    }
     if (msg.role === "user") {
       if (typeof msg.content === "string") {
-        params.push({ role: "user", content: msg.content })
+        params.push({ role: "user", content: attached.length ? [{ type: "text", text: msg.content }, ...attached] : msg.content })
       } else {
         const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = msg.content.map((item) => {
           if (item.type === "text") {
@@ -303,7 +320,7 @@ function convertMessages(
             }
           }
         })
-        if (content.length > 0) params.push({ role: "user", content })
+        if (content.length > 0 || attached.length > 0) params.push({ role: "user", content: [...content, ...attached] })
       }
     } else if (msg.role === "assistant") {
       const assistantMsg: OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam = {
@@ -369,10 +386,13 @@ function convertMessages(
           type: "image_url",
           image_url: { url: `data:${block.mimeType};base64,${block.data}` },
         }))
-        params.push({ role: "user", content: imageContent })
+        pendingToolImages.push(...imageContent)
       }
+      pendingToolImages.push(...attached)
     }
   }
+
+  flushToolImages()
 
   return params
 }
@@ -454,7 +474,7 @@ function buildParams(
   options?: OpenAICompletionsOptions,
   stream: boolean = false,
 ): OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming | OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming {
-  const messages = convertMessages(context, model)
+  const messages = convertMessages(context, model, options?.includeContextImages !== false)
 
   const params: any = {
     model: model.id,
@@ -595,6 +615,7 @@ export function stream(
     try {
       const apiKey = options?.apiKey || ""
       const client = createClient(model, apiKey, options)
+      if (model.input.includes("image") && options?.includeContextImages !== false) await prepareContextImages(context.messages)
       const params = buildParams(model, context, options, true) as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming
 
       const requestOptions: OpenAI.RequestOptions = {
@@ -801,6 +822,7 @@ export async function complete(
 ): Promise<AssistantMessage> {
   const apiKey = options?.apiKey || ""
   const client = createClient(model, apiKey, options)
+  if (model.input.includes("image") && options?.includeContextImages !== false) await prepareContextImages(context.messages)
   const params = buildParams(model, context, options, false) as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming
 
   const requestOptions: OpenAI.RequestOptions = {
