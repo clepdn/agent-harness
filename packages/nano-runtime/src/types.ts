@@ -6,7 +6,7 @@ import type { Message as PiMessage } from "./llm"
  */
 export type Message = PiMessage
 
-export type TriggerSource = "discord" | "bsky" | "webhook" | "cron" | "chat" | "job" | "boredom" | "client"
+export type TriggerSource = "discord" | "voice" | "bsky" | "webhook" | "cron" | "chat" | "job" | "boredom" | "client"
 
 /**
  * Trigger event from an external source (Discord, cron, etc.).

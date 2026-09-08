@@ -15,6 +15,7 @@ import {
   type VoiceConnection,
 } from "@discordjs/voice"
 import type { GuildMember, VoiceBasedChannel } from "discord.js"
+import type { UserMessage } from "../types"
 import { MediaStreamTrack, RTCPeerConnection, useOPUS, type RTCDataChannel } from "werift"
 import { NANO_HOME } from "../agent-config"
 import { config } from "../config"
@@ -25,12 +26,79 @@ const FETCH_TIMEOUT_MS = 20_000
 const MAX_OUTPUT_PACKETS = 100
 const SOUL_PATH = path.join(NANO_HOME, "soul.md")
 
+export const SUPPORTED_VOICES = ["juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove"] as const
+export type VoiceName = typeof SUPPORTED_VOICES[number]
+
+let delegationCallback: ((event: UserMessage) => void) | null = null
+const pendingDelegations = new Set<string>()
+
+export function setVoiceDelegationCallback(callback: ((event: UserMessage) => void) | null): void { delegationCallback = callback }
+
+export function parseDelegationCreated(raw: unknown): { id: string; transcript: string } | null {
+  if (!raw || typeof raw !== "object") return null
+  const event = raw as Record<string, unknown>
+  if (event.type !== "delegation.created" || !event.item || typeof event.item !== "object") return null
+  const item = event.item as Record<string, unknown>
+  if (item.type !== "delegation" || item.target !== "client" || typeof item.id !== "string") return null
+  const content = Array.isArray(item.content) ? item.content : []
+  const transcript = content
+    .filter((part): part is Record<string, unknown> => Boolean(part) && typeof part === "object")
+    .filter((part) => part.type === "input_text" && typeof part.text === "string")
+    .map((part) => part.text as string)
+    .join("")
+  return transcript ? { id: item.id, transcript } : null
+}
+
+export function utf8Chunks(input: string, maxBytes = 500): string[] {
+  if (!Number.isInteger(maxBytes) || maxBytes < 1) throw new Error("maxBytes must be a positive integer")
+  const chunks: string[] = []
+  let current = ""
+  let bytes = 0
+  for (const char of input) {
+    const size = Buffer.byteLength(char)
+    if (size > maxBytes) throw new Error("maxBytes cannot hold one Unicode code point")
+    if (current && bytes + size > maxBytes) {
+      chunks.push(current)
+      current = ""
+      bytes = 0
+    }
+    current += char
+    bytes += size
+  }
+  if (current) chunks.push(current)
+  return chunks
+}
+
+export function delegationReplyMessages(delegationId: string, inputText: string): string[] {
+  return utf8Chunks(inputText).map((text) => JSON.stringify({
+    type: "delegation.context.append",
+    delegation_item_id: delegationId,
+    channel: "speakable",
+    content: [{ type: "input_text", text }],
+  }))
+}
+
+export function sendVoiceReply(delegationId: string, inputText: string): { ok: boolean; error?: string; chunks?: number } {
+  if (!pendingDelegations.has(delegationId)) return { ok: false, error: "unknown or stale delegation id" }
+  if (!activeSession || activeSession.closing) return { ok: false, error: "voice session is not active" }
+  if (activeSession.events.readyState !== "open") return { ok: false, error: "voice events channel is not open" }
+  const content = String(inputText ?? "").trim()
+  if (!content) return { ok: false, error: "input_text is required" }
+  const messages = delegationReplyMessages(delegationId, content)
+  for (const message of messages) activeSession.events.send(message)
+  pendingDelegations.delete(delegationId)
+  return { ok: true, chunks: messages.length }
+}
+
+export function pendingDelegationCount(): number { return pendingDelegations.size }
+
 export type VoiceSessionStatus = {
   active: boolean
   channelId?: string
   channelName?: string
   guildId?: string
   model?: string
+  voice: VoiceName
 }
 
 type ActiveVoiceSession = {
@@ -109,7 +177,8 @@ async function voiceInstructions(): Promise<string> {
     soul.trim(),
     "You are speaking live in a Discord voice channel with your owner.",
     "Respond naturally and conversationally. Keep turns brief unless asked for detail.",
-    "This realtime voice session has no tools and no access to the text conversation. Never claim to have used tools.",
+    "For simple conversation, respond directly. When a request needs tools, durable memory, current text context, or deeper work, delegate it to the client backend and speak only the returned answer.",
+    "Never claim to have used tools yourself; delegated work is performed by the text backend.",
   ].filter(Boolean).join("\n\n---\n\n")
 }
 
@@ -177,6 +246,7 @@ async function closeSession(session: ActiveVoiceSession): Promise<void> {
   session.ownerAudio.destroy()
   session.player.stop(true)
   session.events.close()
+  pendingDelegations.clear()
   session.inputTrack.stop()
   session.connection.destroy()
   if (!session.output.destroyed) session.output.destroy()
@@ -264,6 +334,20 @@ async function connectVoice(owner: GuildMember, channel: VoiceBasedChannel, sign
     events.onMessage.subscribe((raw) => {
       try {
         const event = JSON.parse(Buffer.isBuffer(raw) ? raw.toString("utf8") : raw) as { type?: string; error?: { message?: string } }
+        const delegation = parseDelegationCreated(event)
+        if (delegation) {
+          pendingDelegations.add(delegation.id)
+          delegationCallback?.({
+            source: "voice",
+            triggeredAt: new Date().toISOString(),
+            content: `[voice delegation]
+delegation_id: ${delegation.id}
+transcript: ${delegation.transcript}
+
+Use the voice_reply tool with this delegation_id and an explicit spoken response. Never expose private reasoning; provide only the answer intended to be spoken.`,
+            raw: event,
+          } as UserMessage)
+        }
         if (event.type === "error") {
           closeFailedSession(session, `realtime protocol error: ${event.error?.message ?? "unknown error"}`)
         }
@@ -278,6 +362,7 @@ async function connectVoice(owner: GuildMember, channel: VoiceBasedChannel, sign
     }
     return session
   } catch (error) {
+    pendingDelegations.clear()
     stopOutput()
     ownerAudio?.destroy()
     output?.destroy()
@@ -327,6 +412,24 @@ export async function leaveVoice(): Promise<boolean> {
   })
 }
 
+export async function setVoice(voice: string): Promise<VoiceName> {
+  const selected = voice.trim().toLowerCase()
+  if (!(SUPPORTED_VOICES as readonly string[]).includes(selected)) throw new Error(`unsupported voice; choose one of ${SUPPORTED_VOICES.join(", ")}`)
+  config.discord.voice = selected as VoiceName
+  if (activeSession && !activeSession.closing) {
+    const guild = activeSession.channel.guild
+    const owner = await guild.members.fetch(config.discord.owner_id)
+    await leaveVoice()
+    await joinOwnerVoice(owner)
+  }
+  return selected as VoiceName
+}
+
+export function isVoiceChannelEmpty(channel: { members?: { values: () => Iterable<{ user?: { bot?: boolean } }> } } | null | undefined): boolean {
+  if (!channel?.members) return false
+  return [...channel.members.values()].every((member) => member.user?.bot === true)
+}
+
 export async function stopDiscordVoice(): Promise<void> {
   await leaveVoice()
 }
@@ -340,6 +443,7 @@ export function getVoiceSessionStatus(): VoiceSessionStatus {
         channelName: session.channel.name,
         guildId: session.channel.guild.id,
         model: config.discord.voice_model,
+        voice: config.discord.voice as VoiceName,
       }
-    : { active: false }
+    : { active: false, voice: config.discord.voice as VoiceName }
 }

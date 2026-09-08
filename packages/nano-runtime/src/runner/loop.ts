@@ -212,6 +212,34 @@ function applyDiscordSendNudge(
   return true
 }
 
+function isVoiceDelegationMessage(message: Message): boolean {
+  return message.role === "user" && typeof message.content === "string" && message.content.includes("[voice delegation]")
+}
+
+function applyVoiceReplyNudge(state: LoopState, turnMessages: Message[], turnStart = state.conversation.length): boolean {
+  let hasDelegation = turnMessages.some(isVoiceDelegationMessage)
+  if (!hasDelegation) {
+    for (let i = turnStart - 1; i >= 0; i -= 1) {
+      const message = state.conversation[i]
+      if (!message) continue
+      if (message.role === "assistant") break
+      if (isVoiceDelegationMessage(message)) { hasDelegation = true; break }
+    }
+  }
+  if (!hasDelegation) return false
+  const replied = turnMessages.some((message) =>
+    message.role === "assistant" &&
+    (message as AssistantMessage).content.some((part) => part.type === "toolCall" && (part as ToolCall).name === "voice_reply")
+  )
+  if (replied) return false
+  state.conversation.push({
+    role: "user",
+    content: "[system] this turn is answering a live voice delegation but did not call voice_reply. private text is not spoken. call voice_reply with the pending delegation_id and only the final answer intended for speech.",
+    timestamp: Date.now(),
+  })
+  return true
+}
+
 /**
  * Proactively summarizes old, large tool results once enough of the active
  * model's context window is occupied.
@@ -506,9 +534,10 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     // a Discord message but forgets to call discord_send. This is a common
     // hallucination pattern — the model writes a reply "in its head" and
     // then calls wait/rest, leaving the Discord user in silence.
-    let discordSendNudged = false
+    let deliveryNudged = false
     if (outcome !== CycleOutcome.Rest) {
-      discordSendNudged = applyDiscordSendNudge(state, turnMessages, turnStart)
+      deliveryNudged = applyDiscordSendNudge(state, turnMessages, turnStart)
+        || applyVoiceReplyNudge(state, turnMessages, turnStart)
     }
 
     if (interruptedByUserEvent || !turnSignature) {
@@ -539,7 +568,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     }
 
     if (outcome === CycleOutcome.NoTools) {
-      if (discordSendNudged) continue
+      if (deliveryNudged) continue
       if (modelState.primaryNudgeOnNoTool) {
         state.conversation.push({
           role: "user",
@@ -581,6 +610,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
 export const __loopTest = {
   applyLoopGuardNudge,
   applyDiscordSendNudge,
+  applyVoiceReplyNudge,
   hasDiscordInputForTurn,
   waitForNextEvent,
   applyCompaction,

@@ -399,6 +399,19 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
   }
 
   tools.push(
+    functionTool(
+      "voice_reply",
+      "Reply to a pending realtime voice delegation. Use only the exact delegation_id from a voice delegation event and provide explicit text intended to be spoken; never send private reasoning.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          delegation_id: { type: "string" },
+          input_text: { type: "string" },
+        },
+        required: ["delegation_id", "input_text"],
+      },
+    ),
     functionTool("wait", "Wait for the next incoming message or event.", emptyParameters),
     functionTool(
       "wait_then_continue",

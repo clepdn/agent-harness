@@ -17,6 +17,11 @@ test("voice commands are registered alongside /fast", async () => {
   assert.equal(command.options[0].required, false)
   assert.ok(commands.some((entry) => entry.name === "join"))
   assert.ok(commands.some((entry) => entry.name === "leave"))
+  const voice = commands.find((entry) => entry.name === "voice")
+  assert.ok(voice)
+  assert.deepEqual(voice.options[0].choices.map((choice: { value: string }) => choice.value), [
+    "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove",
+  ])
 })
 
 test("/fast requires the owner, toggles, accepts explicit values, and appears in model info", async (t) => {

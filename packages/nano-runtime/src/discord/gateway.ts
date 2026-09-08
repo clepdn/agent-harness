@@ -8,6 +8,7 @@ import {
   type Message,
 } from "discord.js"
 import { config, setDiscordBotUserId } from "../config"
+import { activate } from "../runner/index"
 import { handleDiscordIngress } from "./pipeline"
 import { debounceDmWake, noteDmTyping } from "./dm-debounce"
 import { ingestDiscordEvent, type DiscordIngestResult } from "./state"
@@ -16,7 +17,7 @@ import { configureDiscordTyping } from "./typing-lease"
 import { registerSlashCommands, handleInteraction, handleAutocomplete } from "./slash-commands"
 import { subscribeRunnerPresence, type RunnerPresence } from "../runner/presence"
 import { startStatusUpdater, stopStatusUpdater } from "./status-updater"
-import { leaveVoice, stopDiscordVoice } from "./voice"
+import { getVoiceSessionStatus, isVoiceChannelEmpty, leaveVoice, setVoiceDelegationCallback, stopDiscordVoice } from "./voice"
 import { startPrometheusServer, stopPrometheusServer } from "../prometheus"
 
 function asString(value: unknown): string {
@@ -188,6 +189,8 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
     partials: [Partials.Channel],
   })
 
+  setVoiceDelegationCallback((event) => activate(event))
+
   configureDiscordTyping((channelId) => {
     const channel = client.channels.cache.get(channelId)
     if (!channel || !("sendTyping" in channel) || typeof channel.sendTyping !== "function") return Promise.resolve()
@@ -273,6 +276,16 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
   })
 
   client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+    const active = getVoiceSessionStatus()
+    const affectedActiveChannel = active.active && (
+      newState.channelId === active.channelId ? newState.channel
+        : oldState.channelId === active.channelId ? oldState.channel
+          : null
+    )
+    if (active.active && affectedActiveChannel && isVoiceChannelEmpty(affectedActiveChannel)) {
+      void leaveVoice().catch((err) => console.warn("[discord voice] auto-leave failed:", err))
+      return
+    }
     if (oldState.id !== config.discord.owner_id || !oldState.channelId) return
     if (newState.channelId === oldState.channelId) return
     // This also aborts an in-flight /join before it becomes an active session.
@@ -322,6 +335,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
       stopStatusUpdater()
       stopPrometheusServer()
       await stopDiscordVoice()
+      setVoiceDelegationCallback(null)
       await client.destroy()
       configureDiscordTyping(null)
       console.log("[discord gateway] disconnected")

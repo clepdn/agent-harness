@@ -218,9 +218,9 @@ The harness explains this capability when it assembles each fresh context. It do
 
 | Key | Default | Description |
 |---|---|---|
-| `voice_enabled` | `false` | Enable owner-only `/join` and `/leave` commands. `/join` enters the owner's current voice channel, uses a separate realtime conversation, and auto-leaves when the owner leaves or moves. Requires the gateway, `owner_id`, `llm_bridge_url`, and `llm_bridge_api_key`. |
+| `voice_enabled` | `false` | Enable owner-only `/join`, `/leave`, and `/voice` commands. `/join` enters the owner's current voice channel; V3 requests can delegate tool-capable work to the normal text runner. The bot auto-leaves when the owner moves/leaves or no humans remain. Requires the gateway, `owner_id`, `llm_bridge_url`, and `llm_bridge_api_key`. |
 | `voice_model` | `gpt-live-1-codex` | Model sent to the bridge's `/v1/realtime/calls` route. |
-| `voice` | `cove` | Codex Quicksilver V1 output voice. Supported values include `juniper`, `maple`, `spruce`, `ember`, `vale`, `breeze`, `arbor`, `sol`, and `cove`. |
+| `voice` | `juniper` | Codex realtime output voice, selectable at runtime with `/voice`. Supported values include `juniper`, `maple`, `spruce`, `ember`, `vale`, `breeze`, `arbor`, `sol`, and `cove`. |
 
 ### Batch digest (REST polling)
 

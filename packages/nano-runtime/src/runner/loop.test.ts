@@ -434,3 +434,16 @@ test("applyCompaction attempts an idle burn even below the token trigger", async
   modelState.compactionStrategy = savedStrategy
   modelState.compactTriggerTokens = savedTrigger
 })
+
+test("voice delegation nudges until voice_reply is called", () => {
+  const state = makeState()
+  const delegation = makeUserMessage("[incoming — voice]\n\n[voice delegation]\ndelegation_id: d1\ntranscript: find it")
+  const unsent = [delegation, makeAssistantMessage("the private result")]
+  assert.equal(__loopTest.applyVoiceReplyNudge(state, unsent), true)
+  assert.match(String(state.conversation.at(-1)?.content), /did not call voice_reply/)
+
+  const sent = [delegation, makeAssistantMessage("", {
+    content: [{ type: "toolCall", id: "call_voice", name: "voice_reply", arguments: { delegation_id: "d1", input_text: "the result" } }],
+  })]
+  assert.equal(__loopTest.applyVoiceReplyNudge(state, sent), false)
+})

@@ -31,6 +31,7 @@ import { startJob } from "./jobs"
 import { describeContextSummary, expandContextSummary, grepContext } from "./context-store"
 import { clearSession, saveRestSnapshot } from "./util"
 import { compactForShutdown } from "./loop"
+import { sendVoiceReply } from "../discord/voice"
 
 const DEFAULT_WAIT_THEN_CONTINUE_MS = 10_000
 // Screenshot capture alone allows 30s at the client; keep the invocation
@@ -76,6 +77,15 @@ async function runClientImageTool(path: string, timeoutMs?: number): Promise<Cli
  */
 export function buildToolHandlers(): Record<string, ToolHandler> {
   return {
+    voice_reply: async ({ convId, state, call, args }) => {
+      const delegationId = typeof args.delegation_id === "string" ? args.delegation_id : ""
+      const inputText = typeof args.input_text === "string" ? args.input_text : ""
+      const result = sendVoiceReply(delegationId, inputText)
+      const output = result.ok ? `sent ${result.chunks} voice chunk(s)` : `voice reply rejected: ${result.error}`
+      recordToolResult(convId, state, call, "voice_reply", args, output)
+      return {}
+    },
+
     wait_then_continue: async ({ convId, state, hooks, call, args }) => {
       const timeoutMs = normalizeTimeoutMs(args.timeout_ms as number | undefined, DEFAULT_WAIT_THEN_CONTINUE_MS)
       recordToolResult(

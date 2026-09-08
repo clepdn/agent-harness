@@ -12,7 +12,7 @@ import { getCodexFastMode, setCodexFastMode } from "../codex-fast-mode"
 import { getRunnerStatus, isRunning, isWaitingForEvent, requestRest, requestCompaction } from "../runner/index"
 import { modelState, evaluateModelSwap, applyModelSwap } from "../runner/model-state"
 import { startActivityTrace, getRecentActivity, formatActivityTrace } from "./activity-trace"
-import { getVoiceSessionStatus, joinOwnerVoice, leaveVoice } from "./voice"
+import { getVoiceSessionStatus, joinOwnerVoice, leaveVoice, setVoice, SUPPORTED_VOICES } from "./voice"
 
 // ── Mutable callbacks set by index.ts after server starts ─────────────────────
 
@@ -94,6 +94,17 @@ const commands = [
     .setName("leave")
     .setDescription("Leave the active voice conversation")
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("voice")
+    .setDescription("Select the realtime voice")
+    .addStringOption((opt) =>
+      opt
+        .setName("voice")
+        .setDescription("Realtime output voice")
+        .setRequired(true)
+        .addChoices(...SUPPORTED_VOICES.map((voice) => ({ name: voice, value: voice }))),
+    )
+    .toJSON(),
 ]
 
 // ── Owner check ───────────────────────────────────────────────────────────────
@@ -141,6 +152,9 @@ export async function handleInteraction(
       break
     case "leave":
       await handleLeave(interaction)
+      break
+    case "voice":
+      await handleVoice(interaction)
       break
     case "model":
       switch (subcommand) {
@@ -212,10 +226,22 @@ async function handleLeave(interaction: ChatInputCommandInteraction): Promise<vo
   await interaction.editReply(left ? "left the voice channel" : "i'm not in a voice channel")
 }
 
+async function handleVoice(interaction: ChatInputCommandInteraction): Promise<void> {
+  const selected = interaction.options.getString("voice", true)
+  await interaction.deferReply({ ephemeral: true })
+  try {
+    const voice = await setVoice(selected)
+    await interaction.editReply(`voice set to **${voice}**${getVoiceSessionStatus().active ? " (reconnected)" : ""}`)
+  } catch (error) {
+    await interaction.editReply(`couldn't set voice: ${error instanceof Error ? error.message : String(error)}`)
+  }
+}
+
 async function handleStatus(interaction: ChatInputCommandInteraction): Promise<void> {
   const status = getRunnerStatus()
   const state = isRunning() ? (isWaitingForEvent() ? "idle (waiting for events)" : "working") : "resting"
   const modelId = modelState.primaryModel?.id ?? modelState.fallbackModel.id
+  const voiceStatus = getVoiceSessionStatus()
   const lines = [
     `**state:** ${state}`,
     `**model:** ${modelId}`,
@@ -224,7 +250,7 @@ async function handleStatus(interaction: ChatInputCommandInteraction): Promise<v
     `**uptime:** ${Math.floor(status.uptimeMs / 1000 / 60)} min`,
     `**respect prompt cache:** ${modelState.respectPromptCache}`,
     `**thinking:** ${modelState.enableThinking ? `on (${modelState.thinkingEffort})` : "off"}`,
-    `**voice:** ${getVoiceSessionStatus().active ? `connected (${getVoiceSessionStatus().channelName ?? getVoiceSessionStatus().channelId}, ${getVoiceSessionStatus().model})` : "disconnected"}`,
+    `**voice:** ${voiceStatus.active ? `connected (${voiceStatus.channelName ?? voiceStatus.channelId}, ${voiceStatus.model}, ${voiceStatus.voice})` : `disconnected (selected: ${voiceStatus.voice})`}`,
   ]
 
   await interaction.reply({ content: lines.join("\n"), ephemeral: true })

@@ -419,7 +419,7 @@ export const config = {
     gateway_raw_fallback_all: bool(discordT.gateway_raw_fallback_all, false),
     voice_enabled: bool(discordT.voice_enabled, false),
     voice_model: str(discordT.voice_model, "gpt-live-1-codex").trim() || "gpt-live-1-codex",
-    voice: str(discordT.voice, "cove").trim().toLowerCase() || "cove",
+    voice: str(discordT.voice, "juniper").trim().toLowerCase() || "juniper",
     scan_channel_ids: strArray(discordT.scan_channel_ids),
     wake_on_event: bool(discordT.wake_on_event, false),
     wake_on_dm: bool(discordT.wake_on_dm, true),
