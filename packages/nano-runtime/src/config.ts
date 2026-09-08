@@ -312,6 +312,7 @@ export const config = {
   llm_bridge_api_key: str(merged.llm_bridge_api_key, "").trim(),
   server: {
     port: int(serverT.port, 3000),
+    listen: str(serverT.listen, "127.0.0.1").trim() || "127.0.0.1",
   },
   agent: {
     name: str(agentT.name, "").trim() || "nano",

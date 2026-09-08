@@ -11,6 +11,9 @@ Both flags are optional. When omitted, the values below fall back to their
 defaults. Keys in the secrets file are deep-merged on top of the config file,
 so a key declared in both resolves to the secrets value.
 
+The control plane also accepts `--config`; it reads `[server]` from that file
+for the Web UI bind address and port. Explicit `--host` and `--port` flags win.
+
 > **Why two files?** Secrets are kept out of the main config (and the process
 > environment) so spawned subprocesses — including the agent's shell tool —
 > never inherit credentials. `secrets.toml.env` should be permission-restricted
@@ -35,6 +38,7 @@ Both are nullable; when set, they're appended to the service's `ExecStart`.
 | Key | Default | Description |
 |---|---|---|
 | `port` | `3000` | HTTP port the server listens on. |
+| `listen` | `"127.0.0.1"` | Address the HTTP server and web UI bind to. Use `"0.0.0.0"` for all IPv4 interfaces. |
 
 ## `[agent]`
 

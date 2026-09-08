@@ -10,22 +10,19 @@ import {
   resolveLocalAgents,
 } from "./local-agents"
 import { LocalAgentSupervisor } from "./supervisor"
+import { controlServerOptions } from "./server-options"
 
 function argument(name: string): string | undefined {
   const index = process.argv.indexOf(name)
   return index >= 0 ? process.argv[index + 1] : undefined
 }
 
-const controlPort = Number.parseInt(argument("--port") ?? "3000", 10)
-const controlHost = argument("--host") ?? "127.0.0.1"
+const { host: controlHost, port: controlPort } = controlServerOptions(process.argv.slice(2))
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..")
 const workerEntry = path.join(repoRoot, "packages", "nano-runtime", "src", "index.ts")
 const agentDirectory = path.resolve(argument("--agents") ?? path.join(repoRoot, "agents"))
 
 async function main(): Promise<void> {
-  if (!Number.isInteger(controlPort) || controlPort < 1 || controlPort > 65535) {
-    throw new Error(`invalid control port: ${argument("--port")}`)
-  }
   process.umask(0o077)
 
   initControlDb()

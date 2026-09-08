@@ -11,6 +11,12 @@ npm start
 ```
 
 The server reads every `.toml` file in `agents/`. Files ending in `.example.toml` are skipped.
+Pass the shared runtime config to the control plane to apply `[server]` settings
+such as the bind address (command-line `--host` and `--port` flags take precedence):
+
+```sh
+npm start -- --config /path/to/config.toml
+```
 
 The web dashboard is served by the control plane at `/ui/` on the same port.
 Nix packages include the built UI automatically. With `services.nano.agents`

@@ -56,6 +56,9 @@ title = ""
 
 [server]
 port = 3000
+# Address to bind the HTTP server and web UI. Use "0.0.0.0" to listen on all
+# IPv4 interfaces. Keep the loopback default unless remote access is intended.
+listen = "127.0.0.1"
 
 [agent]
 # Display name used in summarizer prompt and grounding context.

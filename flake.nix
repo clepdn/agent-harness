@@ -163,6 +163,7 @@
 			example = lib.literalExpression ''
 			    {
 				server.port = 3000;
+				server.listen = "127.0.0.1";
 				agent = {
 				    name = "nano";
 				    env  = "default";
@@ -322,7 +323,7 @@ path = agentFile id agent;
 
     command =
 if controlPlane
-then "${cfg.package}/bin/nano-server --port ${toString cfg.controlPort} --agents ${agentDirectory}"
+then "${cfg.package}/bin/nano-server --port ${toString cfg.controlPort}${configFlag} --agents ${agentDirectory}"
 else "${cfg.package}/bin/nano${configFlag}${secretsFlag}";
 
     workDir = if controlPlane then cfg.stateDir else cfg.homeDir;

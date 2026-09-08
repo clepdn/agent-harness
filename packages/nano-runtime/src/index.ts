@@ -20,7 +20,7 @@ import { config } from "./config"
 // The control plane assigns each worker its port via PORT; standalone runs take
 // it from [server].port. Env wins so one config file can back many workers.
 const PORT = Number.parseInt(process.env.PORT ?? String(config.server.port), 10)
-const WORKER_HOST = process.env.NANO_WORKER_HOST?.trim() || "127.0.0.1"
+const WORKER_HOST = process.env.NANO_WORKER_HOST?.trim() || config.server.listen
 const RESTART_COMMAND = process.env.NANO_RESTART_COMMAND?.trim() || "npm run start:worker"
 const MANAGED_WORKER = process.env.NANO_MANAGED_WORKER?.trim().toLowerCase() === "true"
 
