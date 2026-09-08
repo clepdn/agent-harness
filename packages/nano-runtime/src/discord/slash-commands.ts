@@ -8,6 +8,7 @@
 import type { Client, ChatInputCommandInteraction, AutocompleteInteraction } from "discord.js"
 import { SlashCommandBuilder } from "discord.js"
 import { config, listModelPresets } from "../config"
+import { getCodexFastMode, setCodexFastMode } from "../codex-fast-mode"
 import { getRunnerStatus, isRunning, isWaitingForEvent, requestRest, requestCompaction } from "../runner/index"
 import { modelState, evaluateModelSwap, applyModelSwap } from "../runner/model-state"
 import { startActivityTrace, getRecentActivity, formatActivityTrace } from "./activity-trace"
@@ -28,6 +29,16 @@ export function setGatewayCallbacks(cb: GatewayControlCallbacks): void {
 // ── Command definitions ───────────────────────────────────────────────────────
 
 const commands = [
+  new SlashCommandBuilder()
+    .setName("fast")
+    .setDescription("Toggle priority service for Codex models")
+    .addBooleanOption((opt) =>
+      opt
+        .setName("enabled")
+        .setDescription("Turn fast mode on or off (omit to toggle)")
+        .setRequired(false),
+    )
+    .toJSON(),
   new SlashCommandBuilder()
     .setName("status")
     .setDescription("Show the agent's current runtime status")
@@ -101,6 +112,9 @@ export async function handleInteraction(
   const subcommand = interaction.options.getSubcommand(false)
 
   switch (interaction.commandName) {
+    case "fast":
+      await handleFast(interaction)
+      break
     case "status":
       await handleStatus(interaction)
       break
@@ -207,6 +221,14 @@ async function handleCompact(interaction: ChatInputCommandInteraction): Promise<
   })
 }
 
+async function handleFast(interaction: ChatInputCommandInteraction): Promise<void> {
+  const enabled = setCodexFastMode(interaction.options.getBoolean("enabled") ?? undefined)
+  await interaction.reply({
+    content: `Codex fast mode **${enabled ? "on" : "off"}** — subsequent Codex requests use the **${enabled ? "priority" : "default"}** service tier.`,
+    ephemeral: true,
+  })
+}
+
 async function handleModelInfo(interaction: ChatInputCommandInteraction): Promise<void> {
   const lines = [
     "**primary:** " + (modelState.primaryModel
@@ -219,6 +241,7 @@ async function handleModelInfo(interaction: ChatInputCommandInteraction): Promis
     `**respect prompt cache:** ${modelState.respectPromptCache}`,
     `**use fallback:** ${modelState.useFallback}`,
     `**thinking:** ${modelState.enableThinking ? `on (${modelState.thinkingEffort})` : "off"}`,
+    `**Codex fast mode:** ${getCodexFastMode() ? "on (priority)" : "off (default)"}`,
     `**tool choice:** ${modelState.primaryToolChoice}`,
     `**vision:** ${modelState.primaryVision}`,
   ]

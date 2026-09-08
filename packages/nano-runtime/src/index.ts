@@ -7,14 +7,13 @@ import { initMetricsDb } from "./metrics"
 import { initSnapcompactRenderer } from "./runner/compaction-companion"
 import { modelState } from "./runner/model-state"
 import { REMOTE_COMPACTION_ENDPOINT } from "./runner/config"
-import { shutdown, activate } from "./runner/index"
+import { shutdown, activate, startBoredomTimer } from "./runner/index"
 import { initJobManager } from "./runner/jobs"
 import { startDiscordGateway } from "./discord/gateway"
 import { setGatewayCallbacks } from "./discord/slash-commands"
 import { startDiscordEmbeddingBackfill } from "./discord/search"
 import { setDiscordToolsAvailable } from "./discord/availability"
 import { ensureSoulFilePlacement } from "./bootstrap"
-import { startLlmBridge, stopLlmBridge } from "./llm-bridge"
 import { clientTools } from "./client"
 import { config } from "./config"
 
@@ -79,11 +78,6 @@ async function main() {
   // Wire background jobs (e.g. subagents) to wake/steer the runner on completion.
   // Without this, deliver stays null and completed-job notifications are silently dropped.
   initJobManager(activate)
-  try {
-    await startLlmBridge()
-  } catch (err) {
-    console.error("[bridge] failed to start:", err)
-  }
 
   const discordEmbeddingBackfill = startDiscordEmbeddingBackfill()
 
@@ -120,6 +114,7 @@ async function main() {
 
   await server.listen({ port: PORT, host: WORKER_HOST })
   console.log(`[nano] listening on ${WORKER_HOST}:${PORT}`)
+  startBoredomTimer()
 
   async function gracefulShutdown(sig: string) {
     if (shuttingDown) return  // ignore duplicate signals
@@ -139,7 +134,6 @@ async function main() {
       setDiscordToolsAvailable(false)
       await server.close()
       await clientTools.stop()
-      await stopLlmBridge()
     }
     const cleanupTimeout = new Promise<void>((resolve) =>
       setTimeout(() => { console.log("[nano] cleanup timed out, exiting anyway"); resolve() }, 10_000)

@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/toml && npm run build --workspace @nano/protocol && npm run build --workspace @nano/chat-client && npm run build --workspace @nano/web && npm run build --workspace @nano/llm-bridge",
-    "prestart": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/toml && npm run build --workspace @nano/protocol && npm run build --workspace @nano/chat-client && npm run build --workspace @nano/web && npm run build --workspace @nano/llm-bridge",
+    "predev": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/toml && npm run build --workspace @nano/protocol && npm run build --workspace @nano/chat-client && npm run build --workspace @nano/web",
+    "prestart": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/toml && npm run build --workspace @nano/protocol && npm run build --workspace @nano/chat-client && npm run build --workspace @nano/web",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "test": "node --import tsx --test 'src/**/*.test.ts'",

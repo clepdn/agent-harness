@@ -20,7 +20,7 @@
 		    # NOTE: regenerate after any package-lock change — run
 		    # `nix run nixpkgs#prefetch-npm-deps -- package-lock.json`,
 		    # or `nix build` prints the correct value on mismatch.
-		    npmDepsHash = "sha256-y6yH3ro1KO5G5vfZ5lpou9d6p316Fc+XenerjhnNyjU=";
+		    npmDepsHash = "sha256-H5osKmp3+FuK7RxeW4b9uv3+AeGNpg7IuR7g0sLsag0=";
 
 		    nativeBuildInputs = with pkgs; [
 			python3      # node-gyp (better-sqlite3, node-pty)
@@ -64,11 +64,6 @@
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/nano-executor \
 			    --add-flags "$out/lib/nano/node_modules/.bin/tsx" \
 			    --add-flags "$out/lib/nano/apps/client/src/index.ts"
-
-			# Bridge — same source, different entry point
-			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/llm-bridge \
-			    --add-flags "$out/lib/nano/node_modules/.bin/tsx" \
-			    --add-flags "$out/lib/nano/packages/llm-bridge/src/index.ts"
 
 			runHook postInstall
 		    '';
@@ -539,115 +534,6 @@ RestartSec       = "10s";
 };
 };
     };
-
-	nixosModules.llm-bridge = { config, pkgs, lib, ... }:
-	    let
-		cfg            = config.services.llm-bridge;
-		settingsFormat = pkgs.formats.toml {};
-	    in {
-		options.services.llm-bridge = {
-		    enable = lib.mkEnableOption "llm-bridge";
-
-		    package = lib.mkOption {
-			type        = lib.types.package;
-			default     = self.packages.${pkgs.system}.nano;
-			defaultText = lib.literalExpression "self.packages.\${pkgs.system}.nano";
-			description = "Package providing the llm-bridge binary. Defaults to the nano package which includes it.";
-		    };
-
-		    user = lib.mkOption {
-			type    = lib.types.str;
-			default = "llm-bridge";
-		    };
-		    group = lib.mkOption {
-			type    = lib.types.str;
-			default = "llm-bridge";
-		    };
-
-		    settings = lib.mkOption {
-			type    = settingsFormat.type;
-			default = {};
-			example = lib.literalExpression ''
-			    {
-				host = "0.0.0.0";
-				port = 4040;
-				providers.umans = {
-				    api_key_file = "/run/agenix/umans-key";
-				    base_url = "https://api.code.umans.ai/v1";
-				};
-				providers.openrouter = {
-				    api_key_file = "/run/agenix/openrouter-key";
-				    base_url = "https://openrouter.ai/api/v1";
-				};
-			    }
-			'';
-			description = ''
-			    Freeform TOML settings for the bridge config file.
-			    Providers are keyed by name as an attrset, e.g. providers.umans = { ... }.
-			    Use api_key_file for secrets (NixOS path pattern).
-			'';
-		    };
-
-		    configFile = lib.mkOption {
-			type    = lib.types.nullOr lib.types.path;
-			default =
-			    if cfg.settings == {}
-			    then null
-			    else settingsFormat.generate "llm-bridge-config.toml" cfg.settings;
-			defaultText = lib.literalExpression ''
-			    if settings == {} then null
-			    else (pkgs.formats.toml {}).generate "llm-bridge-config.toml" settings
-			'';
-			description = ''
-			    Path to a TOML config file passed via --config.
-			    Defaults to a file generated from `settings`.
-			'';
-		    };
-
-		    keysFile = lib.mkOption {
-			type    = lib.types.nullOr lib.types.path;
-			default = null;
-			description = "Path to a JSON file of API keys for bridge auth. If null, bridge runs open (no auth).";
-		    };
-		};
-
-		config = lib.mkIf cfg.enable {
-		    users = {
-			users.${cfg.user} = {
-			    isSystemUser = true;
-			    group       = cfg.group;
-			    home        = "/var/lib/llm-bridge";
-			    createHome  = true;
-			};
-			groups.${cfg.group} = {};
-		    };
-
-		    systemd.services.llm-bridge =
-			let
-			    configFlag = lib.optionalString (cfg.configFile != null) " --config ${lib.escapeShellArg cfg.configFile}";
-			    keysFlag   = lib.optionalString (cfg.keysFile   != null) " --keys ${lib.escapeShellArg cfg.keysFile}";
-			in {
-			    description = "LLM Bridge inference proxy";
-			    after    = [ "network.target" ];
-			    wantedBy = [ "multi-user.target" ];
-
-			    serviceConfig = {
-				User             = cfg.user;
-				Group            = cfg.group;
-				# OAuth credentials (anthropic, codex) are rotated in place on
-				# every token refresh, so they cannot live in the nix store or
-				# /run/agenix. StateDirectory gives the admin UI somewhere
-				# writable that survives restarts; API keys stay immutable.
-				StateDirectory     = "llm-bridge";
-				StateDirectoryMode = "0700";
-				WorkingDirectory = "/var/lib/llm-bridge";
-				ExecStart        = "${pkgs.bash}/bin/bash -lc '${cfg.package}/bin/llm-bridge${configFlag}${keysFlag}'";
-				Restart          = "always";
-				RestartSec       = "10s";
-			    };
-			};
-		};
-	    };
 
     in systemOutputs // {
       nixosModules = nixosModules // {

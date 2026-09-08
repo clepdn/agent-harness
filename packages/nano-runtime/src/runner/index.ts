@@ -17,6 +17,7 @@ import { BOREDOM_WAKE_MS, clearSession, loadRestSnapshot, loadSession, quarantin
 import type { UserMessage, Message } from "../types"
 import type { ToolDefinition } from "@nano/harness-core"
 import { fromBoredom } from "../triggers/boredom"
+import { createBoredomTimer } from "./boredom-timer"
 
 let shutdownResolvers: Array<() => void> = []
 const PROCESS_STARTED_AT = new Date().toISOString()
@@ -189,7 +190,9 @@ function flushDeferredEvents(): void {
  */
 export function enqueueEvent(event: UserMessage, options: EnqueueOptions = {}): boolean {
   if (state.running) {
-    return deliverEvent(event, options)
+    const accepted = deliverEvent(event, options)
+    if (accepted) boredomTimer.active()
+    return accepted
   }
   if (options.onlyIfWaiting) {
     return false
@@ -213,31 +216,18 @@ export function activate(event: UserMessage): void {
 }
 
 // ── Boredom wake timer ──────────────────────────────────────────────────────
-// When BOREDOM_WAKE_MS > 0, a timer starts after each session rests. If no
-// external event arrives within the window, it activates a synthetic boredom
-// event so the agent gets a turn to be present (check inbox/feeds/reach out) or
-// rest. Any real wake cancels the pending timer.
+// Arm at startup, after rest, and during event waits. Existing sessions resume
+// in place; only resting sessions bootstrap a new loop.
+const boredomTimer = createBoredomTimer(BOREDOM_WAKE_MS, () => {
+  if (state.shutdownRequested || (state.running && !isWaitingForEvent())) return
+  console.log("[runner] boredom timer fired — activating agent")
+  // A queued real event takes precedence over a synthetic boredom event.
+  activate(state.pendingInputs.shift() ?? fromBoredom())
+})
 
-let boredomTimer: ReturnType<typeof setTimeout> | null = null
-
-function cancelBoredomTimer(): void {
-  if (boredomTimer) {
-    clearTimeout(boredomTimer)
-    boredomTimer = null
-  }
-}
-
-function startBoredomTimer(): void {
-  if (BOREDOM_WAKE_MS <= 0) return
-  cancelBoredomTimer()
-  boredomTimer = setTimeout(() => {
-    boredomTimer = null
-    if (state.running) return
-    if (state.pendingInputs.length > 0) return
-    console.log("[runner] boredom timer fired — activating agent")
-    activate(fromBoredom())
-  }, BOREDOM_WAKE_MS)
-  boredomTimer.unref?.()
+/** Start the initial quiet interval after the worker is ready to serve. */
+export function startBoredomTimer(): void {
+  if (!state.running && !state.shutdownRequested) boredomTimer.idle()
 }
 
 /**
@@ -248,6 +238,7 @@ function startBoredomTimer(): void {
  * @returns A promise that resolves when shutdown persistence has completed.
  */
 export async function shutdown(): Promise<void> {
+  boredomTimer.stop()
   if (!state.running || state.conversation.length === 0) return
 
   state.shutdownRequested = true
@@ -290,9 +281,11 @@ async function saveRuntimeSnapshot(): Promise<void> {
 function waitForEvent(): Promise<UserMessage | null> {
   if (state.shutdownRequested || state.restRequested) return Promise.resolve(null)
   if (state.pendingInputs.length > 0) return Promise.resolve(state.pendingInputs.shift()!)
-  return new Promise<UserMessage | null>((resolve) => {
+  const waiting = new Promise<UserMessage | null>((resolve) => {
     eventResolvers.push(resolve)
   })
+  boredomTimer.idle()
+  return waiting.finally(() => boredomTimer.pause())
 }
 
 /** Wait up to timeoutMs for the next event; resolves null if the timer fires first. */
@@ -301,7 +294,7 @@ function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null>
   if (state.pendingInputs.length > 0) {
     return Promise.resolve(state.pendingInputs.shift()!)
   }
-  return new Promise<UserMessage | null>((resolve) => {
+  const waiting = new Promise<UserMessage | null>((resolve) => {
     let settled = false
 
     const timer = setTimeout(() => {
@@ -321,6 +314,8 @@ function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null>
 
     eventResolvers.push(resolver)
   })
+  boredomTimer.idle()
+  return waiting.finally(() => boredomTimer.pause())
 }
 
 function formatIncomingEvent(event: UserMessage): string {
@@ -378,7 +373,7 @@ function injectIncomingEvent(convId: number, event: UserMessage): void {
 export async function wake(event: UserMessage): Promise<void> {
   // Any wake cancels a pending boredom timer — a real (or synthetic) activation
   // is now in flight, so we don't want the idle timer firing on top of it.
-  cancelBoredomTimer()
+  boredomTimer.active()
 
   if (state.running) {
     enqueueEvent(event)
@@ -426,6 +421,7 @@ export async function wake(event: UserMessage): Promise<void> {
   try {
     const exit = await runLoop(convId, state, {
       clientTools,
+      onTurnStart: () => boredomTimer.active(),
       refreshToolCatalog: () => refreshToolCatalog("post-compaction"),
       waitForEvent,
       waitForEventWithTimeout,

@@ -21,6 +21,14 @@ npm run start
 
 The client listens on `0.0.0.0:3002` and runs `shell`, `read_file`, `edit_file`, and `image_tool` from the client's home directory.
 
+## Discord controls
+
+The configured Discord owner can use `/fast` to toggle priority service for
+Codex models, or `/fast enabled:true` and `/fast enabled:false` to set it
+explicitly. `/model info` shows the current setting. Changes apply to subsequent
+Codex requests (including subagents and summaries); off uses the default service
+tier. The setting is local to the agent runtime and resets to off on restart.
+
 ## Agent memory
 
 Memory lives on the server under the agent's `home`, separate from any attached client:

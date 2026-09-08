@@ -6,6 +6,7 @@
  */
 
 import OpenAI from "openai"
+import { codexServiceTier } from "./codex-fast-mode"
 
 // ── Content part types ────────────────────────────────────────────────────────
 
@@ -460,6 +461,9 @@ function buildParams(
     messages,
     stream,
   }
+
+  const serviceTier = codexServiceTier(model)
+  if (serviceTier !== undefined) params.service_tier = serviceTier
 
   if (stream) {
     params.stream_options = { include_usage: true }

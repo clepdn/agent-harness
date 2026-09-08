@@ -1,9 +1,0 @@
-{
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "types": ["node"],
-    "jsx": "react-jsx",
-    "allowImportingTsExtensions": true
-  },
-  "include": ["src"]
-}

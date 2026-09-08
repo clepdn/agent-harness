@@ -214,7 +214,6 @@ const imageToolT = table(merged.image_tool)
 const discordT = table(merged.discord)
 const metricsT = table(merged.metrics)
 const toolsT = table(merged.tools)
-const llmBridgeT = table(merged.llm_bridge)
 const computerUseT = table(merged.computer_use)
 const prometheusT = table(merged.prometheus)
 const webSearchT = table(merged.web_search)
@@ -429,37 +428,6 @@ export const config = {
     enabled_tools: strArray(toolsT.enabled_tools),
     blacklisted_tools: strArray(toolsT.blacklisted_tools),
     hashline: bool(toolsT.hashline, false),
-  },
-  llm_bridge: {
-    enabled: bool(llmBridgeT.enabled, false),
-    host: str(llmBridgeT.host, "127.0.0.1").trim(),
-    port: int(llmBridgeT.port, 4040),
-    providers: (() => {
-      const raw = llmBridgeT.providers
-      // Support attrset: { umans: { api_key, base_url, ... }, ... }
-      if (raw && typeof raw === "object" && !Array.isArray(raw)) {
-        const out: Record<string, Record<string, string>> = {}
-        for (const [name, val] of Object.entries(raw as Record<string, TomlValue>)) {
-          if (!isTable(val)) continue
-          const entry = val as TomlTable
-          out[name] = {
-            api_key: str(entry.api_key, "").trim(),
-            api_key_file: str(entry.api_key_file, "").trim(),
-            base_url: str(entry.base_url, "").trim(),
-            auth_path: str(entry.auth_path, "").trim(),
-            model: str(entry.model, "").trim(),
-            reasoning_effort: str(entry.reasoning_effort, "").trim(),
-            client_id: str(entry.client_id, "").trim(),
-            client_secret: str(entry.client_secret, "").trim(),
-            refresh_token: str(entry.refresh_token, "").trim(),
-            project_id: str(entry.project_id, "").trim(),
-            binary_path: str(entry.binary_path, "").trim(),
-          }
-        }
-        return out
-      }
-      return {}
-    })(),
   },
   subagents: subagentConfigs,
   computer_use: {

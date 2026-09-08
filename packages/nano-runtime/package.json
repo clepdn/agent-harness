@@ -8,11 +8,11 @@
     "./server": "./src/server.ts"
   },
   "scripts": {
-    "predev": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/protocol && npm run build --workspace @nano/llm-bridge",
-    "prestart": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/protocol && npm run build --workspace @nano/llm-bridge",
+    "predev": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/protocol",
+    "prestart": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/protocol",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
-    "pretest": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/protocol && npm run build --workspace @nano/llm-bridge",
+    "pretest": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/protocol",
     "test": "NANO_CONFIG=../../test-config.toml NANO_HOME=/tmp/nano-runtime-test/home NANO_MIGRATE_LEGACY_STATE=false NANO_AGENT_STATE_DIR=/tmp/nano-runtime-test/state node --import tsx --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },

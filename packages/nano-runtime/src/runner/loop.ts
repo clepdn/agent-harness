@@ -458,6 +458,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
 
   try {
   while (true) {
+    hooks.onTurnStart?.()
     // Check for programmatic rest at the top of each iteration.
     // This catches rest requested during event wait (waitForNextEvent returns
     // null, loop continues here) and during tool processing.

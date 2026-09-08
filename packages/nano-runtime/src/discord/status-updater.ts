@@ -2,7 +2,7 @@
  * Discord status updater — periodically sets the bot's custom activity
  * to show context usage and provider budget usage.
  *
- * Provider usage now comes from the llm-bridge's /v1/usage endpoint (the
+ * Provider usage comes from the remote endpoint's /v1/usage API (the
  * bridge holds the provider credential), so nano needs only its bridge
  * client key. The bridge returns a provider-custom `display` string.
  *

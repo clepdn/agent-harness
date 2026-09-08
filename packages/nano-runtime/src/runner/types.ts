@@ -42,6 +42,8 @@ export interface LoopState {
 
 /** Lifecycle hooks injected by the runner orchestrator into the loop. */
 export interface LoopHooks {
+  /** Marks model work as active, ending the preceding quiet interval. */
+  onTurnStart?: () => void
   /** Waits for the next incoming event from any trigger source. */
   waitForEvent: () => Promise<UserMessage | null>
   /** Waits up to timeoutMs for the next event; resolves null on timeout. */
