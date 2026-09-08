@@ -12,6 +12,7 @@ import { getCodexFastMode, setCodexFastMode } from "../codex-fast-mode"
 import { getRunnerStatus, isRunning, isWaitingForEvent, requestRest, requestCompaction } from "../runner/index"
 import { modelState, evaluateModelSwap, applyModelSwap } from "../runner/model-state"
 import { startActivityTrace, getRecentActivity, formatActivityTrace } from "./activity-trace"
+import { getVoiceSessionStatus, joinOwnerVoice, leaveVoice } from "./voice"
 
 // ── Mutable callbacks set by index.ts after server starts ─────────────────────
 
@@ -85,6 +86,14 @@ const commands = [
       sub.setName("presets").setDescription("List available model presets"),
     )
     .toJSON(),
+  new SlashCommandBuilder()
+    .setName("join")
+    .setDescription("Join your current voice channel for a realtime conversation")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("leave")
+    .setDescription("Leave the active voice conversation")
+    .toJSON(),
 ]
 
 // ── Owner check ───────────────────────────────────────────────────────────────
@@ -126,6 +135,12 @@ export async function handleInteraction(
       break
     case "compact":
       await handleCompact(interaction)
+      break
+    case "join":
+      await handleJoin(interaction)
+      break
+    case "leave":
+      await handleLeave(interaction)
       break
     case "model":
       switch (subcommand) {
@@ -175,6 +190,28 @@ async function handleTrace(interaction: ChatInputCommandInteraction): Promise<vo
   await interaction.reply({ content: truncated, ephemeral: true })
 }
 
+async function handleJoin(interaction: ChatInputCommandInteraction): Promise<void> {
+  if (!interaction.inGuild() || !interaction.member) {
+    await interaction.reply({ content: "use /join in a server voice channel", ephemeral: true })
+    return
+  }
+  await interaction.deferReply({ ephemeral: true })
+  try {
+    const member = await interaction.guild!.members.fetch(interaction.user.id)
+    const status = await joinOwnerVoice(member)
+    await interaction.editReply(`joined **${status.channelName ?? status.channelId}** with **${status.model}**`)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    await interaction.editReply(`couldn't join voice: ${message}`)
+  }
+}
+
+async function handleLeave(interaction: ChatInputCommandInteraction): Promise<void> {
+  await interaction.deferReply({ ephemeral: true })
+  const left = await leaveVoice()
+  await interaction.editReply(left ? "left the voice channel" : "i'm not in a voice channel")
+}
+
 async function handleStatus(interaction: ChatInputCommandInteraction): Promise<void> {
   const status = getRunnerStatus()
   const state = isRunning() ? (isWaitingForEvent() ? "idle (waiting for events)" : "working") : "resting"
@@ -187,6 +224,7 @@ async function handleStatus(interaction: ChatInputCommandInteraction): Promise<v
     `**uptime:** ${Math.floor(status.uptimeMs / 1000 / 60)} min`,
     `**respect prompt cache:** ${modelState.respectPromptCache}`,
     `**thinking:** ${modelState.enableThinking ? `on (${modelState.thinkingEffort})` : "off"}`,
+    `**voice:** ${getVoiceSessionStatus().active ? `connected (${getVoiceSessionStatus().channelName ?? getVoiceSessionStatus().channelId}, ${getVoiceSessionStatus().model})` : "disconnected"}`,
   ]
 
   await interaction.reply({ content: lines.join("\n"), ephemeral: true })

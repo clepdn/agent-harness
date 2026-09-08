@@ -16,6 +16,7 @@ import { configureDiscordTyping } from "./typing-lease"
 import { registerSlashCommands, handleInteraction, handleAutocomplete } from "./slash-commands"
 import { subscribeRunnerPresence, type RunnerPresence } from "../runner/presence"
 import { startStatusUpdater, stopStatusUpdater } from "./status-updater"
+import { leaveVoice, stopDiscordVoice } from "./voice"
 import { startPrometheusServer, stopPrometheusServer } from "../prometheus"
 
 function asString(value: unknown): string {
@@ -179,6 +180,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.GuildVoiceStates,
       GatewayIntentBits.DirectMessages,
       GatewayIntentBits.DirectMessageTyping,
       GatewayIntentBits.MessageContent,
@@ -270,6 +272,13 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
     }
   })
 
+  client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+    if (oldState.id !== config.discord.owner_id || !oldState.channelId) return
+    if (newState.channelId === oldState.channelId) return
+    // This also aborts an in-flight /join before it becomes an active session.
+    void leaveVoice().catch((err) => console.warn("[discord voice] auto-leave failed:", err))
+  })
+
   client.on(Events.MessageCreate, (message) => {
     try {
       const payload = buildIngressPayload(message)
@@ -312,6 +321,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
       unsubscribePresence?.()
       stopStatusUpdater()
       stopPrometheusServer()
+      await stopDiscordVoice()
       await client.destroy()
       configureDiscordTyping(null)
       console.log("[discord gateway] disconnected")

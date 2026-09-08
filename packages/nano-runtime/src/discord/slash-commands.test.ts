@@ -5,7 +5,7 @@ import { config } from "../config"
 import { getCodexFastMode, setCodexFastMode } from "../codex-fast-mode"
 import { handleInteraction, registerSlashCommands } from "./slash-commands"
 
-test("/fast is registered with an optional enabled boolean", async () => {
+test("voice commands are registered alongside /fast", async () => {
   let commands: any[] = []
   await registerSlashCommands({
     application: { commands: { set: async (value: any[]) => { commands = value } } },
@@ -15,6 +15,8 @@ test("/fast is registered with an optional enabled boolean", async () => {
   assert.equal(command.options[0].name, "enabled")
   assert.equal(command.options[0].type, 5)
   assert.equal(command.options[0].required, false)
+  assert.ok(commands.some((entry) => entry.name === "join"))
+  assert.ok(commands.some((entry) => entry.name === "leave"))
 })
 
 test("/fast requires the owner, toggles, accepts explicit values, and appears in model info", async (t) => {

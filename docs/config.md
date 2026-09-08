@@ -199,6 +199,7 @@ The harness explains this capability when it assembles each fresh context. It do
 | `include_user_avatars` | `false` | Attach an author's Discord avatar the first time their message enters vision context, including wake events, inbox, backread, and search results. Deduplicated while their avatar remains in context; the bot uses the separate option below. |
 | `include_bot_avatar` | `false` | Attach the bot user's Discord avatar on each fresh context. Resuming a saved context retains the existing image. |
 | `scan_channel_ids` | `[]` | Channel ids the bot treats as its inbox. DMs are always included regardless. Example: `["1234567890", "0987654321"]`. |
+| `owner_id` | — | Discord user id allowed to use slash commands and whose audio is relayed during realtime voice calls. |
 
 ### Gateway (WebSocket listener)
 
@@ -212,6 +213,14 @@ The harness explains this capability when it assembles each fresh context. It do
 | `wake_on_dm` | `true` | Wake immediately on DMs even when `wake_on_event` is false. |
 | `dm_wake_debounce_ms` | `5000` | Trailing-edge hold (ms) for a new DM wake; each matching author/channel message or typing event resets the hold. Messages accumulated during the hold are delivered together in order. `0` disables it. Successful manual/idle compaction immediately reactivates the runner for the next model turn; shutdown compaction does not. |
 | `dm_wake_debounce_cap_ms` | `60000` | Maximum total DM wake hold (ms) from the first matching author/channel message, even while typing continues. |
+
+### Realtime voice
+
+| Key | Default | Description |
+|---|---|---|
+| `voice_enabled` | `false` | Enable owner-only `/join` and `/leave` commands. `/join` enters the owner's current voice channel, uses a separate realtime conversation, and auto-leaves when the owner leaves or moves. Requires the gateway, `owner_id`, `llm_bridge_url`, and `llm_bridge_api_key`. |
+| `voice_model` | `gpt-live-1-codex` | Model sent to the bridge's `/v1/realtime/calls` route. |
+| `voice` | `cove` | Codex Quicksilver V1 output voice. Supported values include `juniper`, `maple`, `spruce`, `ember`, `vale`, `breeze`, `arbor`, `sol`, and `cove`. |
 
 ### Batch digest (REST polling)
 

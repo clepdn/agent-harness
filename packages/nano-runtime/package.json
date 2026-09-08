@@ -18,6 +18,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.100.1",
+    "@discordjs/voice": "^0.19.2",
     "@nano/harness-client-node": "*",
     "@nano/harness-core": "*",
     "@nano/harness-protocol": "*",
@@ -31,7 +32,8 @@
     "fastify": "^5.8.4",
     "mdast-util-from-markdown": "^2.0.3",
     "openai": "^6.33.0",
-    "sqlite-vec": "^0.1.9"
+    "sqlite-vec": "^0.1.9",
+    "werift": "^0.24.4"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
