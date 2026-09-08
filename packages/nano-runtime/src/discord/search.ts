@@ -7,6 +7,7 @@
 import { createHash } from "crypto"
 import { getDb, isVecAvailable, MEMORY_EMBEDDING_DIMENSIONS } from "../db"
 import { EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, embeddingsConfigured, embedTexts } from "../embeddings"
+import { MEMORY_SEMANTIC_MIN_SIMILARITY, normalizeText, type DiscordMemorySearchResult } from "../memory/shared"
 
 const DISCORD_EMBEDDING_BATCH_SIZE = Math.max(
   1,
@@ -206,6 +207,9 @@ export async function syncDiscordMessageEmbeddingsBatch(params?: {
        left join discord_channels c on c.channel_id = m.channel_id
        left join discord_message_embedding_meta e on e.message_id = m.message_id
        where (? = '' or m.channel_id = ?)
+         and not exists (
+           select 1 from discord_memory_prunes p where p.message_id = m.message_id
+         )
          and m.message_id not glob '*[^0-9]*'
          and (
            e.message_id is null
@@ -241,6 +245,7 @@ export async function syncDiscordMessageEmbeddingsBatch(params?: {
       updated_at = datetime('now')
   `)
   const upsertVector = db.prepare("insert or replace into discord_message_vec(rowid, embedding) values (?, ?)")
+  const isPruned = db.prepare("select 1 from discord_memory_prunes where message_id = ?")
 
   let embedded = 0
   let quarantined = 0
@@ -270,6 +275,9 @@ export async function syncDiscordMessageEmbeddingsBatch(params?: {
     // fixtures perpetually poison every other message's embedding.
     db.transaction(() => {
       batch.forEach((row, index) => {
+        // A prune may happen while the embedding request is in flight. Recheck
+        // inside the write transaction so that late results cannot resurrect it.
+        if (isPruned.get(row.message_id)) return
         const vector = vectors[index]
         if (!vector) {
           quarantined += 1
@@ -455,6 +463,121 @@ async function semanticDiscordSearch(channelId: string, query: string, limit: nu
     }))
 
   return results.length > 0 ? results : keywordDiscordSearch(channelId, query, limit)
+}
+
+function discordMemorySource(row: DiscordSearchRow): string {
+  const location = row.is_dm === 1
+    ? `DM ${row.channel_id}`
+    : [row.guild_name ?? row.guild_id ?? "Discord", row.channel_name ? `#${row.channel_name}` : row.channel_id].join(" / ")
+  const author = row.author_username ? `@${row.author_username}` : row.author_id ?? "unknown author"
+  return `[discord] ${location} / ${author} / ${formatHumanTimestamp(row.created_at)}`
+}
+
+/** Search the global Discord vector index for model-facing long-term-memory results. */
+export async function searchDiscordMemoryEntries(
+  query: string,
+  limit: number,
+  queryVector?: number[],
+): Promise<DiscordMemorySearchResult[]> {
+  const skipped = queryVector
+    ? (!isVecAvailable() ? "sqlite-vec unavailable" : null)
+    : discordEmbeddingUnavailableReason()
+  if (skipped) return []
+  if (DISCORD_SEARCH_CATCHUP_BATCH_SIZE > 0 && embeddingsConfigured()) {
+    await syncDiscordMessageEmbeddingsBatch({ limit: DISCORD_SEARCH_CATCHUP_BATCH_SIZE })
+  }
+
+  const vector = queryVector ?? (await embedTexts([query]))[0]
+  if (!vector || vector.length !== MEMORY_EMBEDDING_DIMENSIONS) return []
+
+  const boundedLimit = Math.max(1, Math.min(10, Math.trunc(limit) || 5))
+  const rows = getDb()
+    .prepare(
+      `select
+         m.message_id, m.channel_id, m.guild_id, m.author_id, m.author_username,
+         m.content, m.created_at, m.is_dm, m.mentions_bot, m.is_from_bot,
+         c.guild_name, c.channel_name,
+         v.distance
+       from discord_message_vec v
+       join discord_messages m on m.message_id = cast(v.rowid as text)
+       left join discord_channels c on c.channel_id = m.channel_id
+       where v.embedding match ? and k = ?
+         and not exists (
+           select 1 from discord_memory_prunes p where p.message_id = m.message_id
+         )
+       order by v.distance`,
+    )
+    .all(vectorParam(vector), Math.max(boundedLimit * 4, 20)) as Array<DiscordSearchRow & { distance: number }>
+
+  return rows
+    .filter((row) => 1 - row.distance >= MEMORY_SEMANTIC_MIN_SIMILARITY)
+    .slice(0, boundedLimit)
+    .map((row) => ({
+      id: `discord:${row.message_id}`,
+      kind: "discord",
+      messageId: row.message_id,
+      channelId: row.channel_id,
+      guildId: row.guild_id,
+      guildName: row.guild_name,
+      channelName: row.channel_name,
+      authorId: row.author_id,
+      authorUsername: row.author_username,
+      createdAt: row.created_at,
+      source: discordMemorySource(row),
+      content: row.content,
+      preview: normalizeText(row.content),
+      semanticSimilarity: 1 - row.distance,
+    }))
+}
+
+export type MemoryPruneReason = "explicit_request" | "surfaced_incorrect" | "surfaced_stale"
+
+/** Deletes one Discord message and its vector memory, retaining a marker against re-ingestion. */
+export function pruneDiscordMemory(
+  id: string,
+  reason: MemoryPruneReason,
+  note?: string,
+): Record<string, unknown> {
+  const match = /^discord:([0-9]+)$/.exec(String(id ?? "").trim())
+  if (!match) throw new Error("memory_prune only accepts a discord:<message_id> returned by memory_search")
+  if (!["explicit_request", "surfaced_incorrect", "surfaced_stale"].includes(reason)) {
+    throw new Error("invalid memory_prune reason")
+  }
+
+  const messageId = match[1]!
+  const db = getDb()
+  const indexed = db
+    .prepare("select 1 as present from discord_message_embedding_meta where message_id = ?")
+    .get(messageId) as { present: number } | undefined
+  const prior = db
+    .prepare("select reason, note, pruned_at from discord_memory_prunes where message_id = ?")
+    .get(messageId) as { reason: string; note: string | null; pruned_at: string } | undefined
+  if (!indexed && !prior) throw new Error(`Discord memory ${id} is not indexed or does not exist`)
+
+  const cleanNote = String(note ?? "").trim() || null
+  db.transaction(() => {
+    db.prepare(`
+      insert into discord_memory_prunes (message_id, reason, note, pruned_at)
+      values (?, ?, ?, datetime('now'))
+      on conflict(message_id) do nothing
+    `).run(messageId, reason, cleanNote)
+    if (isVecAvailable()) db.prepare("delete from discord_message_vec where rowid = ?").run(BigInt(messageId))
+    db.prepare("delete from discord_messages where message_id = ?").run(messageId)
+  })()
+
+  const saved = db
+    .prepare("select reason, note, pruned_at from discord_memory_prunes where message_id = ?")
+    .get(messageId) as { reason: string; note: string | null; pruned_at: string }
+  return {
+    ok: true,
+    id: `discord:${messageId}`,
+    message_id: messageId,
+    reason: saved.reason,
+    note: saved.note,
+    pruned_at: saved.pruned_at,
+    already_pruned: Boolean(prior),
+    discord_message_deleted: true,
+  }
 }
 
 /**

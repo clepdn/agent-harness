@@ -27,7 +27,7 @@ import {
   PEOPLE_DIR,
   tokensFromText,
   type MemoryHit,
-  type MemorySearchResult,
+  type AuthoredMemorySearchResult,
   type MemorySearchProfile,
   type SemanticQuerySignal,
 } from "./shared"
@@ -721,9 +721,10 @@ export function formatMemorySource(hit: MemoryHit): string {
  * @param hit - Memory hit.
  * @returns Search result with full chunk text.
  */
-export function toMemorySearchResult(hit: MemoryHit): MemorySearchResult {
+export function toMemorySearchResult(hit: MemoryHit): AuthoredMemorySearchResult {
   const relativePath = path.relative(path.join(HOME_DIR, "memories"), hit.path).split(path.sep).join("/")
   return {
+    id: `memory:${hit.chunkId}`,
     chunkId: hit.chunkId,
     kind: hit.kind,
     uri: `memory://${relativePath}`,
@@ -733,6 +734,7 @@ export function toMemorySearchResult(hit: MemoryHit): MemorySearchResult {
     headingPath: hit.headingPath,
     content: hit.text,
     preview: normalizeText(hit.text),
+    ...(hit.semanticSimilarity === undefined ? {} : { semanticSimilarity: hit.semanticSimilarity }),
   }
 }
 
@@ -760,5 +762,3 @@ export function buildMemoryRecallMessage(hits: MemoryHit[]): string {
 }
 
 export { isRelevant }
-
-export const __memorySearchTest = { buildSearchProfileWithContext }

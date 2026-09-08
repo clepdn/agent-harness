@@ -94,3 +94,20 @@ test("native file reads reject inputs larger than the bounded edit/read budget",
     await fs.rm(directory, { recursive: true, force: true })
   }
 })
+
+test("native file reads list directories", async (t) => {
+  if (USE_DOCKER_SHELL) {
+    t.skip("local filesystem directory test does not run through Docker shell")
+    return
+  }
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "harness-read-directory-"))
+  try {
+    await fs.writeFile(path.join(directory, "zeta.txt"), "z")
+    await fs.mkdir(path.join(directory, "alpha"))
+    await fs.writeFile(path.join(directory, ".hidden"), "hidden")
+
+    assert.equal(await readFile(directory), `${directory} is a dir\nalpha\nzeta.txt`)
+  } finally {
+    await fs.rm(directory, { recursive: true, force: true })
+  }
+})

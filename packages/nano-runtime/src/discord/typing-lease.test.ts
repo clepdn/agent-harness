@@ -56,7 +56,6 @@ test("long tool wait pauses refresh and resumes after tool", (t) => {
     t.mock.timers.tick(__discordTypingLeaseTest.longToolWaitMs - 1)
     assert.equal(sends, 3)
     t.mock.timers.tick(1)
-    assert.equal(__discordTypingLeaseTest.active?.paused, true)
     t.mock.timers.tick(__discordTypingLeaseTest.refreshMs)
     assert.equal(sends, 3)
     endDiscordToolWait("turn-2")

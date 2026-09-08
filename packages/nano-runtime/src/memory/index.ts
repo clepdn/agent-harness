@@ -15,6 +15,7 @@ import type { Message } from "../types"
 import { recordMetric } from "../metrics"
 import { syncMemoryIndex } from "./sync"
 import { markdownExcerptImageReferences } from "../context-images"
+import { searchDiscordMemoryEntries } from "../discord/search"
 import {
   MEMORY_RECALL_COOLDOWN_TURNS,
   MEMORY_RECALL_MAX_CHUNKS,
@@ -25,7 +26,6 @@ import {
   trimForPrompt,
   type MemorySearchResult,
 } from "./shared"
-import { resolveAliases, normalizeHandle } from "./aliases"
 import {
   buildSearchProfile,
   semanticQuerySignal,
@@ -34,7 +34,6 @@ import {
   isRelevant,
   buildMemoryRecallMessage,
   toMemorySearchResult,
-  __memorySearchTest,
 } from "./search"
 import {
   memoryQueryForUserMessage,
@@ -212,14 +211,31 @@ export async function searchMemories(rawQuery: string, limit = 5): Promise<Memor
     semanticSignal = null
   }
 
-  const results = (await searchMemory(
+  const boundedLimit = Math.max(1, Math.min(limit, 10))
+  const authoredHits = await searchMemory(
     profile,
     {},
     Number.POSITIVE_INFINITY,
-    Math.max(1, Math.min(limit, 10)),
+    boundedLimit,
     semanticSignal,
     true,
-  )).map(toMemorySearchResult)
+  )
+  let discordResults: import("./shared").DiscordMemorySearchResult[] = []
+  try {
+    discordResults = await searchDiscordMemoryEntries(rawQuery, boundedLimit, semanticSignal?.vector)
+  } catch (err: any) {
+    console.warn(`[memory] Discord vector search failed: ${err?.message ?? String(err)}`)
+  }
+  const candidates: Array<{ result: MemorySearchResult; similarity: number; ordinal: number }> = [
+    ...authoredHits.map((hit, ordinal) => ({
+      result: toMemorySearchResult(hit),
+      similarity: hit.semanticSimilarity ?? 0.5,
+      ordinal,
+    })),
+    ...discordResults.map((result, ordinal) => ({ result, similarity: result.semanticSimilarity, ordinal })),
+  ]
+  candidates.sort((a, b) => b.similarity - a.similarity || a.ordinal - b.ordinal)
+  const results = candidates.slice(0, boundedLimit).map(({ result }) => result)
   recordMetric({
     type: "memory",
     query: rawQuery,
@@ -232,46 +248,4 @@ export async function searchMemories(rawQuery: string, limit = 5): Promise<Memor
 
 export const __memoryTest = {
   latestMemoryRecallQuery,
-  memoryQueryForUserMessage,
-  memoryQueryToString,
-  normalizeBodyText: (raw: string) => raw
-    .replace(/@([a-z0-9_.-]+)/gi, " $1 ")
-    .replace(/\b\d{6,}\b/g, " ")
-    .replace(/[^\p{L}\p{N}\s'-]+/gu, " ")
-    .toLowerCase()
-    .trim(),
-  searchTokens: (raw: string) => {
-    const clean = raw
-      .replace(/@([a-z0-9_.-]+)/gi, " $1 ")
-      .replace(/\b\d{6,}\b/g, " ")
-      .replace(/[^\p{L}\p{N}\s'-]+/gu, " ")
-      .toLowerCase()
-      .trim()
-    const tokens = clean
-      .split(/\s+/)
-      .map((token) => token.replace(/^['-]+|['-]+$/g, ""))
-      .filter((token) => token.length >= 2 || /\d{2,}/.test(token))
-      .filter((token) => !(new Set([
-        "a", "an", "and", "are", "as", "at", "be", "been", "but", "by",
-        "for", "from", "had", "has", "have", "he", "her", "hers", "him",
-        "his", "i", "if", "in", "into", "is", "it", "its", "me", "my",
-        "of", "on", "or", "our", "she", "that", "the", "their", "them",
-        "there", "they", "this", "to", "up", "us", "was", "we", "were",
-        "with", "you", "your",
-      ]).has(token)))
-
-    const unique: string[] = []
-    const seen = new Set<string>()
-    for (const token of tokens) {
-      if (seen.has(token)) continue
-      seen.add(token)
-      unique.push(token)
-      if (unique.length >= 12) break
-    }
-    return unique
-  },
-  buildSearchProfile,
-  buildSearchProfileWithContext: __memorySearchTest.buildSearchProfileWithContext,
-  resolveAliases,
-  normalizeHandle,
 }

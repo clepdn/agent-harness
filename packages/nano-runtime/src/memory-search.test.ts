@@ -72,6 +72,7 @@ test("searchMemory includes semantic-only vector candidates and recall accepts t
     assert.equal(search.isRelevant(hits, profile), true)
 
     const result = search.toMemorySearchResult(hits[0])
+    assert.equal(result.id, \`memory:\${chunkId}\`)
     assert.equal(result.uri, "memory://journal/2026-06-06.md")
     assert.equal(result.documentHash, "0123456789012345678901234567890123456789")
     assert.ok(result.content.endsWith("semantic-tail-marker"))

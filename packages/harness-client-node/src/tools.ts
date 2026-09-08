@@ -111,6 +111,10 @@ async function readBoundedLocalFile(filePath: string, timeoutMs: number): Promis
   }
 }
 
+function formatDirectoryListing(displayPath: string, entries: string[]): string {
+  return `${displayPath} is a dir\n${entries.sort().join("\n")}`
+}
+
 function isValidPng(data: Buffer): boolean {
   return (
     data.length >= 33 &&
@@ -347,6 +351,12 @@ export async function readFile(filePath: string, startLine = 1, endLine?: number
 
   if (!USE_DOCKER_SHELL) {
     const resolvedPath = await resolveLocalPath(filePath, opTimeoutMs)
+    const stat = await withTimeout(fs.stat(resolvedPath), opTimeoutMs, "file stat")
+    if (stat.isDirectory()) {
+      const entries = (await withTimeout(fs.readdir(resolvedPath), opTimeoutMs, "directory read"))
+        .filter((entry) => !entry.startsWith("."))
+      return formatDirectoryListing(filePath, entries)
+    }
     const { content } = await readBoundedLocalFile(resolvedPath, opTimeoutMs)
     const lines = content.split("\n")
     if (lines.at(-1) === "") lines.pop()
@@ -359,6 +369,15 @@ export async function readFile(filePath: string, startLine = 1, endLine?: number
   }
 
   const quoted = shellQuote(filePath)
+
+  const directory = await runRaw(
+    `if [ -d ${quoted} ]; then printf 'yes'; else printf 'no'; fi`,
+    { timeoutMs: opTimeoutMs },
+  )
+  if (directory === "yes") {
+    const entries = await runRaw(`ls -1 -- ${quoted}`, { timeoutMs: opTimeoutMs })
+    return formatDirectoryListing(filePath, entries ? entries.split("\n") : [])
+  }
 
   const countRaw = await runRaw(`wc -l < ${quoted} 2>/dev/null || echo 0`, { timeoutMs: opTimeoutMs })
   const totalLines = parseInt(countRaw.trim(), 10) || 0

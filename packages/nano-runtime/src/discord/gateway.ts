@@ -11,6 +11,7 @@ import { config, setDiscordBotUserId } from "../config"
 import { handleDiscordIngress } from "./pipeline"
 import { debounceDmWake, noteDmTyping } from "./dm-debounce"
 import { ingestDiscordEvent, type DiscordIngestResult } from "./state"
+import { fromDiscordMessages } from "../triggers/discord"
 import { configureDiscordTyping } from "./typing-lease"
 import { registerSlashCommands, handleInteraction, handleAutocomplete } from "./slash-commands"
 import { subscribeRunnerPresence, type RunnerPresence } from "../runner/presence"
@@ -114,8 +115,14 @@ function handleGatewayMessage(payload: unknown) {
   const ingest: DiscordIngestResult = ingestDiscordEvent(payload)
   const channelId = ingest.channelId
   if (ingest.isNew && ingest.bucket === "dm" && channelId) {
-    const deferred = debounceDmWake(channelId, payloadAuthorId(payload), () => {
-      handleDiscordIngress(payload, ingest)
+    const deferred = debounceDmWake(channelId, payloadAuthorId(payload), { payload, ingest }, (queued) => {
+      const latest = queued.at(-1)
+      if (!latest) return
+      handleDiscordIngress(
+        latest.payload,
+        latest.ingest,
+        fromDiscordMessages(queued.map((item) => item.payload)),
+      )
     })
     if (deferred) return { ingested: ingest.stored, woke: false, reason: "dm_priority" as const, note: "debounced" }
   }

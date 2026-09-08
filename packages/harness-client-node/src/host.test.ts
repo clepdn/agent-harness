@@ -116,6 +116,25 @@ test("native edits replace atomically and preserve file permissions", async () =
   }
 })
 
+test("hashline reads list directories without file line metadata", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-directory-"))
+  await fs.writeFile(path.join(workspace, "notes.md"), "one\n", "utf8")
+  await fs.mkdir(path.join(workspace, "src"))
+  const host = new NodeToolHost({
+    capabilities: ["read_file"],
+    workspace: { root: workspace },
+    hashline: true,
+  })
+  try {
+    const result = await host.execute(invocation("read_file", { path: "." }))
+    assert.equal(result.status, "ok")
+    assert.equal(result.output, ". is a dir\nnotes.md\nsrc")
+  } finally {
+    await host.stop()
+    await fs.rm(workspace, { recursive: true, force: true })
+  }
+})
+
 test("a second host makes the previous process-global runtime fail closed", async () => {
   const firstRoot = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-first-"))
   const secondRoot = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-second-"))

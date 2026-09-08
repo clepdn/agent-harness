@@ -1,5 +1,6 @@
 import {
   createClientToolCatalog,
+  createReadFileToolDefinition,
   type JsonSchema,
   type ToolDefinition,
 } from "@nano/harness-core"
@@ -22,11 +23,36 @@ const functionTool = (name: string, description: string, parameters: JsonSchema)
 
 const emptyParameters: JsonSchema = { type: "object", additionalProperties: false, properties: {} }
 
+export const MEMORY_FS_TOOL_DEFINITION = functionTool(
+  "memory_fs",
+  "Manage files and directories in server-owned memory. Memory paths are relative to the memory root (memory:// is optional). op is create, delete, move, or copy. Move and copy require a memory-relative target. For copy, file_name may instead be local:// followed by an absolute or runtime-working-directory-relative container path. Copy accepts text or binary files, including images. Create makes an empty file, or a directory when file_name ends in '/'. Delete removes files or empty directories.",
+  {
+    type: "object",
+    additionalProperties: false,
+    properties: {
+      file_name: {
+        type: "string",
+        description: "Memory source/target path, or a local:// container path when copying into memory.",
+      },
+      op: { type: "string", enum: ["create", "delete", "move", "copy"] },
+      target: { type: "string", description: "Memory-relative destination required for move and copy." },
+    },
+    required: ["file_name", "op"],
+  },
+)
+
 export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): ToolDefinition[] {
-  // edit_file is server-owned for memory:// resources and therefore always
-  // advertised. Remove the capability-gated client definition to avoid a duplicate.
-  const tools = createClientToolCatalog(options).filter((tool) => tool.function.name !== "edit_file")
+  // File reads and edits are server-owned for memory:// resources and therefore
+  // always advertised. Remove capability-gated client definitions to avoid duplicates.
+  const tools = createClientToolCatalog(options).filter(
+    (tool) => tool.function.name !== "read_file" && tool.function.name !== "edit_file",
+  )
   tools.push(
+    createReadFileToolDefinition({
+      hashline: options.workspace?.hashline === true,
+      memory: true,
+    }),
+    MEMORY_FS_TOOL_DEFINITION,
     functionTool(
       "edit_file",
       "Edit a client file or server-owned memory by replacing exactly one old_text occurrence. For memory:// URIs, use the exact content and documentHash returned by memory_search; set new_text to an empty string to expunge a bad fact.",
@@ -66,7 +92,7 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
     tools.push(
       functionTool(
         "memory_search",
-        "Search indexed long-term memory from core notes, journal entries, and people files.",
+        "Search indexed long-term memory from authored notes and the Discord vector index. Discord results include an id accepted by memory_prune.",
         {
           type: "object",
           additionalProperties: false,
@@ -75,6 +101,24 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
             limit: { type: "integer", minimum: 1, maximum: 10 },
           },
           required: ["query"],
+        },
+      ),
+      functionTool(
+        "memory_prune",
+        "Permanently delete one locally stored Discord message and its vector-memory entry by the id returned from memory_search. A deletion marker prevents re-ingestion. Use ONLY when the user explicitly asks to remove that memory, or when memory_search has surfaced the entry and it is clearly wrong/bad or stale. Never use it merely because a result is irrelevant. Choose the reason truthfully.",
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            id: { type: "string", pattern: "^discord:[0-9]+$", description: "Exact Discord memory id returned by memory_search." },
+            reason: {
+              type: "string",
+              enum: ["explicit_request", "surfaced_incorrect", "surfaced_stale"],
+              description: "Why pruning is authorized: an explicit request, or a surfaced entry that is incorrect or stale.",
+            },
+            note: { type: "string", description: "Optional short explanation of what is wrong or stale." },
+          },
+          required: ["id", "reason"],
         },
       ),
       functionTool(
@@ -91,21 +135,6 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
           required: ["action"],
         },
       ),
-      functionTool(
-        "memory_read",
-        "Read a Markdown file in this agent's server-owned memory directory, with optional inclusive line bounds.",
-        {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            path: { type: "string" },
-            start_line: { type: "integer", minimum: 1 },
-            end_line: { type: "integer", minimum: 1 },
-          },
-          required: ["path"],
-        },
-      ),
-      functionTool("memory_ls", "List all Markdown files under the server-owned memory directory recursively.", emptyParameters),
       functionTool(
         "memory_grep",
         "Search memories using exact substring matching, returning matching lines and numbers.",

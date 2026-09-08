@@ -1,6 +1,6 @@
 /** Hashline read — file content with LINE#HASH: prefixes. */
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
 
 import { computeLineHash } from "./hash.js";
 import { isImageFile } from "./file-kind.js";
@@ -11,6 +11,7 @@ export interface HashlineReadResult {
   totalLines: number;
   startLine: number;
   endLine: number;
+  isDirectory?: boolean;
 }
 
 export function hashlineRead(
@@ -23,6 +24,17 @@ export function hashlineRead(
 
   if (!existsSync(resolved)) {
     throw new Error(`File not found: ${filePath}`);
+  }
+
+  if (statSync(resolved).isDirectory()) {
+    const entries = readdirSync(resolved).filter((entry) => !entry.startsWith(".")).sort();
+    return {
+      content: `${filePath} is a dir\n${entries.join("\n")}`,
+      totalLines: entries.length,
+      startLine: 1,
+      endLine: entries.length,
+      isDirectory: true,
+    };
   }
 
   if (isImageFile(resolved)) {

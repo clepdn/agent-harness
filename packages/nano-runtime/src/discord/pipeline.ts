@@ -1,6 +1,7 @@
 import { config } from "../config"
 import { enqueueEvent, isRunning, wake } from "../runner/index"
 import { fromDiscord } from "../triggers/discord"
+import type { UserMessage } from "../types"
 import { isChannelActiveNow } from "./cooldown"
 import { ingestDiscordEvent, type DiscordIngestResult } from "./state"
 
@@ -13,7 +14,11 @@ export type DiscordIngressOutcome = {
   note?: string
 }
 
-export function handleDiscordIngress(payload: unknown, preparedIngest?: DiscordIngestResult): DiscordIngressOutcome {
+export function handleDiscordIngress(
+  payload: unknown,
+  preparedIngest?: DiscordIngestResult,
+  preparedEvent?: UserMessage,
+): DiscordIngressOutcome {
   const ingest = preparedIngest ?? ingestDiscordEvent(payload)
   const isWakeEligible = ingest.isNew && !ingest.isFromSelf && Boolean(ingest.bucket)
   const wakeForDm = ingest.bucket === "dm"
@@ -41,7 +46,7 @@ export function handleDiscordIngress(payload: unknown, preparedIngest?: DiscordI
     }
   }
 
-  const event = fromDiscord(payload)
+  const event = preparedEvent ?? fromDiscord(payload)
   if (isRunning()) enqueueEvent(event, { priority: wakeForDm })
   else void wake(event)
 

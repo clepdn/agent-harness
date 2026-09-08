@@ -2,7 +2,6 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import type { Message } from "../types"
 import {
-  AGENT_NAME,
   isContentFilterError,
   isImageParseError,
   shouldFallback,
@@ -151,10 +150,4 @@ test("restSummaryFromMessages returns the llm context summary", () => {
   const summary = restSummaryFromMessages(messages)
   assert.match(summary, /^\[context summary v1\]/)
   assert.match(summary, /Thread: project/)
-})
-
-// ── AGENT_NAME ────────────────────────────────────────────────────────────────
-
-test("AGENT_NAME is a non-empty string", () => {
-  assert.equal(typeof AGENT_NAME, "string")
 })

@@ -17,7 +17,8 @@ import { config } from "../config"
 type Pending = {
   channelId: string
   userId: string
-  fire: () => void
+  queuedItems: unknown[]
+  fire: (queuedItems: readonly unknown[]) => void
   firstAt: number
   timer: ReturnType<typeof setTimeout>
 }
@@ -53,7 +54,7 @@ function scheduleTimer(entry: Pending): void {
   entry.timer = setTimeout(() => {
     pending.delete(pendingKey(entry.channelId, entry.userId))
     try {
-      entry.fire()
+      entry.fire(entry.queuedItems)
     } catch (err) {
       console.warn("[dm-debounce] wake fire failed:", err)
     }
@@ -66,16 +67,21 @@ function scheduleTimer(entry: Pending): void {
 // wake is keyed by both channel and initiating author, so independent users
 // in a group DM cannot extend or suppress one another's burst.
 //
-// Returns true if the wake was deferred (caller should NOT wake now).
-export function debounceDmWake(channelId: string, userId: string, fire: () => void): boolean {
+// Every message in the burst is retained and delivered together when the hold
+// expires. Returns true if the wake was deferred (caller should NOT wake now).
+export function debounceDmWake<T>(
+  channelId: string,
+  userId: string,
+  item: T,
+  fire: (queuedItems: readonly T[]) => void,
+): boolean {
   if (baseMs() <= 0) return false // debounce disabled
 
   const key = pendingKey(channelId, userId.trim())
   const existing = pending.get(key)
   if (existing) {
-    // A burst is already in flight. Keep the newest fire callback (it carries
-    // the freshest event) and extend the window.
-    existing.fire = fire
+    existing.queuedItems.push(item)
+    existing.fire = fire as (queuedItems: readonly unknown[]) => void
     scheduleTimer(existing)
     return true
   }
@@ -83,7 +89,8 @@ export function debounceDmWake(channelId: string, userId: string, fire: () => vo
   const entry: Pending = {
     channelId,
     userId: userId.trim(),
-    fire,
+    queuedItems: [item],
+    fire: fire as (queuedItems: readonly unknown[]) => void,
     firstAt: Date.now(),
     timer: undefined as unknown as ReturnType<typeof setTimeout>,
   }

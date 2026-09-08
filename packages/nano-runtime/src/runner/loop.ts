@@ -585,5 +585,4 @@ export const __loopTest = {
   waitForNextEvent,
   applyCompaction,
   pendingDiscordChannel,
-  clearDiscordTypingScope,
 }

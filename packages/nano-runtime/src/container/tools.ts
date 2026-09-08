@@ -275,6 +275,10 @@ function wrappedBase64(str: string): string {
   return Buffer.from(str, "utf8").toString("base64").match(/.{1,76}/g)?.join("\n") ?? ""
 }
 
+function formatDirectoryListing(displayPath: string, entries: string[]): string {
+  return `${displayPath} is a dir\n${entries.sort().join("\n")}`
+}
+
 /**
  * Read a file from the container with optional line-range selection.
  * Returns content with a metadata header showing the line range and total line count.
@@ -297,6 +301,11 @@ export async function readFile(filePath: string, startLine = 1, endLine?: number
 
   if (!USE_DOCKER_SHELL) {
     const resolvedPath = await resolveLocalPath(filePath, opTimeoutMs)
+    const stat = await fs.stat(resolvedPath)
+    if (stat.isDirectory()) {
+      const entries = (await fs.readdir(resolvedPath)).filter((entry) => !entry.startsWith("."))
+      return formatDirectoryListing(filePath, entries)
+    }
     const content = await fs.readFile(resolvedPath, "utf8")
     const lines = content.split("\n")
     if (lines.at(-1) === "") lines.pop()
@@ -309,6 +318,15 @@ export async function readFile(filePath: string, startLine = 1, endLine?: number
   }
 
   const quoted = shellQuote(filePath)
+
+  const directory = await runRaw(
+    `if [ -d ${quoted} ]; then printf 'yes'; else printf 'no'; fi`,
+    { timeoutMs: opTimeoutMs },
+  )
+  if (directory === "yes") {
+    const entries = await runRaw(`ls -1 -- ${quoted}`, { timeoutMs: opTimeoutMs })
+    return formatDirectoryListing(filePath, entries ? entries.split("\n") : [])
+  }
 
   const countRaw = await runRaw(`wc -l < ${quoted} 2>/dev/null || echo 0`, { timeoutMs: opTimeoutMs })
   const totalLines = parseInt(countRaw.trim(), 10) || 0

@@ -23,6 +23,9 @@ export async function toolContextImageReferences(name: string, args: Record<stri
   if (name === "memory_search") {
     let results: unknown
     try { results = JSON.parse(text) } catch { return [] }
+    if (results && typeof results === "object" && Array.isArray((results as { results?: unknown }).results)) {
+      results = (results as { results: unknown[] }).results
+    }
     if (!Array.isArray(results)) return []
     const references = await Promise.all(results.map((row) =>
       typeof row?.uri === "string" && row.uri.startsWith("memory://") && typeof row.content === "string"

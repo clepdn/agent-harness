@@ -25,7 +25,7 @@ test("dm wake fires after base delay when idle", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] })
   withCfg(5000, 60000, () => {
     let fired = 0
-    const deferred = debounceDmWake("chanA", "userA", () => { fired++ })
+    const deferred = debounceDmWake("chanA", "userA", "hello", () => { fired++ })
     assert.equal(deferred, true, "wake should be deferred")
     t.mock.timers.tick(4999)
     assert.equal(fired, 0, "should not fire before base delay")
@@ -38,7 +38,7 @@ test("typing extends the window", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] })
   withCfg(5000, 60000, () => {
     let fired = 0
-    debounceDmWake("chanB", "userB", () => { fired++ })
+    debounceDmWake("chanB", "userB", "hello", () => { fired++ })
     t.mock.timers.tick(4000)
     noteDmTyping("chanB", "userB")          // reset to now + 5000
     t.mock.timers.tick(4000)
@@ -48,15 +48,15 @@ test("typing extends the window", (t) => {
   })
 })
 
-test("follow-up messages extend, latest fire callback wins", (t) => {
+test("follow-up messages are delivered together in arrival order", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] })
   withCfg(5000, 60000, () => {
-    const order: string[] = []
-    debounceDmWake("chanC", "userC", () => order.push("first"))
+    let delivered: readonly string[] = []
+    debounceDmWake("chanC", "userC", "first", (items) => { delivered = items })
     t.mock.timers.tick(3000)
-    debounceDmWake("chanC", "userC", () => order.push("second"))
+    debounceDmWake("chanC", "userC", "second", (items) => { delivered = items })
     t.mock.timers.tick(5001)
-    assert.deepEqual(order, ["second"], "only latest callback fires, once")
+    assert.deepEqual(delivered, ["first", "second"])
   })
 })
 
@@ -65,8 +65,8 @@ test("typing and messages from another author do not extend a burst", (t) => {
   withCfg(5000, 60000, () => {
     let first = 0
     let second = 0
-    debounceDmWake("shared", "alice", () => { first++ })
-    debounceDmWake("shared", "bob", () => { second++ })
+    debounceDmWake("shared", "alice", "from alice", () => { first++ })
+    debounceDmWake("shared", "bob", "from bob", () => { second++ })
     t.mock.timers.tick(4000)
     noteDmTyping("shared", "bob")
     t.mock.timers.tick(1001)
@@ -81,7 +81,7 @@ test("typing without an author never invents or changes a pending wake", (t) => 
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] })
   withCfg(5000, 60000, () => {
     let fired = 0
-    debounceDmWake("chan-no-user", "alice", () => { fired++ })
+    debounceDmWake("chan-no-user", "alice", "hello", () => { fired++ })
     t.mock.timers.tick(4000)
     noteDmTyping("chan-no-user")
     t.mock.timers.tick(1001)
@@ -93,7 +93,7 @@ test("cap bounds total hold even with continuous typing", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] })
   withCfg(5000, 60000, () => {
     let fired = 0
-    debounceDmWake("chanD", "userD", () => { fired++ })
+    debounceDmWake("chanD", "userD", "hello", () => { fired++ })
     // Type every 3s for a long time; without a cap this never fires.
     for (let elapsed = 0; elapsed < 90000; elapsed += 3000) {
       t.mock.timers.tick(3000)
@@ -106,7 +106,7 @@ test("cap bounds total hold even with continuous typing", (t) => {
 test("disabled when base delay is zero", () => {
   withCfg(0, 60000, () => {
     let fired = 0
-    const deferred = debounceDmWake("chanE", "userE", () => { fired++ })
+    const deferred = debounceDmWake("chanE", "userE", "hello", () => { fired++ })
     assert.equal(deferred, false, "should not defer when disabled")
     assert.equal(fired, 0, "caller handles the wake, debouncer stays out")
   })

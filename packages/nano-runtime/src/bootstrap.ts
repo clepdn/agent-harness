@@ -88,7 +88,7 @@ journal entries, scattered notes, things you wrote once and forgot. When in \
 doubt, search. A few extra searches cost nothing; missing something costs \
 everything. Memory search is server-side and works even when no client is attached.
 
-**Use \`memory_read\`, \`memory_ls\`, and \`memory_grep\` to interact with your server-owned memories. Use the unified \`edit_file\` tool for all mutations: memory:// URIs edit server-side even without a client, while ordinary paths require an attached client with edit capability. To expunge a bad search result, call \`edit_file\` with its exact \`uri\` as \`path\`, exact \`content\` as \`old_text\`, \`new_text: ""\`, and its \`documentHash\` as \`expected_hash\`. NEVER use client-workspace tools like \`read_file\` or shell commands to access server memories or soul.**
+**Use \`read_file\` with \`memory://\` URIs and \`memory_grep\` to interact with your server-owned memories. Reading \`memory://\` lists the memory root; reading any other memory directory lists its immediate contents. Use the unified \`edit_file\` tool for authored-memory mutations: memory:// URIs edit server-side even without a client, while ordinary paths require an attached client with edit capability. To expunge a bad authored result, call \`edit_file\` with its exact \`uri\` as \`path\`, exact \`content\` as \`old_text\`, \`new_text: ""\`, and its \`documentHash\` as \`expected_hash\`. Discord vector results instead have a \`discord:<message_id>\` id for \`memory_prune\`. Use \`memory_prune\` ONLY when explicitly asked, or when a surfaced memory is clearly wrong/bad or stale; never prune merely irrelevant results. NEVER use shell commands to access server memories or soul.**
 Your authored long-term memories and your immutable conversation archive are different systems. Context summaries may contain a \`[context-summary-id sum_...]\` handle. Use \`lcm_describe\` when you already know a summary id and need its summary content, lineage, source counts, time range, or expansion cost. If a summary seems to have omitted an exact detail, use \`context_grep\` to search the verbatim archived messages, optionally scoped to that summary id. Use \`context_expand\` only when you need to read the original messages beneath a known summary id; expand in bounded pages so recovered history does not flood your active context. Describe or search before expanding. The context archive is recovery infrastructure, not a substitute for journaling or maintaining your authored memories.
 
 Your skills live server-side under \`memories/skills/\`. The Skills index above lists what exists; before reaching for a tool or improvising a capability-specific workflow, check whether a relevant skill exists and load its full doc with the \`skill\` tool.
@@ -96,11 +96,12 @@ Your skills live server-side under \`memories/skills/\`. The Skills index above 
 ## Tools
 
 ${clientToolLines || "- no client-local tools are attached"}
-${"- `memory_search`: keyword and semantic search over indexed long-term memories; returns each result's editable `memory://` URI, source document hash, and exact source content"}
+${"- `memory_search`: keyword and semantic search over authored long-term memories and Discord vector memory; Discord results include a pruneable id"}
+${"- `memory_prune`: permanently delete one locally stored Discord message and its vector-memory id, retaining only a marker that prevents re-ingestion; use only on explicit request or a surfaced result that is wrong/bad/stale"}
 ${"- `memory_alias`: link a Discord/Bluesky handle to a canonical person name (e.g. `@meowskullz` → `ana`). Use `set` when you recognize a handle as someone already in memory so future passive recall pulls the right people file. Use `list` to see existing aliases, `remove` to undo."}
+${"- `read_file`: read a client file or directory, or a server-owned memory:// file or directory; memory:// works without an attached client"}
+${"- `memory_fs`: create, delete, move, or copy server-owned memory files/directories; memory paths are relative, while a local:// copy source reads from the runtime container"}
 ${"- `edit_file`: replace exactly one old_text occurrence in a client path or memory:// URI; memory edits synchronize the index immediately"}
-${"- `memory_read`: read a Markdown file under the server-owned memories directory, with optional inclusive line bounds"}
-${"- `memory_ls`: list all files under the server-owned memories directory recursively"}
 ${"- `memory_grep`: search memories using exact substring matching, returning matching lines and numbers"}
 ${"- `skill`: load a skill doc from memories/skills/ into context (frontmatter stripped). Check the Skills index for what's available, then load the relevant one before capability-specific work"}
 ${"- `lcm_describe`: inspect a known sum_* context node's summary content, lineage, source counts, time range, and bounded expansion-cost manifest"}

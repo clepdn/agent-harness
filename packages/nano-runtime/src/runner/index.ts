@@ -326,14 +326,15 @@ function formatIncomingEvent(event: UserMessage): string {
 function autoSeeDiscordEvent(event: UserMessage): void {
   if (event.source !== "discord") return
 
-  const match = event.content.match(/^source_item_id:\s*(\S+)/m)
-  const itemId = match?.[1]?.trim()
-  if (!itemId) return
-
-  try {
-    markDiscordItem(itemId, "seen", "auto-seen after injection into runner context", "noted")
-  } catch (err) {
-    console.warn(`[runner] failed to auto-see Discord item ${itemId}: ${err instanceof Error ? err.message : String(err)}`)
+  const itemIds = [...event.content.matchAll(/^source_item_id:\s*(\S+)/gm)]
+    .map((match) => match[1]?.trim())
+    .filter((itemId): itemId is string => Boolean(itemId))
+  for (const itemId of new Set(itemIds)) {
+    try {
+      markDiscordItem(itemId, "seen", "auto-seen after injection into runner context", "noted")
+    } catch (err) {
+      console.warn(`[runner] failed to auto-see Discord item ${itemId}: ${err instanceof Error ? err.message : String(err)}`)
+    }
   }
 }
 

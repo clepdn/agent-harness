@@ -1,13 +1,15 @@
 import type { Context, Tool, TSchema } from "../llm"
-import type { ToolDefinition } from "@nano/harness-core"
+import { createReadFileToolDefinition, type ToolDefinition } from "@nano/harness-core"
 import { config } from "../config"
 import { imageRootForModelInput } from "../container/index"
 import { clientTools } from "../client"
 import type { LoopState } from "./types"
+import { MEMORY_FS_TOOL_DEFINITION } from "./tool-catalog"
 
 // Placeholder: the real root belongs to whichever client is attached, which
 // can change mid-session via the /client/connect handshake.
 const IMAGE_ROOT_HINT = "{{IMAGE_ROOT}}"
+const READ_FILE_TOOL = createReadFileToolDefinition({ memory: true }).function
 
 /** Cast a plain JSON Schema object to the TSchema type. */
 function s(schema: Record<string, unknown>): TSchema {
@@ -40,19 +42,14 @@ export const TOOLS: Tool[] = [
     }),
   },
   {
-    name: "read_file",
-    description:
-      "Read a file from your Linux environment with optional line-range selection. More token-efficient than shell+cat for large files. Returns content with a header showing the line range and total line count. Supports timeout_ms (default 120000, max 600000).",
-    parameters: s({
-      type: "object",
-      properties: {
-        path: { type: "string", description: "Absolute or relative path to the file." },
-        start_line: { type: "integer", description: "First line to read (1-indexed). Defaults to 1." },
-        end_line: { type: "integer", description: "Last line to read (inclusive). Defaults to start_line + 99." },
-        timeout_ms: { type: "integer", description: "Read timeout in milliseconds. Defaults to 120000. Max 600000." },
-      },
-      required: ["path"],
-    }),
+    name: READ_FILE_TOOL.name,
+    description: READ_FILE_TOOL.description,
+    parameters: s(READ_FILE_TOOL.parameters),
+  },
+  {
+    name: MEMORY_FS_TOOL_DEFINITION.function.name,
+    description: MEMORY_FS_TOOL_DEFINITION.function.description,
+    parameters: s(MEMORY_FS_TOOL_DEFINITION.function.parameters),
   },
   {
     name: "edit_file",
@@ -72,7 +69,7 @@ export const TOOLS: Tool[] = [
   {
     name: "memory_search",
     description:
-      "Search indexed long-term memories from core notes, journal entries, and people files. Useful when you want deliberate recall instead of relying only on passive memory injection.",
+      "Search indexed long-term memories from authored notes and the Discord vector index. Discord results include an id accepted by memory_prune.",
     parameters: s({
       type: "object",
       properties: {
@@ -80,6 +77,24 @@ export const TOOLS: Tool[] = [
         limit: { type: "integer", description: "Maximum results to return (default 5, max 10)." },
       },
       required: ["query"],
+    }),
+  },
+  {
+    name: "memory_prune",
+    description:
+      "Permanently delete one locally stored Discord message and its vector-memory entry by the id returned from memory_search. A deletion marker prevents re-ingestion. Use ONLY when the user explicitly asks to remove that memory, or when memory_search has surfaced the entry and it is clearly wrong/bad or stale. Never use it merely because a result is irrelevant. Choose the reason truthfully.",
+    parameters: s({
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        id: { type: "string", pattern: "^discord:[0-9]+$", description: "Exact Discord memory id returned by memory_search." },
+        reason: {
+          type: "string",
+          enum: ["explicit_request", "surfaced_incorrect", "surfaced_stale"],
+        },
+        note: { type: "string", description: "Optional short explanation of what is wrong or stale." },
+      },
+      required: ["id", "reason"],
     }),
   },
   {

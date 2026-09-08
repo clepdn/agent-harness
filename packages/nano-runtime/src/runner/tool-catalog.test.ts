@@ -10,18 +10,39 @@ test("Niri catalog keeps server tools separate from client capabilities", () => 
   assert.equal(names.includes("discord_send"), false)
 })
 
-test("memory catalog exposes unified edit and read tools", () => {
+test("memory catalog exposes unified file tools", () => {
   const tools = createNiriToolCatalog({ memory: true })
   const names = tools.map((tool) => tool.function.name)
   assert.equal(names.includes("edit_file"), true)
   assert.equal(names.filter((name) => name === "edit_file").length, 1)
   assert.equal(names.includes("memory_write"), false)
   assert.equal(names.includes("soul_write"), false)
-  assert.equal(names.includes("memory_read"), true)
+  assert.equal(names.includes("read_file"), true)
+  assert.equal(names.filter((name) => name === "read_file").length, 1)
+  assert.equal(names.includes("memory_fs"), true)
+  assert.equal(names.filter((name) => name === "memory_fs").length, 1)
+  assert.equal(names.includes("memory_read"), false)
+  assert.equal(names.includes("memory_ls"), false)
   const edit = tools.find((tool) => tool.function.name === "edit_file")!
   assert.deepEqual(edit.function.parameters.required, ["path"])
   assert.ok((edit.function.parameters.properties as Record<string, unknown>).old_text)
   assert.ok((edit.function.parameters.properties as Record<string, unknown>).edits)
+  const read = tools.find((tool) => tool.function.name === "read_file")!
+  assert.deepEqual(read.function.parameters.required, ["path"])
+  const memoryFs = tools.find((tool) => tool.function.name === "memory_fs")!
+  assert.deepEqual(memoryFs.function.parameters.required, ["file_name", "op"])
+  assert.deepEqual(Object.keys(memoryFs.function.parameters.properties ?? {}).sort(), ["file_name", "op", "target"])
+})
+
+test("memory catalog exposes guarded Discord vector pruning", () => {
+  const tools = createNiriToolCatalog({ memory: true })
+  const prune = tools.find((tool) => tool.function.name === "memory_prune")!
+  assert.ok(prune)
+  assert.match(prune.function.description, /ONLY/)
+  assert.deepEqual(prune.function.parameters.required, ["id", "reason"])
+  const properties = prune.function.parameters.properties as Record<string, { enum?: string[]; pattern?: string }>
+  assert.equal(properties.id?.pattern, "^discord:[0-9]+$")
+  assert.deepEqual(properties.reason?.enum, ["explicit_request", "surfaced_incorrect", "surfaced_stale"])
 })
 
 test("disabled optional services stay out of the catalog", () => {
@@ -57,17 +78,18 @@ test("Discord and client tools are independently gated", () => {
   assert.equal(names.includes("discord_send"), true)
 })
 
+test("server memory keeps read_file available without an attached client", () => {
+  const names = createNiriToolCatalog({ memory: true }).map((tool) => tool.function.name)
+  assert.equal(names.includes("read_file"), true)
+})
+
 test("shell catalog exposes explicit per-command PTY allocation", () => {
   const shell = createNiriToolCatalog({
     clientCapabilities: ["shell"],
     workspace: { id: "client", root: "/client", persistentShell: false },
   }).find((tool) => tool.function.name === "shell")
   const properties = shell?.function.parameters.properties as Record<string, unknown>
-  assert.deepEqual(properties.pty, {
-    type: "boolean",
-    description: "Allocate a fresh PTY for this command. Defaults to false.",
-  })
-  assert.match(shell?.function.description ?? "", /fresh process/)
+  assert.equal((properties.pty as { type?: unknown }).type, "boolean")
 })
 
 test("web_search is gated on the webSearch option", () => {

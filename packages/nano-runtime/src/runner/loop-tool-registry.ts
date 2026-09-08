@@ -3,7 +3,7 @@ import { config } from "../config"
 import { normalizeTimeoutMs } from "../container/config"
 import type { ClientImageArtifact, ClientToolName } from "@nano/harness-protocol"
 import { AGENT_ID } from "../agent-config"
-import { grepMemory, listMemory, loadSkill, readMemory, editMemoryResource } from "../agent-state-tools"
+import { grepMemory, listMemory, loadSkill, memoryFs, readMemory, editMemoryResource } from "../agent-state-tools"
 import { clientTools } from "../client"
 import { logMessage } from "../db"
 import {
@@ -18,7 +18,7 @@ import {
 } from "../discord/state"
 import { listAliases, removeAlias, searchMemories, setAlias } from "../memory"
 import { setCustomStatus } from "../discord/status-updater"
-import { searchDiscordMessages } from "../discord/search"
+import { pruneDiscordMemory, searchDiscordMessages, type MemoryPruneReason } from "../discord/search"
 import { webSearch } from "../web-search"
 import { emit } from "../stream"
 import { stopDiscordTyping } from "../discord/typing-lease"
@@ -145,6 +145,27 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       }),
 
     read_file: async (ctx) => {
+      const pathArg = ctx.args.path
+      if (typeof pathArg !== "string" || !pathArg.trim()) {
+        return runStandardTool(ctx, {
+          name: "read_file", logArgKeys: ["path"] as const, runArgKeys: [] as const,
+          run: async () => { throw new Error("path is required") }, emitArgKeys: ["path"] as const, previewChars: 0,
+        })
+      }
+      if (pathArg.startsWith("memory://")) {
+        return runStandardTool(ctx, {
+          name: "read_file",
+          logArgKeys: ["path", "start_line", "end_line"] as const,
+          runArgKeys: ["path", "start_line", "end_line"] as const,
+          run: (path, startLine, endLine) => readMemory(path, startLine, endLine),
+        })
+      }
+      if (!clientTools.getCapabilities().includes("read_file")) {
+        return runStandardTool(ctx, {
+          name: "read_file", logArgKeys: ["path"] as const, runArgKeys: [] as const,
+          run: async () => { throw new Error("read_file is unavailable on the attached client") }, emitArgKeys: ["path"] as const, previewChars: 0,
+        })
+      }
       const result = await runStandardTool(ctx, {
         name: "read_file",
         logArgKeys: ["path", "start_line", "end_line", "timeout_ms"] as const,
@@ -158,6 +179,16 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       }
       return result
     },
+
+    memory_fs: (ctx) =>
+      runStandardTool(ctx, {
+        name: "memory_fs",
+        logArgKeys: ["file_name", "op", "target"] as const,
+        runArgKeys: ["file_name", "op", "target"] as const,
+        run: (fileName, op, target) => memoryFs(fileName, op, target),
+        emitArgKeys: ["file_name"] as const,
+        previewChars: 0,
+      }),
 
     edit_file: async (ctx) => {
       const args = ctx.args
@@ -230,6 +261,18 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
             2,
           ),
         emptyFallback: '{"query":"","results":[]}',
+      }),
+
+    memory_prune: (ctx) =>
+      runStandardTool(ctx, {
+        name: "memory_prune",
+        logArgKeys: ["id", "reason", "note"] as const,
+        runArgKeys: ["id", "reason", "note"] as const,
+        run: async (id, reason, note) => JSON.stringify(
+          pruneDiscordMemory(String(id ?? ""), String(reason ?? "") as MemoryPruneReason, note as string | undefined),
+          null,
+          2,
+        ),
       }),
 
     web_search: (ctx) =>

@@ -100,10 +100,12 @@ test("noop archive always declines", async () => {
   assert.equal(await backend.archive(), null)
 })
 
-test("backend resolution defaults to text-appendix for anthropic", () => {
-  // deep_archive defaults true in the test config and no remote endpoint is set,
-  // so every provider resolves to the text appendix.
-  assert.equal(resolveDeepArchiveBackend("anthropic").name, "text-appendix")
-  assert.equal(resolveDeepArchiveBackend("openai").name, "text-appendix")
-  assert.equal(resolveDeepArchiveBackend(undefined).name, "text-appendix")
+test("default deep-archive backends preserve source details", async () => {
+  for (const provider of ["anthropic", "openai", undefined]) {
+    const result = await resolveDeepArchiveBackend(provider).archive([userMsg("provider-specific-marker")])
+    assert.ok(result)
+    const content = (result.archiveMessage as { content: unknown }).content
+    if (typeof content === "string") assert.match(content, /provider-specific-marker/)
+    else assert.ok(Array.isArray(content) && content.some((block) => block && typeof block === "object" && (block as { type?: unknown }).type === "image"))
+  }
 })

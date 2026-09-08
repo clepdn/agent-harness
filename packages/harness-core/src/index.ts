@@ -47,6 +47,42 @@ const functionTool = (name: ClientToolName, description: string, parameters: Jso
   function: { name, description, parameters },
 })
 
+export type ReadFileToolDefinitionOptions = {
+  hashline?: boolean
+  memory?: boolean
+}
+
+export function createReadFileToolDefinition(
+  options: ReadFileToolDefinitionOptions = {},
+): ToolDefinition {
+  const target = options.memory
+    ? "Read a client file or directory, or a server-owned memory:// resource."
+    : "Read a file or list a directory resolved by the attached client."
+  const fileBehavior = options.hashline
+    ? "Client file lines are prefixed with `LINE#HASH: `, where HASH anchors that line for edit_file. The prefix is display only — never include it in edit payloads."
+    : "File reads accept optional inclusive line bounds."
+  const memoryBehavior = options.memory ? " memory:// reads work without an attached client." : ""
+
+  return functionTool(
+    "read_file",
+    `${target} A directory returns \`{path} is a dir\` followed by the immediate contents, like \`ls\`. ${fileBehavior}${memoryBehavior}`,
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        path: {
+          type: "string",
+          description: options.memory ? "A client path or memory:// URI." : "A path resolved by the attached client.",
+        },
+        start_line: { type: "integer", minimum: 1 },
+        end_line: { type: "integer", minimum: 1 },
+        timeout_ms: { type: "integer", minimum: 1000, maximum: 600000 },
+      },
+      required: ["path"],
+    },
+  )
+}
+
 export function createClientToolCatalog(options: ClientToolCatalogOptions = {}): ToolDefinition[] {
   const capabilities = new Set(options.clientCapabilities ?? [])
   const imageRoot = options.workspace?.imageRoot || options.workspace?.root || "the attached client workspace"
@@ -74,39 +110,7 @@ export function createClientToolCatalog(options: ClientToolCatalogOptions = {}):
   }
 
   if (capabilities.has("read_file")) {
-    tools.push(
-      hashline
-        ? functionTool(
-            "read_file",
-            "Read a file resolved by the attached client. Each line is prefixed with `LINE#HASH: `, where HASH anchors that line for edit_file. The prefix is display only — never include it in edit payloads.",
-            {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                path: { type: "string" },
-                start_line: { type: "integer", minimum: 1 },
-                end_line: { type: "integer", minimum: 1 },
-                timeout_ms: { type: "integer", minimum: 1000, maximum: 600000 },
-              },
-              required: ["path"],
-            },
-          )
-        : functionTool(
-            "read_file",
-            "Read a file resolved by the attached client, with optional inclusive line bounds.",
-            {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                path: { type: "string" },
-                start_line: { type: "integer", minimum: 1 },
-                end_line: { type: "integer", minimum: 1 },
-                timeout_ms: { type: "integer", minimum: 1000, maximum: 600000 },
-              },
-              required: ["path"],
-            },
-          ),
-    )
+    tools.push(createReadFileToolDefinition({ hashline }))
   }
 
   if (capabilities.has("edit_file")) {

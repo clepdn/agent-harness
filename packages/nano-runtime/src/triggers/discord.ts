@@ -183,3 +183,20 @@ export function fromDiscord(body: unknown): UserMessage {
     raw: body,
   }
 }
+
+/** Formats a debounced DM burst as one runner event without dropping earlier messages. */
+export function fromDiscordMessages(bodies: readonly unknown[]): UserMessage {
+  if (bodies.length === 0) throw new Error("at least one Discord message is required")
+  const events = bodies.map(fromDiscord)
+  if (events.length === 1) return events[0]!
+
+  const latest = events.at(-1)!
+  return {
+    source: "discord",
+    triggeredAt: latest.triggeredAt,
+    content: events.map((event, index) => index === 0
+      ? event.content
+      : `[next discord message]\n\n${event.content}`).join("\n\n"),
+    raw: [...bodies],
+  }
+}

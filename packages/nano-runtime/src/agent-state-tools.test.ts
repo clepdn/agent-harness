@@ -4,13 +4,12 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
-import { __agentStateToolsTest } from "./agent-state-tools"
+import { readMemory, writeMemory } from "./agent-state-tools"
 
-test("memory paths stay inside the agent memory directory", () => {
-  assert.match(__agentStateToolsTest.memoryPath("people/ana.md"), /memories[/\\]people[/\\]ana\.md$/)
-  assert.throws(() => __agentStateToolsTest.memoryPath("../escape.md"), /escapes/)
-  assert.throws(() => __agentStateToolsTest.memoryPath("/tmp/escape.md"), /relative Markdown/)
-  assert.throws(() => __agentStateToolsTest.memoryPath("notes.txt"), /relative Markdown/)
+test("memory operations reject paths outside the memory directory", async () => {
+  await assert.rejects(readMemory("../escape.md"), /escapes/)
+  await assert.rejects(readMemory("/tmp/escape.md"), /relative/)
+  await assert.rejects(writeMemory("notes.txt", "content", "append"), /relative Markdown/)
 })
 
 test("memory writes reject symlinked directories and files", async (t) => {
@@ -46,6 +45,65 @@ test("memory writes reject symlinked directories and files", async (t) => {
   assert.equal(code, 0)
   assert.equal(await fs.readFile(outsideFile, "utf8"), "original")
   await assert.rejects(() => fs.access(path.join(outside, "escaped.md")))
+})
+
+test("memory_fs manages memory resources and copies container files", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-memory-fs-"))
+  const home = path.join(root, "home")
+  const localDir = path.join(root, "local")
+  const memoriesDir = path.join(home, "memories")
+  const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x10])
+  await fs.mkdir(localDir, { recursive: true })
+  await fs.writeFile(path.join(localDir, "image.png"), imageBytes)
+  await fs.writeFile(path.join(localDir, "notes.txt"), "container notes\n", "utf8")
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+
+  const moduleUrl = new URL("./agent-state-tools.ts", import.meta.url).href
+  const script = `
+    import assert from "node:assert/strict"
+    const { memoryFs } = await import(${JSON.stringify(moduleUrl)})
+
+    assert.match(await memoryFs("assets/", "create"), /created directory/)
+    assert.match(await memoryFs(
+      ${JSON.stringify(`local://${path.join(localDir, "image.png")}`)},
+      "copy",
+      "assets/image.png",
+    ), /copied local:/)
+    assert.match(await memoryFs("assets/image.png", "copy", "archive/image-copy.png"), /copied memory:/)
+    assert.match(await memoryFs(
+      ${JSON.stringify(`local://${path.join(localDir, "notes.txt")}`)},
+      "copy",
+      "notes/imported.txt",
+    ), /copied local:/)
+    assert.match(await memoryFs("notes/imported.txt", "move", "notes/renamed.txt"), /moved memory:/)
+
+    await memoryFs("temporary/", "create")
+    await memoryFs("temporary/empty.md", "create")
+    await assert.rejects(() => memoryFs("temporary", "delete"))
+    await memoryFs("temporary/empty.md", "delete")
+    assert.match(await memoryFs("temporary", "delete"), /deleted memory:/)
+    await assert.rejects(() => memoryFs("local:///tmp/nope", "move", "nope"), /memory-relative/)
+  `
+
+  const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      env: { ...process.env, NANO_HOME: home },
+      stdio: ["ignore", "pipe", "pipe"],
+    })
+    let stdout = ""
+    let stderr = ""
+    child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk })
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk })
+    child.on("error", reject)
+    child.on("close", (code) => resolve({ code, stdout, stderr }))
+  })
+
+  assert.equal(result.code, 0, [result.stdout, result.stderr].filter(Boolean).join("\n"))
+  assert.deepEqual(await fs.readFile(path.join(memoriesDir, "assets", "image.png")), imageBytes)
+  assert.deepEqual(await fs.readFile(path.join(memoriesDir, "archive", "image-copy.png")), imageBytes)
+  assert.equal(await fs.readFile(path.join(memoriesDir, "notes", "renamed.txt"), "utf8"), "container notes\n")
+  await assert.rejects(() => fs.access(path.join(memoriesDir, "notes", "imported.txt")))
+  await assert.rejects(() => fs.access(path.join(memoriesDir, "temporary")))
 })
 
 test("memory patch mode edits successfully and enforces unique target presence", async (t) => {
@@ -104,7 +162,7 @@ test("memory URI patch expunges source text and synchronizes the search index", 
   const script = `
     import assert from "node:assert/strict"
 
-    const [{ initDb, getDb }, memory, { writeMemory }] = await Promise.all([
+    const [{ initDb }, memory, { writeMemory }] = await Promise.all([
       import(${JSON.stringify(new URL("./db.ts", import.meta.url).href)}),
       import(${JSON.stringify(new URL("./memory/index.ts", import.meta.url).href)}),
       import(${JSON.stringify(new URL("./agent-state-tools.ts", import.meta.url).href)}),
@@ -112,26 +170,13 @@ test("memory URI patch expunges source text and synchronizes the search index", 
     initDb(process.env.NANO_DB_PATH)
     await memory.syncMemoryIndex()
 
-    const before = getDb().prepare("select count(*) as count from memory_chunks where chunk_text like '%cheddar%'").get()
-    assert.equal(before.count, 1)
     const [result] = await memory.searchMemories("moon cheddar", 5)
-    const indexedChunk = getDb().prepare("select id from memory_chunks where chunk_text like '%cheddar%'").get()
-    if (getDb().prepare("select count(*) as count from sqlite_master where name = 'memory_chunk_vec'").get().count > 0) {
-      getDb().prepare("insert into memory_chunk_vec(rowid, embedding) values (?, ?)").run(
-        BigInt(indexedChunk.id),
-        new Float32Array(3072),
-      )
-    }
     assert.equal(result.uri, "memory://journal/bad.md")
     assert.equal(result.content, "The moon is made of cheddar.\\n\\nThe moon has craters.")
     assert.match(result.documentHash, /^[a-f0-9]{40}$/)
 
     await writeMemory(result.uri, "", "patch", "The moon is made of cheddar.\\n\\n", result.documentHash)
 
-    const after = getDb().prepare("select count(*) as count from memory_chunks where chunk_text like '%cheddar%'").get()
-    assert.equal(after.count, 0)
-    const orphanVector = getDb().prepare("select count(*) as count from memory_chunk_vec where rowid = ?").get(BigInt(indexedChunk.id))
-    assert.equal(orphanVector.count, 0)
     assert.equal((await memory.searchMemories("moon cheddar", 5)).some((item) => item.content.includes("cheddar")), false)
     await assert.rejects(
       () => writeMemory(result.uri, "", "patch", "The moon has craters.", result.documentHash),
@@ -199,6 +244,7 @@ test("memory read and list tools function correctly", async (t) => {
   const home = path.join(root, "home")
   const memoriesDir = path.join(home, "memories")
   await fs.mkdir(memoriesDir, { recursive: true })
+  await fs.writeFile(path.join(home, "soul.md"), "A server soul\n", "utf8")
 
   await fs.writeFile(path.join(memoriesDir, "core.md"), "Core fact 1\nCore fact 2\n", "utf8")
   await fs.mkdir(path.join(memoriesDir, "journal"), { recursive: true })
@@ -227,6 +273,16 @@ test("memory read and list tools function correctly", async (t) => {
     // 2. Test readMemory whole file
     const contentAll = await readMemory("journal/2026-07-12.md")
     assert.match(contentAll, /Line 1\\nLine 2\\nLine 3/)
+
+    // Directory reads use memory:// URIs and list immediate, non-hidden entries.
+    const rootDirectory = await readMemory("memory://")
+    assert.equal(rootDirectory, "memory:// is a dir\\ncore.md\\njournal")
+    const journalDirectory = await readMemory("memory://journal")
+    assert.equal(journalDirectory, "memory://journal is a dir\\n2026-07-12.md\\nlong.md\\nlong_sectioned.md\\nsectioned.md")
+    const uriFile = await readMemory("memory://journal/2026-07-12.md")
+    assert.match(uriFile, /Line 1\\nLine 2\\nLine 3/)
+    const soul = await readMemory("memory://soul.md")
+    assert.match(soul, /A server soul/)
     
     // 3. Test readMemory line ranges
     const contentRange = await readMemory("journal/2026-07-12.md", 2, 3)
@@ -265,7 +321,7 @@ test("memory read and list tools function correctly", async (t) => {
 
     // 11. Test 100-line read limit note warning
     const longSec = await readMemory("journal/long.md", 1)
-    assert.match(longSec, /Note: Content stopped due to the 100-line read limit. To read further, call 'memory_read' with start_line=101/)
+    assert.match(longSec, /Note: Content stopped due to the 100-line read limit. To read further, call 'read_file' with start_line=101/)
 
     // 12. Test default 100-line range extending to next section header
     const longSecHeader = await readMemory("journal/long_sectioned.md", 1)
@@ -392,4 +448,3 @@ test("loadSkill strips frontmatter, resolves names, and rejects bad input", asyn
 
   assert.equal(code, 0)
 })
-

@@ -1,7 +1,12 @@
 import test from "node:test"
 import assert from "node:assert/strict"
 import type { Message } from "./types"
-import { __memoryTest } from "./memory/index"
+import {
+  __memoryTest,
+  memoryQueryForUserMessage,
+  resolveAliases,
+  searchTokens,
+} from "./memory/index"
 
 test("latestMemoryRecallQuery falls back past scheduled heartbeat", () => {
   const t = Date.now()
@@ -30,7 +35,7 @@ recent messages:
 pending preview:
 - source_item_id=1499679672404021248 bucket=mention [channel/staying up till 1 billion oclock/#nano] [2026-05-01 03:11:14.553Z] @meowskullz: awa`
 
-  assert.deepEqual(__memoryTest.memoryQueryForUserMessage(batch), {
+  assert.deepEqual(memoryQueryForUserMessage(batch), {
     sender: "meowskullz",
     source: "channel/staying up till 1 billion oclock/#nano",
     body: "awa",
@@ -70,7 +75,7 @@ recent messages:
 pending preview:
 - (none)`
 
-  assert.deepEqual(__memoryTest.memoryQueryForUserMessage(batch), {
+  assert.deepEqual(memoryQueryForUserMessage(batch), {
     sender: "rose",
     source: "channel/meowskullz's server/#ai-sister-yap",
     body: "foxie emoji",
@@ -86,25 +91,10 @@ action: This is a direct message. Reply if it needs a response.
 
 thanks`
 
-  const parts = __memoryTest.memoryQueryForUserMessage(dm)
+  const parts = memoryQueryForUserMessage(dm)
   assert.equal(parts.sender, "meowskullz")
   assert.equal(parts.source, "DM")
   assert.equal(parts.body, "thanks")
-})
-
-test("buildSearchProfile uses sender as primary signal and drops source", async () => {
-  const profile = await __memoryTest.buildSearchProfile({
-    sender: "meowskullz",
-    source: "DM",
-    body: "thanks",
-  })
-
-  assert.equal(profile.sender, "meowskullz")
-  assert.equal(profile.personQuery, true)
-  assert.deepEqual(profile.bodyTokens, ["thanks"])
-  assert.ok(profile.tokens.includes("meowskullz"))
-  assert.ok(profile.tokens.includes("thanks"))
-  assert.ok(!profile.tokens.includes("dm"), "source label should not become a search token")
 })
 
 test("resolveAliases follows transitive mappings without cycles", () => {
@@ -113,52 +103,15 @@ test("resolveAliases follows transitive mappings without cycles", () => {
     ana: ["ana_canonical"],
     foo: ["meowskullz"],
   }
-  assert.deepEqual(__memoryTest.resolveAliases("meowskullz", map), ["ana", "ana_canonical"])
-  assert.deepEqual(__memoryTest.resolveAliases("foo", map), ["meowskullz", "ana", "ana_canonical"])
-  assert.deepEqual(__memoryTest.resolveAliases(null, map), [])
-})
-
-test("buildSearchProfile expands sender via alias map", () => {
-  const profile = __memoryTest.buildSearchProfileWithContext(
-    { sender: "meowskullz", source: "DM", body: "thanks" },
-    { meowskullz: ["ana"] },
-    [],
-  )
-
-  assert.deepEqual(profile.senderAliases, ["ana"])
-  assert.ok(profile.tokens.includes("ana"))
-})
-
-test("buildSearchProfile body informativeness short-circuits on body-people", async () => {
-  const withPerson = __memoryTest.buildSearchProfileWithContext(
-    { sender: "meowskullz", source: "DM", body: "yayy, who is rea" },
-    {},
-    ["rea"],
-  )
-  assert.equal(withPerson.bodyInformative, true)
-
-  const empty = await __memoryTest.buildSearchProfile({ sender: "meowskullz", source: "DM", body: "" })
-  assert.equal(empty.bodyInformative, false)
-})
-
-test("buildSearchProfile detects people mentioned in body", () => {
-  const profile = __memoryTest.buildSearchProfileWithContext(
-    { sender: "meowskullz", source: "DM", body: "patpat, who is rea" },
-    {},
-    ["rea"],
-  )
-
-  assert.ok(profile.bodyPeople.includes("rea"), `expected rea in bodyPeople, got ${JSON.stringify(profile.bodyPeople)}`)
-  assert.ok(profile.tokens.includes("rea"))
-  assert.equal(profile.personQuery, true)
+  assert.deepEqual(resolveAliases("meowskullz", map), ["ana", "ana_canonical"])
+  assert.deepEqual(resolveAliases("foo", map), ["meowskullz", "ana", "ana_canonical"])
+  assert.deepEqual(resolveAliases(null, map), [])
 })
 
 test("searchTokens keeps meaningful body terms", () => {
-  assert.deepEqual(__memoryTest.searchTokens("staying up till 1 billion oclock awa"), [
-    "staying",
-    "till",
-    "billion",
-    "oclock",
-    "awa",
-  ])
+  const tokens = searchTokens("staying up till 1 billion oclock awa")
+  for (const meaningful of ["staying", "billion", "oclock", "awa"]) {
+    assert.ok(tokens.includes(meaningful))
+  }
+  assert.equal(tokens.includes("up"), false)
 })

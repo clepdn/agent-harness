@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { parseMessageRecord, renderDiscordUserMentions } from "./parse"
-import { fromDiscord } from "../triggers/discord"
+import { fromDiscord, fromDiscordMessages } from "../triggers/discord"
 
 const mentionPayload = {
   message: {
@@ -67,4 +67,32 @@ test("discord server nicknames are preferred and rendered correctly", () => {
   const event = fromDiscord(nicknamePayload)
   assert.match(event.content, /@Ana Server Nick/)
   assert.match(event.content, /hey @Dawn Server Nick and @Nova Server Nick/)
+})
+
+test("a debounced DM burst delivers every message in arrival order", () => {
+  const dm = (id: string, content: string, timestamp: string) => ({
+    message: {
+      id,
+      channel_id: "dm-123",
+      guild_id: null,
+      content,
+      timestamp,
+      author: { id: "789", username: "ana" },
+    },
+    channel: { id: "dm-123", type: 1 },
+    is_dm: true,
+  })
+
+  const event = fromDiscordMessages([
+    dm("message-1", "first thought", "2026-06-15T12:00:00.000Z"),
+    dm("message-2", "second thought", "2026-06-15T12:00:03.000Z"),
+  ])
+
+  assert.ok(event.content.indexOf("first thought") < event.content.indexOf("second thought"))
+  assert.match(event.content, /^source_item_id: message-1$/m)
+  assert.match(event.content, /^source_item_id: message-2$/m)
+  assert.deepEqual(event.raw, [
+    dm("message-1", "first thought", "2026-06-15T12:00:00.000Z"),
+    dm("message-2", "second thought", "2026-06-15T12:00:03.000Z"),
+  ])
 })

@@ -87,7 +87,9 @@ export type MemoryHit = {
   semanticSimilarity?: number
 }
 
-export type MemorySearchResult = {
+export type AuthoredMemorySearchResult = {
+  /** Stable model-facing id for this indexed memory chunk. */
+  id: `memory:${number}`
   chunkId: number
   kind: MemoryKind
   /** Stable model-facing source URI. Edit this resource to correct or expunge a result. */
@@ -100,7 +102,28 @@ export type MemorySearchResult = {
   /** Exact source text suitable for an exact replacement/deletion. */
   content: string
   preview: string
+  semanticSimilarity?: number
 }
+
+export type DiscordMemorySearchResult = {
+  /** Stable model-facing id accepted by memory_prune. */
+  id: `discord:${string}`
+  kind: "discord"
+  messageId: string
+  channelId: string
+  guildId: string | null
+  guildName: string | null
+  channelName: string | null
+  authorId: string | null
+  authorUsername: string | null
+  createdAt: string
+  source: string
+  content: string
+  preview: string
+  semanticSimilarity: number
+}
+
+export type MemorySearchResult = AuthoredMemorySearchResult | DiscordMemorySearchResult
 
 export type AliasMap = Record<string, string[]>
 

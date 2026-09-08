@@ -210,6 +210,7 @@ export class NodeToolHost implements ClientToolHost {
             typeof args.end_line === "number" ? args.end_line : undefined,
             await currentWorkingDirectory(),
           )
+          if (region.isDirectory) return region.content
           return `[${region.startLine}-${region.endLine} of ${region.totalLines}]\n${region.content}`
         }
         const output = await readFile(

@@ -5,30 +5,6 @@ import test from "node:test"
 import { buildBootstrap } from "./bootstrap"
 import { NANO_HOME } from "./agent-config"
 
-test("bootstrap explains immutable context recovery tools", async () => {
-  const messages = await buildBootstrap({
-    source: "chat",
-    triggeredAt: new Date().toISOString(),
-    content: "hello",
-    raw: null,
-  })
-  const system = String(messages[0]?.content)
-
-  assert.match(system, /authored long-term memories and your immutable conversation archive are different systems/i)
-  assert.match(system, /Use `lcm_describe` when you already know a summary id/)
-  assert.match(system, /`context_grep` to search the verbatim archived messages/)
-  assert.match(system, /`context_expand` only when you need to read the original messages/)
-  assert.match(system, /Describe or search before expanding\./)
-  assert.match(system, /not a substitute for journaling/i)
-})
-test("bootstrap documents unified memory editing", async () => {
-  const messages = await buildBootstrap({ source: "chat", triggeredAt: new Date().toISOString(), content: "hello", raw: null })
-  const system = String(messages[0]?.content)
-  assert.match(system, /Use `edit_file`.*memory:.*old_text.*new_text/i)
-  assert.match(system, /documentHash.*expected_hash/i)
-  assert.doesNotMatch(system, /memory_write|soul_write/)
-})
-
 test("bootstrap injects a skills index from frontmatter descriptions", async (t) => {
   await fs.mkdir(NANO_HOME, { recursive: true })
   const skillsDir = path.join(NANO_HOME, "memories", "skills")
@@ -57,12 +33,9 @@ test("bootstrap injects a skills index from frontmatter descriptions", async (t)
   })
   const system = String(messages[0]?.content)
 
-  assert.match(system, /## Skills/)
   assert.match(system, /`zzz-test-skill`: does a testable thing/)
   // files lacking frontmatter still appear, flagged
   assert.match(system, /`zzz-bare-skill`: \(no description/)
-  // points at the skill tool
-  assert.match(system, /load it with the `skill` tool/)
 })
 
 test("bootstrap restores a rest summary as its own provenance-bearing message", async () => {

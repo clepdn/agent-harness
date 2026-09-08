@@ -45,6 +45,51 @@ function memoryPath(relativePath: unknown): string {
   return resolved
 }
 
+function memoryReadTarget(input: unknown): { filePath: string; displayPath: string; root: string } {
+  if (typeof input !== "string" || !input.trim()) throw new Error("path is required")
+  const displayPath = input.trim()
+  const isUri = displayPath.startsWith("memory://")
+  const resource = isUri ? displayPath.slice("memory://".length) : displayPath
+  if (resource.includes("?") || resource.includes("#")) {
+    throw new Error("memory URI must not contain a query or fragment")
+  }
+
+  const normalized = resource.replace(/\\/g, "/").replace(/\/+$/, "")
+  if (isUri && normalized === "soul.md") {
+    return { filePath: path.join(NANO_HOME, "soul.md"), displayPath, root: NANO_HOME }
+  }
+  if (!isUri && !normalized) throw new Error("path is required")
+  if (normalized && path.posix.isAbsolute(normalized)) {
+    throw new Error("memory path must be relative")
+  }
+
+  const resolved = normalized ? path.resolve(MEMORY_ROOT, normalized) : MEMORY_ROOT
+  const relative = path.relative(MEMORY_ROOT, resolved)
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("memory path escapes the agent memory directory")
+  }
+  return { filePath: resolved, displayPath, root: MEMORY_ROOT }
+}
+
+async function verifyMemoryReadTarget(filePath: string, root: string): Promise<Stats> {
+  let stat: Stats
+  try {
+    stat = await fs.stat(filePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error(`memory path does not exist: ${filePath}`)
+    }
+    throw error
+  }
+
+  const [realRoot, realTarget] = await Promise.all([fs.realpath(root), fs.realpath(filePath)])
+  const relative = path.relative(realRoot, realTarget)
+  if (relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("memory path resolves outside the agent memory directory")
+  }
+  return stat
+}
+
 async function backupFile(filePath: string): Promise<void> {
   try {
     await fs.copyFile(filePath, `${filePath}.bak`)
@@ -109,6 +154,161 @@ async function prepareMemoryFile(filePath: string): Promise<void> {
 
 async function syncMemoryAfterWrite(): Promise<void> {
   if (isDbInitialized()) await syncMemoryIndex()
+}
+
+type MemoryFsOperation = "create" | "delete" | "move" | "copy"
+
+function parseMemoryFsOperation(input: unknown): MemoryFsOperation {
+  if (typeof input !== "string" || !["create", "delete", "move", "copy"].includes(input)) {
+    throw new Error("op must be create, delete, move, or copy")
+  }
+  return input as MemoryFsOperation
+}
+
+function memoryFsPath(input: unknown): { filePath: string; uri: string } {
+  if (typeof input !== "string" || !input.trim()) throw new Error("file_name is required")
+  const raw = input.trim()
+  if (raw.startsWith("local://")) throw new Error("local:// is allowed only as a copy source")
+  const resource = raw.startsWith("memory://") ? raw.slice("memory://".length) : raw
+  if (!resource || resource.includes("?") || resource.includes("#")) {
+    throw new Error("memory filesystem path must identify a resource without a query or fragment")
+  }
+  const normalized = resource.replace(/\\/g, "/").replace(/\/+$/, "")
+  if (!normalized || path.posix.isAbsolute(normalized)) {
+    throw new Error("memory filesystem path must be relative")
+  }
+  const filePath = path.resolve(MEMORY_ROOT, normalized)
+  const relative = path.relative(MEMORY_ROOT, filePath)
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("memory filesystem path escapes the agent memory directory")
+  }
+  return { filePath, uri: `memory://${relative.split(path.sep).join("/")}` }
+}
+
+function localFsPath(input: string): string {
+  const raw = input.trim()
+  if (!raw.startsWith("local://")) throw new Error("local copy sources must use local://")
+  const resource = raw.slice("local://".length)
+  if (!resource) throw new Error("local:// source must identify a file")
+  return path.isAbsolute(resource) ? path.normalize(resource) : path.resolve(process.cwd(), resource)
+}
+
+async function existingMemoryFsTarget(filePath: string): Promise<Stats> {
+  let rootStat: Stats
+  try {
+    rootStat = await fs.lstat(MEMORY_ROOT)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error("memory filesystem resource does not exist")
+    throw error
+  }
+  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error("agent memory root must be a real directory")
+
+  const parent = path.dirname(filePath)
+  let current = MEMORY_ROOT
+  for (const component of path.relative(MEMORY_ROOT, parent).split(path.sep).filter(Boolean)) {
+    current = path.join(current, component)
+    const stat = await fs.lstat(current).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") throw new Error("memory filesystem resource does not exist")
+      throw error
+    })
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error("memory filesystem path contains a non-directory or symbolic link")
+    }
+  }
+
+  const targetStat = await fs.lstat(filePath).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") throw new Error("memory filesystem resource does not exist")
+    throw error
+  })
+  if (targetStat.isSymbolicLink()) throw new Error("memory filesystem resources must not be symbolic links")
+  return targetStat
+}
+
+async function requireMissingMemoryFsTarget(filePath: string): Promise<void> {
+  try {
+    await fs.lstat(filePath)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return
+    throw error
+  }
+  throw new Error("memory filesystem destination already exists")
+}
+
+/** Create, delete, move, or copy a server-owned memory filesystem resource. */
+export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarget?: unknown): Promise<string> {
+  const operation = parseMemoryFsOperation(rawOperation)
+  const sourceIsLocal = typeof fileName === "string" && fileName.trim().startsWith("local://")
+  const targetProvided = rawTarget !== undefined
+
+  if (operation === "create") {
+    if (sourceIsLocal) throw new Error("create requires a memory-relative file_name")
+    if (targetProvided) throw new Error("create does not accept target")
+    const target = memoryFsPath(fileName)
+    await prepareMemoryFile(target.filePath)
+    await requireMissingMemoryFsTarget(target.filePath)
+    if (typeof fileName === "string" && fileName.trim().endsWith("/")) {
+      await fs.mkdir(target.filePath, { mode: 0o700 })
+    } else {
+      await fs.writeFile(target.filePath, Buffer.alloc(0), { flag: "wx", mode: 0o600 })
+    }
+    await syncMemoryAfterWrite()
+    return `created ${typeof fileName === "string" && fileName.trim().endsWith("/") ? "directory" : "file"} ${target.uri}`
+  }
+
+  if (operation === "delete") {
+    if (sourceIsLocal) throw new Error("delete requires a memory-relative file_name")
+    if (targetProvided) throw new Error("delete does not accept target")
+    const target = memoryFsPath(fileName)
+    const stat = await existingMemoryFsTarget(target.filePath)
+    if (target.filePath === path.join(MEMORY_ROOT, "core.md")) await backupFile(target.filePath)
+    if (stat.isDirectory()) {
+      await fs.rmdir(target.filePath)
+    } else {
+      await fs.unlink(target.filePath)
+    }
+    await syncMemoryAfterWrite()
+    return `deleted ${target.uri}`
+  }
+
+  if (typeof rawTarget !== "string" || !rawTarget.trim()) throw new Error(`${operation} requires target`)
+
+  if (operation === "move") {
+    if (sourceIsLocal) throw new Error("move requires a memory-relative file_name")
+    const source = memoryFsPath(fileName)
+    await existingMemoryFsTarget(source.filePath)
+    const destination = memoryFsPath(rawTarget)
+    await prepareMemoryFile(destination.filePath)
+    await requireMissingMemoryFsTarget(destination.filePath)
+    if (source.filePath === path.join(MEMORY_ROOT, "core.md")) await backupFile(source.filePath)
+    await fs.rename(source.filePath, destination.filePath)
+    await syncMemoryAfterWrite()
+    return `moved ${source.uri} -> ${destination.uri}`
+  }
+
+  let sourcePath: string
+  let sourceLabel: string
+  let sourceStat: Stats
+  if (sourceIsLocal) {
+    sourceLabel = (fileName as string).trim()
+    sourcePath = localFsPath(sourceLabel)
+    sourceStat = await fs.stat(sourcePath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") throw new Error("local copy source does not exist")
+      throw error
+    })
+  } else {
+    const source = memoryFsPath(fileName)
+    sourceLabel = source.uri
+    sourcePath = source.filePath
+    sourceStat = await existingMemoryFsTarget(sourcePath)
+  }
+  if (!sourceStat.isFile()) throw new Error("copy source must be a regular file")
+  const destination = memoryFsPath(rawTarget)
+  await prepareMemoryFile(destination.filePath)
+  await requireMissingMemoryFsTarget(destination.filePath)
+  await fs.copyFile(sourcePath, destination.filePath, constants.COPYFILE_EXCL)
+  await fs.chmod(destination.filePath, 0o600)
+  await syncMemoryAfterWrite()
+  return `copied ${sourceLabel} -> ${destination.uri} (${sourceStat.size} bytes)`
 }
 
 type MemoryResource = { filePath: string; indexed: boolean; backup: boolean; root: string }
@@ -369,7 +569,17 @@ async function getFilesRecursively(dir: string): Promise<string[]> {
 }
 
 export async function readMemory(relativePath: unknown, startLine?: unknown, endLine?: unknown): Promise<string> {
-  const filePath = memoryPath(relativePath)
+  const { filePath, displayPath, root } = memoryReadTarget(relativePath)
+  if (filePath === MEMORY_ROOT) await fs.mkdir(MEMORY_ROOT, { recursive: true, mode: 0o700 })
+  const stat = await verifyMemoryReadTarget(filePath, root)
+  if (stat.isDirectory()) {
+    const entries = (await fs.readdir(filePath)).filter((entry) => !entry.startsWith(".")).sort()
+    return `${displayPath} is a dir\n${entries.join("\n")}`
+  }
+  if (!stat.isFile() || path.extname(filePath).toLowerCase() !== ".md") {
+    throw new Error("memory path must identify a Markdown file or directory")
+  }
+
   let content: string
   try {
     content = await fs.readFile(filePath, "utf8")
@@ -409,14 +619,14 @@ export async function readMemory(relativePath: unknown, startLine?: unknown, end
   let selected = lines.slice(startIdx, effectiveEnd).join("\n")
   if (effectiveEnd < totalLines) {
     if (foundHeaderIdx !== -1) {
-      selected += `\n\n[Note: Content stopped before the next section header on line ${effectiveEnd + 1}. To read further, call 'memory_read' with start_line=${effectiveEnd + 1}.]`
+      selected += `\n\n[Note: Content stopped before the next section header on line ${effectiveEnd + 1}. To read further, call 'read_file' with start_line=${effectiveEnd + 1}.]`
     } else {
-      selected += `\n\n[Note: Content stopped due to the 100-line read limit. To read further, call 'memory_read' with start_line=${effectiveEnd + 1}.]`
+      selected += `\n\n[Note: Content stopped due to the 100-line read limit. To read further, call 'read_file' with start_line=${effectiveEnd + 1}.]`
     }
   }
   const rangeStr = `lines ${start}–${effectiveEnd}`
   const totalStr = totalLines > 0 ? ` of ${totalLines} total` : ""
-  return `[${relativePath}  ${rangeStr}${totalStr}]\n${selected}`
+  return `[${displayPath}  ${rangeStr}${totalStr}]\n${selected}`
 }
 
 export async function listMemory(): Promise<string> {
@@ -510,5 +720,3 @@ export async function loadSkill(name: unknown): Promise<string> {
   const body = content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, "").trimStart()
   return `[skill: ${base}]\n${body}`
 }
-
-export const __agentStateToolsTest = { memoryPath }

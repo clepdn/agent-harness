@@ -62,6 +62,7 @@ export function upsertDiscordChannel(record: DiscordChannelRecord): void {
 export function upsertDiscordMessage(record: DiscordMessageRecord): void {
   const db = getDb()
   const now = new Date().toISOString()
+  if (db.prepare("select 1 from discord_memory_prunes where message_id = ?").get(record.messageId)) return
 
   db.prepare(
     `insert into discord_messages (
@@ -114,6 +115,7 @@ export function upsertDiscordMessage(record: DiscordMessageRecord): void {
 export function upsertInboxItem(messageId: string, bucket: "dm" | "mention"): void {
   const db = getDb()
   const now = new Date().toISOString()
+  if (db.prepare("select 1 from discord_memory_prunes where message_id = ?").get(messageId)) return
 
   db.prepare(
     `insert into discord_items (

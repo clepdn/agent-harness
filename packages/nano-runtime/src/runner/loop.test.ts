@@ -60,15 +60,6 @@ test("pendingDiscordChannel ignores stale Discord context before the prior assis
   assert.equal(__loopTest.pendingDiscordChannel(conversation, conversation.length), undefined)
 })
 
-test("clearDiscordTypingScope clears manager state fields", () => {
-  const state = makeState()
-  state.discordTypingTurnId = "turn"
-  state.discordTypingChannelId = "channel"
-  __loopTest.clearDiscordTypingScope(state)
-  assert.equal(state.discordTypingTurnId, undefined)
-  assert.equal(state.discordTypingChannelId, undefined)
-})
-
 function makeTypingSupersessionHooks(state: LoopState, injected: UserMessage[]) {
   return {
     injectIncomingEvent: (_convId: number, event: UserMessage) => {
@@ -78,12 +69,14 @@ function makeTypingSupersessionHooks(state: LoopState, injected: UserMessage[]) 
   } as never
 }
 
-test("new Discord event supersedes typing scope after a tool", () => {
+test("new Discord event stops typing for the superseded turn", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })
   const state = makeState()
   const injected: UserMessage[] = []
+  const typingChannels: string[] = []
   state.discordTypingTurnId = "old-turn"
   state.discordTypingChannelId = "old-channel"
-  configureDiscordTyping(() => {})
+  configureDiscordTyping((channelId) => { typingChannels.push(channelId) })
   dispatchDiscordTyping("old-turn", "old-channel")
   notifyDiscordModelActivity("old-turn")
   state.pendingInputs.push({
@@ -96,21 +89,22 @@ test("new Discord event supersedes typing scope after a tool", () => {
   try {
     assert.equal(__loopToolsTest.maybeInterruptAfterTool(1, state, makeTypingSupersessionHooks(state, injected), [], 0), true)
     assert.equal(injected[0]?.source, "discord")
-    assert.equal(state.discordTypingTurnId, undefined)
-    assert.equal(state.discordTypingChannelId, undefined)
-    assert.equal(__discordTypingLeaseTest.active, null)
     assert.equal(__loopTest.pendingDiscordChannel(state.conversation, state.conversation.length), "new-channel")
+    t.mock.timers.tick(__discordTypingLeaseTest.fallbackMs + __discordTypingLeaseTest.refreshMs)
+    assert.deepEqual(typingChannels, ["old-channel"])
   } finally {
     __discordTypingLeaseTest.reset()
   }
 })
 
-test("new non-Discord event supersedes Discord typing scope after a tool", () => {
+test("new non-Discord event stops typing for the superseded Discord turn", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })
   const state = makeState()
   const injected: UserMessage[] = []
+  const typingChannels: string[] = []
   state.discordTypingTurnId = "old-turn"
   state.discordTypingChannelId = "old-channel"
-  configureDiscordTyping(() => {})
+  configureDiscordTyping((channelId) => { typingChannels.push(channelId) })
   dispatchDiscordTyping("old-turn", "old-channel")
   notifyDiscordModelActivity("old-turn")
   state.pendingInputs.push({
@@ -123,10 +117,9 @@ test("new non-Discord event supersedes Discord typing scope after a tool", () =>
   try {
     assert.equal(__loopToolsTest.maybeInterruptAfterTool(1, state, makeTypingSupersessionHooks(state, injected), [], 0), true)
     assert.equal(injected[0]?.source, "chat")
-    assert.equal(state.discordTypingTurnId, undefined)
-    assert.equal(state.discordTypingChannelId, undefined)
-    assert.equal(__discordTypingLeaseTest.active, null)
     assert.equal(__loopTest.pendingDiscordChannel(state.conversation, state.conversation.length), undefined)
+    t.mock.timers.tick(__discordTypingLeaseTest.fallbackMs + __discordTypingLeaseTest.refreshMs)
+    assert.deepEqual(typingChannels, ["old-channel"])
   } finally {
     __discordTypingLeaseTest.reset()
   }

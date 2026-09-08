@@ -153,6 +153,13 @@ export function initDb(dbPathOverride?: string): void {
       updated_at    text not null default (datetime('now'))
     );
 
+    create table if not exists discord_memory_prunes (
+      message_id    text primary key,
+      reason        text not null,
+      note          text,
+      pruned_at     text not null default (datetime('now'))
+    );
+
     create table if not exists discord_items (
       item_id         text primary key,
       message_id      text not null references discord_messages(message_id) on delete cascade,

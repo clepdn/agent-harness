@@ -134,9 +134,6 @@ export const __discordTypingLeaseTest = {
   fallbackMs: FALLBACK_MS,
   refreshMs: REFRESH_MS,
   longToolWaitMs: LONG_TOOL_WAIT_MS,
-  get active(): DiscordTypingLease | null {
-    return activeLease
-  },
   reset(): void {
     stopDiscordTyping()
     sender = null
