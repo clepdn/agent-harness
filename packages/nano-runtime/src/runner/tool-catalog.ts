@@ -53,6 +53,42 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
       memory: true,
     }),
     MEMORY_FS_TOOL_DEFINITION,
+    functionTool("job_list", "List background jobs and their current status.", emptyParameters),
+    functionTool(
+      "job_status",
+      "Inspect one background job by id, including its captured stdout length and any terminal error.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: { job_id: { type: "string" } },
+        required: ["job_id"],
+      },
+    ),
+    functionTool(
+      "job_stdout",
+      "Read captured stdout from a background job using half-open character offsets [start, end). Omit start to read from the beginning or omit end to read through the currently available output. Reads are capped by max_chars and return nextStart when more output remains.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          job_id: { type: "string" },
+          start: { type: "integer", minimum: 0 },
+          end: { type: "integer", minimum: 0 },
+          max_chars: { type: "integer", minimum: 1, maximum: 100000 },
+        },
+        required: ["job_id"],
+      },
+    ),
+    functionTool(
+      "job_cancel",
+      "Cancel one running background job by id.",
+      {
+        type: "object",
+        additionalProperties: false,
+        properties: { job_id: { type: "string" } },
+        required: ["job_id"],
+      },
+    ),
     functionTool(
       "edit_file",
       "Edit a client file or server-owned memory by replacing exactly one old_text occurrence. For memory:// URIs, use the exact content and documentHash returned by memory_search; set new_text to an empty string to expunge a bad fact.",

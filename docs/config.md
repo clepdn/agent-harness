@@ -196,6 +196,7 @@ The harness explains this capability when it assembles each fresh context. It do
 |---|---|---|
 | `bot_token` *(secret)* | — | Discord bot token. **Required** for any Discord functionality. Without it the gateway and REST client are both disabled. |
 | `bot_user_id` | *(auto-detected)* | Bot user id. Auto-populated from the gateway READY payload on first connect. |
+| `owner_id` | `""` | Discord user id allowed to use runtime control commands. The owner also receives deduplicated model API error DMs and can permanently mute one error fingerprint from its message button. |
 | `include_user_avatars` | `false` | Attach an author's Discord avatar the first time their message enters vision context, including wake events, inbox, backread, and search results. Deduplicated while their avatar remains in context; the bot uses the separate option below. |
 | `include_bot_avatar` | `false` | Attach the bot user's Discord avatar on each fresh context. Resuming a saved context retains the existing image. |
 | `scan_channel_ids` | `[]` | Channel ids the bot treats as its inbox. DMs are always included regardless. Example: `["1234567890", "0987654321"]`. |

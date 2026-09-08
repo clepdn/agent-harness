@@ -576,8 +576,9 @@ export async function readMemory(relativePath: unknown, startLine?: unknown, end
     const entries = (await fs.readdir(filePath)).filter((entry) => !entry.startsWith(".")).sort()
     return `${displayPath} is a dir\n${entries.join("\n")}`
   }
-  if (!stat.isFile() || path.extname(filePath).toLowerCase() !== ".md") {
-    throw new Error("memory path must identify a Markdown file or directory")
+  const extension = path.extname(filePath).toLowerCase()
+  if (!stat.isFile() || (extension !== ".md" && extension !== ".json")) {
+    throw new Error("memory path must identify a Markdown/JSON file or directory")
   }
 
   let content: string

@@ -54,6 +54,47 @@ function errorResult(invocation: ToolInvocation, error: unknown): ClientToolResu
   }
 }
 
+async function readOutputStream(
+  response: Response,
+  onOutput: (chunk: string) => void,
+): Promise<unknown> {
+  if (!response.body) throw new Error("client returned an empty output stream")
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let pending = ""
+  let result: unknown
+
+  const consume = (line: string): void => {
+    if (!line.trim()) return
+    const record = JSON.parse(line) as { type?: unknown; output?: unknown; result?: unknown; error?: unknown }
+    if (record.type === "tool.output" && typeof record.output === "string") {
+      try { onOutput(record.output) } catch {}
+      return
+    }
+    if (record.type === "tool.result") {
+      result = record.result
+      return
+    }
+    if (record.type === "transport.error") throw new Error(String(record.error ?? "tool output stream failed"))
+    throw new Error("client returned an invalid output stream record")
+  }
+
+  while (true) {
+    const { done, value } = await reader.read()
+    pending += decoder.decode(value, { stream: !done })
+    let newline = pending.indexOf("\n")
+    while (newline >= 0) {
+      consume(pending.slice(0, newline))
+      pending = pending.slice(newline + 1)
+      newline = pending.indexOf("\n")
+    }
+    if (done) break
+  }
+  consume(pending)
+  if (result === undefined) throw new Error("client output stream ended without a tool result")
+  return result
+}
+
 export class HttpToolClient implements ClientToolExecutor {
   private readonly agentId: string
   private readonly endpoint: string
@@ -126,6 +167,8 @@ export class HttpToolClient implements ClientToolExecutor {
     tool: ClientToolName
     args: Record<string, unknown>
     timeoutMs?: number
+    signal?: AbortSignal
+    onOutput?: (chunk: string) => void
   }): Promise<ClientToolResult> {
     const now = Date.now()
     const timeoutMs = Math.max(1_000, Math.min(MAX_TIMEOUT_MS, Math.trunc(input.timeoutMs ?? DEFAULT_TIMEOUT_MS)))
@@ -145,11 +188,20 @@ export class HttpToolClient implements ClientToolExecutor {
     try {
       const response = await this.fetchImpl(`${this.endpoint}/tools/${encodeURIComponent(input.tool)}`, {
         method: "POST",
-        headers: { "content-type": "application/json", ...this.authHeaders },
+        headers: {
+          "content-type": "application/json",
+          ...(input.onOutput ? { accept: "application/x-ndjson" } : {}),
+          ...this.authHeaders,
+        },
         body: JSON.stringify(invocation),
-        signal: AbortSignal.timeout(timeoutMs + 1_000),
+        signal: input.signal
+          ? AbortSignal.any([input.signal, AbortSignal.timeout(timeoutMs + 1_000)])
+          : AbortSignal.timeout(timeoutMs + 1_000),
       })
-      const raw = await response.json().catch(() => null)
+      const streamed = response.ok && response.headers.get("content-type")?.includes("application/x-ndjson") === true
+      const raw = streamed && input.onOutput
+        ? await readOutputStream(response, input.onOutput)
+        : await response.json().catch(() => null)
       if (!response.ok) {
         const message = raw && typeof raw === "object" && "error" in raw ? String(raw.error) : `${response.status} ${response.statusText}`
         throw new Error(message)
@@ -161,8 +213,11 @@ export class HttpToolClient implements ClientToolExecutor {
       this.markConnected()
       return result
     } catch (error) {
-      this.connected = false
-      return errorResult(invocation, error)
+      if (!input.signal?.aborted) this.connected = false
+      return {
+        ...errorResult(invocation, error),
+        ...(input.signal?.aborted ? { status: "cancelled" as const } : {}),
+      }
     } finally {
       this.pendingInvocations -= 1
     }

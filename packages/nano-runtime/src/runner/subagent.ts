@@ -97,6 +97,7 @@ export async function runSubagent(
   convId: number,
   subagent: SubagentConfig,
   task: string,
+  signal?: AbortSignal,
 ): Promise<string> {
   const { model, apiKey, toolChoice } = resolveSubagentModel(subagent)
   const tools = getSubagentTools(subagent.enabled_tools, subagent.blacklisted_tools)
@@ -124,6 +125,7 @@ export async function runSubagent(
     memoryRecallPending: false,
     shutdownRequested: false,
     turnInFlight: false,
+    operationSignal: signal,
     restRequested: false,
     restReason: "",
   }
@@ -159,7 +161,10 @@ export async function runSubagent(
       ...(apiKey ? { apiKey } : {}),
       toolChoice: resolvedToolChoice as "required" | "auto" | "none",
       ...(modelState.enableThinking ? { reasoningEffort: modelState.thinkingEffort } : {}),
+      ...(signal ? { signal } : {}),
     }
+
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("subagent interrupted")
 
     // Stream the completion
     const eventStream = stream(model, context, options)
@@ -174,6 +179,8 @@ export async function runSubagent(
     }
 
     const finalMessage = await (eventStream as { result(): Promise<AssistantMessage> }).result()
+
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("subagent interrupted")
 
     if (finalMessage.stopReason === "error" || errorMessage) {
       const errMsg = errorMessage ?? finalMessage.errorMessage ?? "unknown API error"
@@ -198,6 +205,7 @@ export async function runSubagent(
 
     // Process tool calls
     for (const call of toolCalls) {
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("subagent interrupted")
       const outcome = await executeToolCall(
         convId,
         state,

@@ -42,6 +42,18 @@ explicitly. `/model info` shows the current setting. Changes apply to subsequent
 Codex requests (including subagents and summaries); off uses the default service
 tier. The setting is local to the agent runtime and resets to off on restart.
 
+`/interrupt` stops the active model generation or foreground blocking job while
+keeping the session. `/discard` stops all session work, archives the raw snapshot
+as `memories/discarded-{datetime}.json`, and removes it from the active runner.
+Shell calls still running after two minutes detach automatically; the model can
+inspect their status and stdout or stop them with `job_list`, `job_status`,
+`job_stdout`, and `job_cancel`.
+
+The owner also receives a DM when a terminal model API error occurs, or when a
+transient error repeats three times. Alerts are deduplicated for six hours and
+include a **Mute this error forever** button. Muting is stored in `nano.db` and
+applies only to that error fingerprint.
+
 ## Agent memory
 
 Memory lives on the server under the agent's `home`, separate from any attached client:

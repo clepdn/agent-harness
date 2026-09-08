@@ -13,12 +13,13 @@ import { setRunnerPresence } from "./presence"
 import { createNiriToolCatalog } from "./tool-catalog"
 import { archiveContextMessages } from "./context-store"
 import type { RunnerStateInternal } from "./types"
-import { BOREDOM_WAKE_MS, clearSession, loadRestSnapshot, loadSession, quarantineSession, saveRestSnapshot, saveSession } from "./util"
+import { archiveDiscardedSession, BOREDOM_WAKE_MS, clearSession, loadRestSnapshot, loadSession, quarantineSession, saveRestSnapshot, saveSession } from "./util"
 import type { UserMessage, Message } from "../types"
 import type { ToolDefinition } from "@nano/harness-core"
 import { fromBoredom } from "../triggers/boredom"
 import { createBoredomTimer } from "./boredom-timer"
 import { discordEventImageReferences } from "../discord/context-avatars"
+import { cancelRunningJobs } from "./jobs"
 
 let shutdownResolvers: Array<() => void> = []
 const PROCESS_STARTED_AT = new Date().toISOString()
@@ -108,6 +109,28 @@ export function requestRest(reason: string): boolean {
 export function requestCompaction(): boolean {
   if (!state.running) return false
   state.compactionRequested = true
+  interruptEventWaiters()
+  return true
+}
+
+export type InterruptRequestResult = "interrupted" | "idle" | "not-running"
+
+/** Abort the active model generation or blocking tool without ending its session. */
+export function requestInterrupt(): InterruptRequestResult {
+  if (!state.running) return "not-running"
+  if (!state.turnInFlight && !state.toolInFlight) return "idle"
+  state.interruptRequested = true
+  state.activeTurnController?.abort(new Error("interrupted by Discord /interrupt"))
+  interruptEventWaiters()
+  return "interrupted"
+}
+
+/** Abort and archive the complete active session, including pending background jobs. */
+export function requestDiscard(): boolean {
+  if (!state.running) return false
+  state.discardRequested = true
+  state.activeTurnController?.abort(new Error("session discarded by Discord /discard"))
+  cancelRunningJobs("session discarded by Discord /discard")
   interruptEventWaiters()
   return true
 }
@@ -393,6 +416,8 @@ export async function wake(event: UserMessage): Promise<void> {
   state.memoryRecallPending = true
   state.restRequested = false
   state.restReason = ""
+  state.interruptRequested = false
+  state.discardRequested = false
 
   const saved = await loadSession()
   if (saved) {
@@ -422,6 +447,7 @@ export async function wake(event: UserMessage): Promise<void> {
   const convId = startConversation(event.source, event.triggeredAt)
   console.log("[runner] nano is awake")
 
+  let discarded = false
   try {
     const exit = await runLoop(convId, state, {
       clientTools,
@@ -437,7 +463,18 @@ export async function wake(event: UserMessage): Promise<void> {
       shouldShutdown: () => state.shutdownRequested,
       resolveShutdown,
     })
-    if (exit === "rest") setRunnerPresence("resting")
+    if (exit === "discard") {
+      discarded = true
+      const archive = await archiveDiscardedSession({
+        version: 1,
+        messages: state.conversation,
+        toolCatalog: state.toolCatalog,
+        toolCatalogEpoch: state.toolCatalogEpoch,
+        toolCatalogFingerprint: state.toolCatalogFingerprint,
+      })
+      console.log(`[runner] discarded session archived at ${archive}`)
+    }
+    setRunnerPresence("resting")
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     console.error(`[runner] loop aborted: ${message}`)
@@ -459,16 +496,21 @@ export async function wake(event: UserMessage): Promise<void> {
     state.memoryRecallPending = false
     state.shutdownRequested = false
     state.turnInFlight = false
+    state.activeTurnController = undefined
+    state.operationSignal = undefined
+    state.interruptRequested = false
+    state.discardRequested = false
     state.restRequested = false
     state.restReason = ""
-    if (!wasShutdownRequested) flushDeferredEvents()
+    if (!wasShutdownRequested && !discarded) flushDeferredEvents()
     state.deferredEvents = []
     eventResolvers = []
     resolveShutdown()
     setRunnerPresence("resting")
     console.log("[runner] nano is resting")
 
-    if (!wasShutdownRequested && state.pendingInputs.length > 0) {
+    if (discarded) state.pendingInputs = []
+    if (!wasShutdownRequested && !discarded && state.pendingInputs.length > 0) {
       const next = state.pendingInputs.shift()!
       console.log("[runner] pending event queued, waking again")
       await wake(next)

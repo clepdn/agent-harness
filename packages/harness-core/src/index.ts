@@ -26,6 +26,9 @@ export interface ClientToolExecutor {
     tool: ClientToolName
     args: Record<string, unknown>
     timeoutMs?: number
+    signal?: AbortSignal
+    /** Receives shell output incrementally while the invocation is running. */
+    onOutput?: (chunk: string) => void
   }): Promise<ClientToolResult>
 }
 
@@ -34,7 +37,11 @@ export interface ClientToolHost {
   stop(): Promise<void>
   getCapabilities(): ToolCapability[]
   getWorkspace(): WorkspaceDescriptor
-  execute(invocation: ToolInvocation): Promise<ClientToolResult>
+  execute(
+    invocation: ToolInvocation,
+    signal?: AbortSignal,
+    onOutput?: (chunk: string) => void,
+  ): Promise<ClientToolResult>
 }
 
 export type ClientToolCatalogOptions = {
@@ -93,7 +100,7 @@ export function createClientToolCatalog(options: ClientToolCatalogOptions = {}):
     tools.push(
       functionTool(
         "shell",
-        "Execute a bash command in a fresh process in the attached client workspace. Each call starts from the workspace root with a clean shell; set pty=true only when the command requires terminal semantics.",
+        "Execute a bash command in a fresh process in the attached client workspace. Each call starts from the workspace root with a clean shell; set pty=true only when the command requires terminal semantics. Commands still running after 120 seconds detach into a background job and return a job id.",
         {
           type: "object",
           additionalProperties: false,

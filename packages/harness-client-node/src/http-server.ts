@@ -32,6 +32,20 @@ function sendJson(response: http.ServerResponse, statusCode: number, body: unkno
   response.end(data)
 }
 
+function beginOutputStream(response: http.ServerResponse): void {
+  if (response.headersSent) return
+  response.writeHead(200, {
+    "content-type": "application/x-ndjson; charset=utf-8",
+    "cache-control": "no-store",
+  })
+}
+
+function writeOutputStreamRecord(response: http.ServerResponse, body: unknown): void {
+  if (response.destroyed || response.writableEnded) return
+  beginOutputStream(response)
+  response.write(`${JSON.stringify(body)}\n`)
+}
+
 async function readJson(request: http.IncomingMessage, limit: number): Promise<unknown> {
   const chunks: Buffer[] = []
   let bytes = 0
@@ -141,7 +155,34 @@ export class ToolClientHttpServer {
         sendJson(response, 400, { error: "invalid tool invocation" })
         return
       }
-      sendJson(response, 200, await this.toolHost.execute(invocation))
+      const controller = new AbortController()
+      const streamOutput = request.headers.accept?.includes("application/x-ndjson") === true
+      const abort = () => controller.abort(new Error("tool client disconnected"))
+      const abortOnClosedResponse = () => {
+        if (!response.writableEnded) abort()
+      }
+      request.once("aborted", abort)
+      response.once("close", abortOnClosedResponse)
+      try {
+        const result = await this.toolHost.execute(
+          invocation,
+          controller.signal,
+          streamOutput
+            ? (chunk) => writeOutputStreamRecord(response, { type: "tool.output", output: chunk })
+            : undefined,
+        )
+        if (!response.destroyed) {
+          if (streamOutput) {
+            writeOutputStreamRecord(response, { type: "tool.result", result })
+            response.end()
+          } else {
+            sendJson(response, 200, result)
+          }
+        }
+      } finally {
+        request.removeListener("aborted", abort)
+        response.removeListener("close", abortOnClosedResponse)
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       sendJson(response, message.includes("request body exceeds") ? 413 : 400, { error: message })

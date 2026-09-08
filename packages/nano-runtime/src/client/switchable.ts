@@ -125,6 +125,8 @@ export class SwitchableToolClient implements ConfiguredToolClient {
     tool: ClientToolName
     args: Record<string, unknown>
     timeoutMs?: number
+    signal?: AbortSignal
+    onOutput?: (chunk: string) => void
   }): Promise<ClientToolResult> {
     return this.active.execute(input)
   }

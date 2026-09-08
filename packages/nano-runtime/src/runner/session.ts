@@ -13,6 +13,7 @@ const DATA_DIR = NANO_HOME
 const REST_SNAPSHOT_FILE = path.join(DATA_DIR, ".nano-rest-snapshot.json")
 const SESSION_FILE = path.join(DATA_DIR, "session.json")
 const SESSION_BACKUP_FILE = path.join(DATA_DIR, "session.json.bak")
+const MEMORY_DIR = path.join(DATA_DIR, "memories")
 
 async function ensureDataDir(): Promise<void> {
   await fs.mkdir(DATA_DIR, { recursive: true, mode: 0o700 })
@@ -224,6 +225,20 @@ export async function clearSession(): Promise<void> {
     }
   }
   await Promise.all([unlinkIfPresent(SESSION_FILE), unlinkIfPresent(SESSION_BACKUP_FILE)])
+}
+
+/**
+ * Archive the latest in-memory session where the model can inspect it, then
+ * remove both resumable checkpoints so it cannot be resumed accidentally.
+ */
+export async function archiveDiscardedSession(snapshot: SessionSnapshot): Promise<string> {
+  const raw = JSON.stringify(snapshot, null, 2)
+  parseSession(raw)
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-")
+  const filename = `discarded-${timestamp}.json`
+  await atomicWriteFile(path.join(MEMORY_DIR, filename), raw)
+  await clearSession()
+  return `memory://${filename}`
 }
 
 /** Remove all resumable full-session checkpoints after an unrecoverable loop abort. */

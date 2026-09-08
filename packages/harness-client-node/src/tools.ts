@@ -23,10 +23,16 @@ export async function runCommand(
   timeoutMs?: number,
   pty = false,
   signal?: AbortSignal,
+  onOutput?: (chunk: string) => void,
 ): Promise<string> {
   const cap = resolveMaxLines(command, maxLines)
   const opTimeoutMs = normalizeTimeoutMs(timeoutMs, DEFAULT_COMMAND_TIMEOUT_MS)
-  const raw = await runRaw(command, { timeoutMs: opTimeoutMs, pty, ...(signal ? { signal } : {}) })
+  const raw = await runRaw(command, {
+    timeoutMs: opTimeoutMs,
+    pty,
+    ...(signal ? { signal } : {}),
+    ...(onOutput ? { onOutput } : {}),
+  })
 
   if (cap === 0) return raw
 

@@ -9,7 +9,7 @@ import type { Client, ChatInputCommandInteraction, AutocompleteInteraction } fro
 import { SlashCommandBuilder } from "discord.js"
 import { config, listModelPresets } from "../config"
 import { getCodexFastMode, setCodexFastMode } from "../codex-fast-mode"
-import { getRunnerStatus, isRunning, isWaitingForEvent, requestRest, requestCompaction } from "../runner/index"
+import { getRunnerStatus, isRunning, isWaitingForEvent, requestRest, requestCompaction, requestDiscard, requestInterrupt } from "../runner/index"
 import { modelState, evaluateModelSwap, applyModelSwap } from "../runner/model-state"
 import { startActivityTrace, getRecentActivity, formatActivityTrace } from "./activity-trace"
 import { getVoiceSessionStatus, joinOwnerVoice, leaveVoice, setVoice, SUPPORTED_VOICES } from "./voice"
@@ -63,6 +63,14 @@ const commands = [
   new SlashCommandBuilder()
     .setName("compact")
     .setDescription("Force a compaction pass now, regardless of token count")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("interrupt")
+    .setDescription("Interrupt the current generation or blocking job")
+    .toJSON(),
+  new SlashCommandBuilder()
+    .setName("discard")
+    .setDescription("Archive and discard the entire running session")
     .toJSON(),
   new SlashCommandBuilder()
     .setName("model")
@@ -155,6 +163,12 @@ export async function handleInteraction(
       break
     case "voice":
       await handleVoice(interaction)
+      break
+    case "interrupt":
+      await handleInterrupt(interaction)
+      break
+    case "discard":
+      await handleDiscard(interaction)
       break
     case "model":
       switch (subcommand) {
@@ -281,6 +295,26 @@ async function handleCompact(interaction: ChatInputCommandInteraction): Promise<
     content: idle
       ? "compacting now (was idle)"
       : "compaction queued - will run at the next idle wait",
+    ephemeral: true,
+  })
+}
+
+async function handleInterrupt(interaction: ChatInputCommandInteraction): Promise<void> {
+  const result = requestInterrupt()
+  const content = result === "interrupted"
+    ? "interrupt requested"
+    : result === "idle"
+      ? "the runner is idle - nothing to interrupt"
+      : "not running - nothing to interrupt"
+  await interaction.reply({ content, ephemeral: true })
+}
+
+async function handleDiscard(interaction: ChatInputCommandInteraction): Promise<void> {
+  const accepted = requestDiscard()
+  await interaction.reply({
+    content: accepted
+      ? "discarding the running session; its raw session JSON will be archived in `memories/`"
+      : "not running - no session to discard",
     ephemeral: true,
   })
 }

@@ -50,6 +50,51 @@ test("client serves health and tools without authentication", async () => {
   }
 })
 
+test("client streams incremental tool output as NDJSON when requested", async () => {
+  class StreamingHost extends FakeHost {
+    override async execute(
+      invocation: ToolInvocation,
+      _signal?: AbortSignal,
+      onOutput?: (chunk: string) => void,
+    ): Promise<ClientToolResult> {
+      onOutput?.("alpha")
+      await new Promise((resolve) => setTimeout(resolve, 10))
+      onOutput?.("beta")
+      return super.execute(invocation)
+    }
+  }
+
+  const server = new ToolClientHttpServer({ host: new StreamingHost(), listenHost: "127.0.0.1", port: 0 })
+  const address = await server.start()
+  try {
+    const invocation: ToolInvocation = {
+      type: "tool.call",
+      invocationId: "stream-one",
+      agentId: "mira",
+      tool: "shell",
+      args: { command: "done" },
+      issuedAt: new Date().toISOString(),
+      deadlineAt: new Date(Date.now() + 10_000).toISOString(),
+    }
+    const response = await fetch(`${address.url}/tools/shell`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "application/x-ndjson" },
+      body: JSON.stringify(invocation),
+    })
+    assert.equal(response.status, 200)
+    assert.match(response.headers.get("content-type") ?? "", /application\/x-ndjson/)
+    const records = (await response.text()).trim().split("\n").map((line) => JSON.parse(line))
+    assert.deepEqual(records.slice(0, 2), [
+      { type: "tool.output", output: "alpha" },
+      { type: "tool.output", output: "beta" },
+    ])
+    assert.equal(records[2]?.type, "tool.result")
+    assert.equal(records[2]?.result.output, "done")
+  } finally {
+    await server.stop()
+  }
+})
+
 test("client with authToken rejects requests missing or mismatching the bearer token", async () => {
   const server = new ToolClientHttpServer({ host: new FakeHost(), listenHost: "127.0.0.1", port: 0, authToken: "s3cret" })
   const address = await server.start()
@@ -69,6 +114,50 @@ test("client with authToken rejects requests missing or mismatching the bearer t
     // correct token
     const ok = await fetch(`${address.url}/health`, { headers: { authorization: "Bearer s3cret" } })
     assert.equal(ok.status, 200)
+  } finally {
+    await server.stop()
+  }
+})
+
+test("disconnecting a tool request aborts the host invocation", async () => {
+  let resolveAborted!: () => void
+  const aborted = new Promise<void>((resolve) => { resolveAborted = resolve })
+  class BlockingHost extends FakeHost {
+    override async execute(invocation: ToolInvocation, signal?: AbortSignal): Promise<ClientToolResult> {
+      await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }))
+      resolveAborted()
+      return {
+        type: "tool.result",
+        invocationId: invocation.invocationId,
+        agentId: invocation.agentId,
+        status: "cancelled",
+        completedAt: new Date().toISOString(),
+      }
+    }
+  }
+
+  const server = new ToolClientHttpServer({ host: new BlockingHost(), listenHost: "127.0.0.1", port: 0 })
+  const address = await server.start()
+  try {
+    const invocation: ToolInvocation = {
+      type: "tool.call",
+      invocationId: "interrupt-me",
+      agentId: "mira",
+      tool: "shell",
+      args: { command: "sleep 10" },
+      issuedAt: new Date().toISOString(),
+      deadlineAt: new Date(Date.now() + 10_000).toISOString(),
+    }
+    const controller = new AbortController()
+    const request = fetch(`${address.url}/tools/shell`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(invocation),
+      signal: controller.signal,
+    })
+    setTimeout(() => controller.abort(), 50)
+    await assert.rejects(request)
+    await aborted
   } finally {
     await server.stop()
   }

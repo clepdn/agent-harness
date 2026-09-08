@@ -171,7 +171,8 @@ gateway_enabled = true
 gateway_trace = false
 gateway_raw_fallback = true
 gateway_raw_fallback_all = false
-# Discord user ID of the owner. Only this user can use slash commands.
+# Discord user ID of the owner. Only this user can use control commands and
+# permanently mute deduplicated model API error alerts sent by DM.
 # Find your ID: enable Developer Mode in Discord settings, right-click your name, Copy ID.
 owner_id = ""
 # Enable owner-only /join, /leave, and /voice commands. Uses llm_bridge_url/key.

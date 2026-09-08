@@ -204,6 +204,20 @@ export function initDb(dbPathOverride?: string): void {
       updated_at text not null
     );
 
+    create table if not exists owner_api_alerts (
+      fingerprint      text primary key,
+      error_code       text not null,
+      first_seen_at    text not null,
+      last_seen_at     text not null,
+      occurrence_count integer not null default 1,
+      last_notified_at text,
+      muted_at         text,
+      muted_by         text
+    );
+
+    create index if not exists idx_owner_api_alerts_muted
+      on owner_api_alerts(muted_at, last_seen_at desc);
+
     create table if not exists discord_user_pronouns (
       user_id    text primary key,
       pronouns   text not null,

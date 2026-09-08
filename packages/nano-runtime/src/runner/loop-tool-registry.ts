@@ -27,7 +27,7 @@ import { checkGitUpstream } from "./git-upstream-check"
 import { GIT_UPSTREAM_NAG } from "./config"
 import { pushToolMessage, recordToolResult, runStandardTool, toolError } from "./loop-tool-runtime"
 import { findSubagent, runSubagent } from "./subagent"
-import { startJob } from "./jobs"
+import { cancelJob, forgetJob, getJob, listJobs, readJobStdout, runJobUntilDetached, startJob, type Job } from "./jobs"
 import { describeContextSummary, expandContextSummary, grepContext } from "./context-store"
 import { clearSession, saveRestSnapshot } from "./util"
 import { compactForShutdown } from "./loop"
@@ -37,12 +37,32 @@ const DEFAULT_WAIT_THEN_CONTINUE_MS = 10_000
 // Screenshot capture alone allows 30s at the client; keep the invocation
 // deadline clear of it.
 const COMPUTER_TIMEOUT_MS = 60_000
+export const SHELL_DETACH_AFTER_MS = 120_000
+
+function jobView(job: Job): Record<string, unknown> {
+  const finishedAt = job.completedAt ?? Date.now()
+  return {
+    id: job.id,
+    name: job.name,
+    status: job.status,
+    startedAt: new Date(job.startedAt).toISOString(),
+    ...(job.completedAt ? { completedAt: new Date(job.completedAt).toISOString() } : {}),
+    elapsedMs: Math.max(0, finishedAt - job.startedAt),
+    stdoutLength: job.stdout.length,
+    ...(job.error !== undefined ? { error: job.error } : {}),
+  }
+}
 
 /**
  * Invoke a tool on the attached client. Undefined args are dropped so the
  * client sees only what the model actually supplied.
  */
-async function runClientTool(tool: ClientToolName, args: Record<string, unknown>): Promise<string> {
+async function runClientTool(
+  tool: ClientToolName,
+  args: Record<string, unknown>,
+  signal?: AbortSignal,
+  onOutput?: (chunk: string) => void,
+): Promise<string> {
   const supplied: Record<string, unknown> = {}
   for (const [key, value] of Object.entries(args)) {
     if (value !== undefined) supplied[key] = value
@@ -52,6 +72,8 @@ async function runClientTool(tool: ClientToolName, args: Record<string, unknown>
     tool,
     args: supplied,
     ...(typeof args.timeout_ms === "number" ? { timeoutMs: args.timeout_ms } : {}),
+    ...(signal ? { signal } : {}),
+    ...(onOutput ? { onOutput } : {}),
   })
   if (result.status === "ok") return result.output ?? ""
   return result.output?.startsWith("error:") ? result.output : `error: ${result.output ?? `${tool} failed`}`
@@ -61,12 +83,13 @@ async function runClientTool(tool: ClientToolName, args: Record<string, unknown>
  * Fetch an image artifact from the attached client. Throws so the caller's
  * existing catch records the failure as a tool error.
  */
-async function runClientImageTool(path: string, timeoutMs?: number): Promise<ClientImageArtifact> {
+async function runClientImageTool(path: string, timeoutMs?: number, signal?: AbortSignal): Promise<ClientImageArtifact> {
   const result = await clientTools.execute({
     agentId: AGENT_ID,
     tool: "image_tool",
     args: { path },
     ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+    ...(signal ? { signal } : {}),
   })
   if (result.status !== "ok" || !result.image) throw new Error(result.output ?? "image_tool returned no image")
   return result.image
@@ -145,13 +168,85 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       return { shouldRest: true }
     },
 
-    shell: (ctx) =>
+    shell: async (ctx) => {
+      const { command, max_lines, timeout_ms, pty } = ctx.args
+      console.log("[shell]", command, timeout_ms, pty)
+      const displayName = `shell:${String(command ?? "").slice(0, 80)}`
+      const outcome = await runJobUntilDetached(
+        displayName,
+        async (signal, onStdout) => {
+          const output = await runClientTool("shell", { command, max_lines, timeout_ms, pty }, signal, onStdout)
+          if (output.startsWith("error:")) throw new Error(output.replace(/^error:\s*/, ""))
+          return output
+        },
+        ctx.state.operationSignal,
+        SHELL_DETACH_AFTER_MS,
+      )
+
+      let content: string
+      if (outcome.detached) {
+        content = `shell command is still running and was detached as background job ${outcome.jobId}. use job_status to inspect it, job_stdout to read captured output, or job_cancel to stop it; completion or failure will wake you.`
+      } else {
+        const { job } = outcome
+        content = job.status === "completed"
+          ? job.result || "(no output)"
+          : `error: ${job.error ?? `shell job ${job.status}`}`
+        forgetJob(job.id)
+      }
+      console.log("[shell result]", content.slice(0, 200))
+      recordToolResult(ctx.convId, ctx.state, ctx.call, "shell", ctx.args, content)
+      return {}
+    },
+
+    job_list: (ctx) =>
       runStandardTool(ctx, {
-        name: "shell",
-        logArgKeys: ["command", "timeout_ms", "pty"] as const,
-        runArgKeys: ["command", "max_lines", "timeout_ms", "pty"] as const,
-        run: (command, max_lines, timeout_ms, pty) => runClientTool("shell", { command, max_lines, timeout_ms, pty }),
-        emptyFallback: "(no output)",
+        name: "job_list",
+        logArgKeys: [] as const,
+        runArgKeys: [] as const,
+        run: async () => JSON.stringify({ jobs: listJobs().map((job) => jobView(job)) }, null, 2),
+      }),
+
+    job_status: (ctx) =>
+      runStandardTool(ctx, {
+        name: "job_status",
+        logArgKeys: ["job_id"] as const,
+        runArgKeys: ["job_id"] as const,
+        run: async (jobId) => {
+          const job = getJob(String(jobId ?? ""))
+          if (!job) throw new Error(`job not found: ${String(jobId ?? "")}`)
+          return JSON.stringify(jobView(job), null, 2)
+        },
+      }),
+
+    job_stdout: (ctx) =>
+      runStandardTool(ctx, {
+        name: "job_stdout",
+        logArgKeys: ["job_id", "start", "end", "max_chars"] as const,
+        runArgKeys: ["job_id", "start", "end", "max_chars"] as const,
+        run: async (jobId, start, end, maxChars) => JSON.stringify(
+          readJobStdout(
+            String(jobId ?? ""),
+            start === undefined ? 0 : Number(start),
+            end === undefined ? undefined : Number(end),
+            maxChars === undefined ? 20_000 : Number(maxChars),
+          ),
+          null,
+          2,
+        ),
+      }),
+
+    job_cancel: (ctx) =>
+      runStandardTool(ctx, {
+        name: "job_cancel",
+        logArgKeys: ["job_id"] as const,
+        runArgKeys: ["job_id"] as const,
+        run: async (jobId) => {
+          const id = String(jobId ?? "")
+          const result = cancelJob(id, "cancelled by job_cancel")
+          if (result === "not-found") throw new Error(`job not found: ${id}`)
+          if (result === "not-running") throw new Error(`job is not running: ${id}`)
+          return JSON.stringify({ ok: true, job_id: id, status: "cancelled" })
+        },
       }),
 
     read_file: async (ctx) => {
@@ -181,7 +276,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         logArgKeys: ["path", "start_line", "end_line", "timeout_ms"] as const,
         runArgKeys: ["path", "start_line", "end_line", "timeout_ms"] as const,
         run: (path, start_line, end_line, timeout_ms) =>
-          runClientTool("read_file", { path, start_line, end_line, timeout_ms }),
+          runClientTool("read_file", { path, start_line, end_line, timeout_ms }, ctx.state.operationSignal),
         emptyFallback: "(empty file)",
       })
       if (GIT_UPSTREAM_NAG) {
@@ -248,7 +343,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         logArgKeys: ["path", "timeout_ms"] as const,
         runArgKeys: ["path", "edits", "old_text", "new_text", "timeout_ms"] as const,
         run: (path, edits, old_text, new_text, timeout_ms) =>
-          runClientTool("edit_file", { path, edits, old_text, new_text, timeout_ms }),
+          runClientTool("edit_file", { path, edits, old_text, new_text, timeout_ms }, ctx.state.operationSignal),
         emitArgKeys: ["path"] as const,
         previewChars: 0,
       })
@@ -411,7 +506,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       let result: string
 
       try {
-        const image = await runClientImageTool(args.path as string, args.timeout_ms as number | undefined)
+        const image = await runClientImageTool(args.path as string, args.timeout_ms as number | undefined, state.operationSignal)
         const note =
           typeof args.note === "string" && args.note.trim()
             ? args.note.trim()
@@ -636,13 +731,13 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       if (blocking) {
         console.log(`[subagent] main agent spawning "${name}" (blocking) with task: ${task.slice(0, 200)}`)
         try {
-          const result = await runSubagent(convId, subagentConfig, task)
+          const result = await runSubagent(convId, subagentConfig, task, state.operationSignal)
           recordToolResult(convId, state, call, "subagent", { name, task: task.slice(0, 500), blocking: true }, result)
         } catch (err) {
           recordToolResult(convId, state, call, "subagent", { name, task: task.slice(0, 500), blocking: true }, toolError(err))
         }
       } else {
-        const jobId = startJob(`subagent:${name}`, () => runSubagent(convId, subagentConfig, task))
+        const jobId = startJob(`subagent:${name}`, (signal) => runSubagent(convId, subagentConfig, task, signal))
         console.log(`[subagent] main agent spawned "${name}" as job ${jobId} with task: ${task.slice(0, 200)}`)
         recordToolResult(
           convId, state, call, "subagent",
@@ -674,6 +769,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
             ...(config.computer_use.display ? { display: config.computer_use.display } : {}),
           },
           timeoutMs: COMPUTER_TIMEOUT_MS,
+          ...(state.operationSignal ? { signal: state.operationSignal } : {}),
         })
         if (res.status !== "ok") throw new Error(res.output ?? "computer action failed")
 

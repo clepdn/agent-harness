@@ -19,6 +19,11 @@ import { subscribeRunnerPresence, type RunnerPresence } from "../runner/presence
 import { startStatusUpdater, stopStatusUpdater } from "./status-updater"
 import { getVoiceSessionStatus, isVoiceChannelEmpty, leaveVoice, setVoiceDelegationCallback, stopDiscordVoice } from "./voice"
 import { startPrometheusServer, stopPrometheusServer } from "../prometheus"
+import {
+  configureOwnerAlertSender,
+  handleOwnerAlertButton,
+  isOwnerAlertButton,
+} from "./owner-alerts"
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value.trim() : ""
@@ -314,10 +319,12 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
         await handleInteraction(interaction)
       } else if (interaction.isAutocomplete()) {
         await handleAutocomplete(interaction)
+      } else if (interaction.isButton() && isOwnerAlertButton(interaction)) {
+        await handleOwnerAlertButton(interaction)
       }
     } catch (err) {
-      console.warn("[slash] interaction error:", err instanceof Error ? err.message : String(err))
-      if (interaction.isChatInputCommand() && !interaction.replied) {
+      console.warn("[discord] interaction error:", err instanceof Error ? err.message : String(err))
+      if ((interaction.isChatInputCommand() || interaction.isButton()) && !interaction.replied && !interaction.deferred) {
         await interaction.reply({ content: "an error occurred", ephemeral: true }).catch(() => {})
       }
     }
@@ -328,9 +335,16 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
   })
 
   await client.login(token)
+  configureOwnerAlertSender(async (payload) => {
+    const ownerId = config.discord.owner_id
+    if (!ownerId) return
+    const owner = await client.users.fetch(ownerId)
+    await owner.send(payload)
+  })
 
   return {
     stop: async () => {
+      configureOwnerAlertSender(null)
       unsubscribePresence?.()
       stopStatusUpdater()
       stopPrometheusServer()

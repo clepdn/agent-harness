@@ -24,6 +24,33 @@ test("voice commands are registered alongside /fast", async () => {
   ])
 })
 
+test("/interrupt and /discard are registered as top-level commands", async () => {
+  let commands: any[] = []
+  await registerSlashCommands({
+    application: { commands: { set: async (value: any[]) => { commands = value } } },
+  } as unknown as Client)
+  assert.ok(commands.some((entry) => entry.name === "interrupt"))
+  assert.ok(commands.some((entry) => entry.name === "discard"))
+})
+
+test("/interrupt and /discard report when no session is running", async (t) => {
+  const previousOwner = config.discord.owner_id
+  t.after(() => { config.discord.owner_id = previousOwner })
+  config.discord.owner_id = "owner"
+  const replies: { content: string; ephemeral: boolean }[] = []
+  for (const commandName of ["interrupt", "discard"]) {
+    await handleInteraction({
+      user: { id: "owner" },
+      commandName,
+      options: { getSubcommand: () => null },
+      reply: async (reply: { content: string; ephemeral: boolean }) => { replies.push(reply) },
+    } as unknown as ChatInputCommandInteraction)
+  }
+  assert.match(replies[0]!.content, /not running/)
+  assert.match(replies[1]!.content, /not running/)
+  assert.ok(replies.every((reply) => reply.ephemeral))
+})
+
 test("/fast requires the owner, toggles, accepts explicit values, and appears in model info", async (t) => {
   const previousOwner = config.discord.owner_id
   const previousMode = getCodexFastMode()

@@ -7,6 +7,7 @@ export interface RunRawOptions {
   timeoutMs?: number
   pty?: boolean
   signal?: AbortSignal
+  onOutput?: (chunk: string) => void
 }
 
 export interface ImageToolPayload {

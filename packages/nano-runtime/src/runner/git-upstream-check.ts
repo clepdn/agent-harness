@@ -11,13 +11,15 @@ const THROTTLE_MS = 10 * 60 * 1000 // 10 minutes
 /** In-flight checks: toplevel → boolean (prevents concurrent fetches for same repo). */
 const inFlight = new Set<string>()
 
+type GitResult = { ok: boolean; output: string }
+type GitRunner = (directory: string, args: string, timeoutMs: number) => Promise<GitResult>
+
 /**
  * Run git where the files actually are: on the attached client. The repo the
  * agent edits lives in its workspace, which is a different machine whenever
- * the executor is remote. Output is combined and git reports failure in the
- * text, because the client shell does not surface exit codes.
+ * the executor is remote.
  */
-async function clientGit(directory: string, args: string, timeoutMs: number): Promise<string> {
+async function clientGit(directory: string, args: string, timeoutMs: number): Promise<GitResult> {
   const target = `'${directory.replace(/'/g, "'\\''")}'`
   const result = await clientTools.execute({
     agentId: AGENT_ID,
@@ -25,8 +27,30 @@ async function clientGit(directory: string, args: string, timeoutMs: number): Pr
     args: { command: `git -C ${target} ${args} 2>&1`, max_lines: 0, timeout_ms: timeoutMs },
     timeoutMs: timeoutMs + 5_000,
   })
-  if (result.status !== "ok") return ""
-  return (result.output ?? "").trim()
+  return {
+    ok: result.status === "ok",
+    output: (result.output ?? "").trim(),
+  }
+}
+
+export type RemoteRefCheck = "changed" | "unchanged" | "failed"
+
+/** Fetch and compare remote-tracking refs; fetch output itself is not state. */
+export async function fetchRemoteRefChanges(
+  toplevel: string,
+  runGit: GitRunner = clientGit,
+): Promise<RemoteRefCheck> {
+  const snapshotArgs = "for-each-ref --format='%(refname) %(objectname)' refs/remotes"
+  const before = await runGit(toplevel, snapshotArgs, 5_000)
+  if (!before.ok) return "failed"
+
+  const fetched = await runGit(toplevel, "fetch", 30_000)
+  if (!fetched.ok) return "failed"
+
+  const after = await runGit(toplevel, snapshotArgs, 5_000)
+  if (!after.ok) return "failed"
+
+  return before.output === after.output ? "unchanged" : "changed"
 }
 
 /**
@@ -47,7 +71,9 @@ export function checkGitUpstream(
     let toplevel: string
     try {
       const dir = path.dirname(filePath)
-      const firstLine = (await clientGit(dir, "rev-parse --show-toplevel", 5000)).split("\n")[0] ?? ""
+      const result = await clientGit(dir, "rev-parse --show-toplevel", 5000)
+      if (!result.ok) return
+      const firstLine = result.output.split("\n")[0] ?? ""
       toplevel = firstLine.trim()
       if (!toplevel.startsWith("/")) return // not in a git repo
     } catch {
@@ -64,13 +90,13 @@ export function checkGitUpstream(
     inFlight.add(toplevel)
 
     try {
-      // 4. Run git fetch
-      const output = await clientGit(toplevel, "fetch", 30000)
-      // fetch failed — don't throttle, let it retry
-      if (/^(fatal|error):/m.test(output)) return
+      // 4. Snapshot remote-tracking refs around the fetch. A remote helper or
+      // hook may print on every fetch, so output is not evidence of a change.
+      const remoteRefs = await fetchRemoteRefChanges(toplevel)
+      if (remoteRefs === "failed") return // don't throttle; let it retry
 
-      // 5. If fetch output is non-empty, upstream has changed — nag
-      if (output) {
+      // 5. Nag only when fetch actually moved, created, or deleted a remote ref.
+      if (remoteRefs === "changed") {
         const nag = `[system] This repo's remote has been updated! (${toplevel})\nRecent changes fetched from upstream. You may need to pull and rebase your local changes to stay in sync.`
         state.conversation.push({
           role: "user",

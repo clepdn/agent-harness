@@ -44,7 +44,7 @@ enum CycleOutcome {
   Rest = "rest",
 }
 
-export type RunLoopExit = "rest"
+export type RunLoopExit = "rest" | "discard"
 
 async function waitForNextEvent(
   convId: number,
@@ -113,7 +113,7 @@ async function processAssistantTurn(convId: number, state: LoopState, hooks: Loo
   if (state.toolCatalogFingerprint && fingerprint !== state.toolCatalogFingerprint) {
     throw new Error(`tool catalog epoch ${state.toolCatalogEpoch} mutated in place`)
   }
-  const response = await fetchCompletion(state, state.toolCatalog)
+  const response = await fetchCompletion(state, state.toolCatalog, state, state.operationSignal)
   // follow-up iterations that work through the same incoming event.
   state.memoryRecallPending = false
   applyUsage(state, response.usage, {
@@ -487,6 +487,13 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
   try {
   while (true) {
     hooks.onTurnStart?.()
+    if (state.discardRequested) {
+      console.log("[runner] session discard requested")
+      clearDiscordTypingScope(state)
+      setWorking(false)
+      setPromWorking(false)
+      return "discard"
+    }
     // Check for programmatic rest at the top of each iteration.
     // This catches rest requested during event wait (waitForNextEvent returns
     // null, loop continues here) and during tool processing.
@@ -501,6 +508,12 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
 
     const compacted = await applyCompaction(state, "pre-turn")
     if (compacted === "rewritten") hooks.refreshToolCatalog("post-compaction")
+    if (state.discardRequested) {
+      clearDiscordTypingScope(state)
+      setWorking(false)
+      setPromWorking(false)
+      return "discard"
+    }
 
     const turnStart = state.conversation.length
     const typingTurnId = state.discordTypingTurnId ?? `${convId}:${turnCount + 1}`
@@ -513,18 +526,55 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       }
     }
 
+    const turnController = new AbortController()
+    state.activeTurnController = turnController
+    state.operationSignal = turnController.signal
+    state.turnInFlight = true
     setWorking(true)
     setPromWorking(true)
-    let outcome: CycleOutcome
+    let outcome: CycleOutcome | undefined
+    let interrupted = false
     try {
       outcome = await processAssistantTurn(convId, state, hooks)
     } catch (err) {
       clearDiscordTypingScope(state)
       setWorking(false)
       setPromWorking(false)
-      throw err
+      if (state.discardRequested) return "discard"
+      if (state.interruptRequested || turnController.signal.aborted) {
+        console.log("[runner] active turn interrupted by operator")
+        state.interruptRequested = false
+        interrupted = true
+      } else {
+        throw err
+      }
+    } finally {
+      state.turnInFlight = false
+      state.operationSignal = undefined
+      if (state.activeTurnController === turnController) state.activeTurnController = undefined
     }
+    if (interrupted) {
+      await waitForNextEvent(convId, state, hooks)
+      continue
+    }
+    if (!outcome) throw new Error("assistant turn completed without an outcome")
     turnCount += 1
+
+    if (state.discardRequested) {
+      clearDiscordTypingScope(state)
+      setWorking(false)
+      setPromWorking(false)
+      return "discard"
+    }
+    if (state.interruptRequested || turnController.signal.aborted) {
+      console.log("[runner] active turn interrupted by operator")
+      state.interruptRequested = false
+      clearDiscordTypingScope(state)
+      setWorking(false)
+      setPromWorking(false)
+      await waitForNextEvent(convId, state, hooks)
+      continue
+    }
 
     const turnMessages = state.conversation.slice(turnStart)
     const interruptedByUserEvent = hasIncomingUserMessage(turnMessages)

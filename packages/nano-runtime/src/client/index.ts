@@ -65,6 +65,8 @@ class LocalToolClient implements ConfiguredToolClient {
     tool: ClientToolName
     args: Record<string, unknown>
     timeoutMs?: number
+    signal?: AbortSignal
+    onOutput?: (chunk: string) => void
   }): Promise<ClientToolResult> {
     const now = Date.now()
     const invocation: ToolInvocation = {
@@ -76,7 +78,7 @@ class LocalToolClient implements ConfiguredToolClient {
       issuedAt: new Date(now).toISOString(),
       deadlineAt: new Date(now + (input.timeoutMs ?? 30_000)).toISOString(),
     }
-    return this.host.execute(invocation)
+    return this.host.execute(invocation, input.signal, input.onOutput)
   }
 }
 

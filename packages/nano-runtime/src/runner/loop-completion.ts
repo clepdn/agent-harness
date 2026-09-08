@@ -29,6 +29,8 @@ import {
 } from "./util"
 import type { CompletionTurnResult } from "./loop-shared"
 import type { Model } from "../llm"
+import { classifyApiError } from "../api-errors"
+import { reportApiError } from "../discord/owner-alerts"
 
 /** The currently active model pair (fallback when degraded, else primary). */
 export function activeModelProvider(): { model: Model | null; apiKey: string | undefined } {
@@ -141,6 +143,29 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (!signal?.aborted) return
+  throw signal.reason instanceof Error ? signal.reason : new Error("Request was aborted")
+}
+
+async function interruptibleSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (!signal) return sleep(ms)
+  throwIfAborted(signal)
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(finish, ms)
+    function finish(): void {
+      signal!.removeEventListener("abort", abort)
+      resolve()
+    }
+    function abort(): void {
+      clearTimeout(timer)
+      signal!.removeEventListener("abort", abort)
+      reject(signal!.reason instanceof Error ? signal!.reason : new Error("Request was aborted"))
+    }
+    signal.addEventListener("abort", abort, { once: true })
+  })
+}
+
 /**
  * Streams one completion from a model.
  */
@@ -150,6 +175,7 @@ async function createStreamedCompletion(
   toolChoice: "required" | "auto" | "none",
   state: LoopState,
   tools?: ToolDefinition[],
+  signal?: AbortSignal,
 ): Promise<CompletionTurnResult> {
   const startedAt = Date.now()
   const context = buildContext(state, tools)
@@ -160,6 +186,7 @@ async function createStreamedCompletion(
     ...(apiKey ? { apiKey } : {}),
     toolChoice: resolvedToolChoice,
     ...(modelState.enableThinking ? { reasoningEffort: modelState.thinkingEffort } : {}),
+    ...(signal ? { signal } : {}),
   }
 
   const eventStream = stream(model, context, options)
@@ -206,11 +233,11 @@ async function createStreamedCompletion(
 
   return { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond }
 }
-async function createFallbackCompletion(state: LoopState, tools?: ToolDefinition[]): Promise<CompletionTurnResult> {
-  return createStreamedCompletion(modelState.fallbackModel, modelState.fallbackApiKey, modelState.fallbackToolChoice, state, tools)
+async function createFallbackCompletion(state: LoopState, tools?: ToolDefinition[], signal?: AbortSignal): Promise<CompletionTurnResult> {
+  return createStreamedCompletion(modelState.fallbackModel, modelState.fallbackApiKey, modelState.fallbackToolChoice, state, tools, signal)
 }
-async function createPrimaryCompletion(state: LoopState, tools?: ToolDefinition[]): Promise<CompletionTurnResult> {
-  return createStreamedCompletion(modelState.primaryModel!, modelState.primaryApiKey, modelState.primaryToolChoice, state, tools)
+async function createPrimaryCompletion(state: LoopState, tools?: ToolDefinition[], signal?: AbortSignal): Promise<CompletionTurnResult> {
+  return createStreamedCompletion(modelState.primaryModel!, modelState.primaryApiKey, modelState.primaryToolChoice, state, tools, signal)
 }
 
 function logPromptSizeDebug(state: LoopState, errMsg: string, label: string): void {
@@ -220,6 +247,17 @@ function logPromptSizeDebug(state: LoopState, errMsg: string, label: string): vo
   console.warn(
     `[api] ${label}: ${errMsg} - messages=${messageCount} est_tokens=${estimate} chars=${charLength} observedPromptTokens=${state.contextSize}`,
   )
+}
+
+function noteApiError(errorMessage: string, role: "primary" | "fallback", model: Model) {
+  const classified = classifyApiError(errorMessage, {
+    role,
+    model: model.id,
+    provider: model.provider,
+    baseUrl: model.baseUrl,
+  })
+  void reportApiError(classified)
+  return classified
 }
 
 async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Promise<boolean> {
@@ -271,6 +309,7 @@ export async function fetchCompletion(
   state: LoopState,
   tools?: ToolDefinition[],
   _baseState: LoopState = state,
+  signal?: AbortSignal,
 ): Promise<CompletionTurnResult> {
   let promptTooLargeAttempts = 0
   let imagesScrubbed = false
@@ -290,6 +329,7 @@ export async function fetchCompletion(
   }
 
   while (true) {
+    throwIfAborted(signal)
     state.conversation = sanitizeMessages(state.conversation)
 
     const requestState = state.memoryRecallPending
@@ -308,12 +348,14 @@ export async function fetchCompletion(
       }
 
       try {
-        const completion = await createFallbackCompletion(requestState, tools)
+        const completion = await createFallbackCompletion(requestState, tools, signal)
         state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
         state.memoryRecallPending = false
         return completion
       } catch (fallbackErr) {
+        throwIfAborted(signal)
         const errMsg = errorSummary(fallbackErr)
+        const failure = noteApiError(errMsg, "fallback", modelState.fallbackModel)
         if (isPromptTooLargeError(errMsg) && promptTooLargeAttempts < 2) {
           logPromptSizeDebug(state, errMsg, `fallback rejected prompt (attempt ${promptTooLargeAttempts + 1}/2)`)
           const recovered = await recoverFromPromptTooLarge(state, promptTooLargeAttempts)
@@ -321,9 +363,14 @@ export async function fetchCompletion(
           if (recovered) continue
         }
         if (recoverByScrubbingImages(errMsg, "fallback")) continue
+        if (failure.terminal) {
+          console.error(`[api] terminal fallback error: ${errMsg} model=${modelState.fallbackModel.id} api=${modelState.fallbackModel.baseUrl}`)
+          recordLlmRequest(modelState.fallbackModel.id, "error", null)
+          throw fallbackErr
+        }
         if (shouldFallback(errMsg)) {
           console.warn(`[fallback] transient failure (${errMsg}); retrying after ${Math.ceil(retryDelayMs / 1000)}s`)
-          await sleep(retryDelayMs)
+          await interruptibleSleep(retryDelayMs, signal)
           continue
         }
         console.error(`[api] fallback error: ${errMsg} model=${modelState.fallbackModel.id} api=${modelState.fallbackModel.baseUrl}`)
@@ -333,12 +380,14 @@ export async function fetchCompletion(
     }
 
     try {
-      const completion = await createPrimaryCompletion(requestState, tools)
+      const completion = await createPrimaryCompletion(requestState, tools, signal)
       state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
       state.memoryRecallPending = false
       return completion
     } catch (primaryErr) {
+      throwIfAborted(signal)
       const errMsg = errorSummary(primaryErr)
+      const primaryFailure = noteApiError(errMsg, "primary", modelState.primaryModel!)
       if (isPromptTooLargeError(errMsg) && promptTooLargeAttempts < 2) {
         logPromptSizeDebug(state, errMsg, `primary rejected prompt (attempt ${promptTooLargeAttempts + 1}/2)`)
         const recovered = await recoverFromPromptTooLarge(state, promptTooLargeAttempts)
@@ -349,7 +398,7 @@ export async function fetchCompletion(
 
       if (recoverByScrubbingImages(errMsg, "primary")) continue
 
-      if (!shouldFallback(errMsg)) {
+      if (!primaryFailure.terminal && !shouldFallback(errMsg)) {
         const primaryId = modelState.primaryModel?.id ?? "(unknown)"
         const primaryBase = modelState.primaryModel?.baseUrl ?? "(unknown)"
         console.error(`[api] primary error: ${errMsg} model=${primaryId} api=${primaryBase}`)
@@ -359,8 +408,9 @@ export async function fetchCompletion(
 
       const fallbackWindow = fallbackContextWindow(requestState.conversation)
       if (fallbackWindow.skip) {
+        if (primaryFailure.terminal) throw primaryErr
         console.warn(`[api] primary down (${errMsg}) and fallback context estimate ${fallbackWindow.estimate} exceeds hard limit; retrying primary after backoff`)
-        await sleep(retryDelayMs)
+        await interruptibleSleep(retryDelayMs, signal)
         continue
       }
 
@@ -370,12 +420,14 @@ export async function fetchCompletion(
 
       console.warn(`[api] primary down (${errMsg}) - switching to fallback`)
       try {
-        const completion = await createFallbackCompletion(requestState, tools)
+        const completion = await createFallbackCompletion(requestState, tools, signal)
         state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
         state.memoryRecallPending = false
         return completion
       } catch (fallbackErr) {
+        throwIfAborted(signal)
         const fallbackErrMsg = errorSummary(fallbackErr)
+        const fallbackFailure = noteApiError(fallbackErrMsg, "fallback", modelState.fallbackModel)
         if (isPromptTooLargeError(fallbackErrMsg) && promptTooLargeAttempts < 2) {
           logPromptSizeDebug(state, fallbackErrMsg, `fallback rejected prompt during failover (attempt ${promptTooLargeAttempts + 1}/2)`)
           const recovered = await recoverFromPromptTooLarge(state, promptTooLargeAttempts)
@@ -383,8 +435,13 @@ export async function fetchCompletion(
           if (recovered) continue
         }
         if (recoverByScrubbingImages(fallbackErrMsg, "fallback-failover")) continue
+        if (primaryFailure.terminal || fallbackFailure.terminal) {
+          console.error(`[api] failover stopped after terminal error: primary=${errMsg} fallback=${fallbackErrMsg}`)
+          recordLlmRequest(modelState.fallbackModel.id, "error", null)
+          throw primaryFailure.terminal ? primaryErr : fallbackErr
+        }
         console.warn(`[api] fallback failed (${fallbackErrMsg}) after primary failure (${errMsg}); retrying primary after backoff`)
-        await sleep(retryDelayMs)
+        await interruptibleSleep(retryDelayMs, signal)
       }
     }
   }

@@ -8,6 +8,10 @@ test("Niri catalog keeps server tools separate from client capabilities", () => 
   assert.equal(names.includes("shell"), false)
   assert.equal(names.includes("memory_search"), true)
   assert.equal(names.includes("discord_send"), false)
+  assert.equal(names.includes("job_list"), true)
+  assert.equal(names.includes("job_status"), true)
+  assert.equal(names.includes("job_stdout"), true)
+  assert.equal(names.includes("job_cancel"), true)
 })
 
 test("memory catalog exposes unified file tools", () => {

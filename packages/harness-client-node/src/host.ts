@@ -128,7 +128,11 @@ export class NodeToolHost implements ClientToolHost {
     this.started = false
   }
 
-  async execute(invocation: ToolInvocation): Promise<ClientToolResult> {
+  async execute(
+    invocation: ToolInvocation,
+    signal?: AbortSignal,
+    onOutput?: (chunk: string) => void,
+  ): Promise<ClientToolResult> {
     if (!this.capabilities.includes(invocation.tool)) {
       return errorResult(invocation, new Error(`client does not expose ${invocation.tool}`))
     }
@@ -141,6 +145,11 @@ export class NodeToolHost implements ClientToolHost {
     }
 
     const controller = new AbortController()
+    const abortFromCaller = () => controller.abort(
+      signal?.reason instanceof Error ? signal.reason : new Error("tool call interrupted"),
+    )
+    if (signal?.aborted) abortFromCaller()
+    else signal?.addEventListener("abort", abortFromCaller, { once: true })
     this.activeInvocations.add(controller)
     const deadlineTimer = setTimeout(
       () => controller.abort(new Error("tool call deadline exceeded")),
@@ -152,7 +161,7 @@ export class NodeToolHost implements ClientToolHost {
       this.assertActiveRuntime()
       await this.start()
       const remainingMs = Math.max(1, deadlineMs - Date.now())
-      const output = await this.executeTool(invocation.tool, invocation.args, remainingMs, controller.signal)
+      const output = await this.executeTool(invocation.tool, invocation.args, remainingMs, controller.signal, onOutput)
       const artifact =
         typeof output === "string"
           ? { output: boundedText(output) }
@@ -174,6 +183,7 @@ export class NodeToolHost implements ClientToolHost {
       }
     } finally {
       clearTimeout(deadlineTimer)
+      signal?.removeEventListener("abort", abortFromCaller)
       this.activeInvocations.delete(controller)
     }
   }
@@ -189,6 +199,7 @@ export class NodeToolHost implements ClientToolHost {
     args: Record<string, unknown>,
     remainingMs: number,
     signal: AbortSignal,
+    onOutput?: (chunk: string) => void,
   ): Promise<string | ClientImageArtifact> {
     const timeoutMs = effectiveTimeout(args, remainingMs)
     switch (tool) {
@@ -199,8 +210,9 @@ export class NodeToolHost implements ClientToolHost {
           timeoutMs,
           args.pty === true,
           signal,
+          onOutput,
         )
-        return output || "(no output)"
+        return output
       }
       case "read_file": {
         if (this.hashline) {

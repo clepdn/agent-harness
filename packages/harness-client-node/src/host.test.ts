@@ -68,6 +68,25 @@ test("shell PTY allocation is opt-in on each invocation", async () => {
   }
 })
 
+test("shell output is reported incrementally before the invocation completes", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-shell-output-"))
+  const host = new NodeToolHost({ capabilities: ["shell"], workspace: { id: "test", root: workspace } })
+  try {
+    const chunks: string[] = []
+    const result = await host.execute(
+      invocation("shell", { command: "printf alpha; sleep 0.05; printf beta" }),
+      undefined,
+      (chunk) => chunks.push(chunk),
+    )
+    assert.equal(result.status, "ok")
+    assert.equal(result.output, "alphabeta")
+    assert.equal(chunks.join(""), "alphabeta")
+  } finally {
+    await host.stop()
+    await fs.rm(workspace, { recursive: true, force: true })
+  }
+})
+
 test("the invocation deadline cancels and kills a shell command", async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-shell-deadline-"))
   const host = new NodeToolHost({ capabilities: ["shell"], workspace: { id: "test", root: workspace } })
@@ -77,6 +96,27 @@ test("the invocation deadline cancels and kills a shell command", async () => {
     const startedAt = Date.now()
     const result = await host.execute(call)
     assert.equal(result.status, "cancelled")
+    assert.ok(Date.now() - startedAt < 2_000)
+  } finally {
+    await host.stop()
+    await fs.rm(workspace, { recursive: true, force: true })
+  }
+})
+
+test("a caller abort signal cancels and kills a shell command", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "harness-host-shell-interrupt-"))
+  const host = new NodeToolHost({ capabilities: ["shell"], workspace: { id: "test", root: workspace } })
+  try {
+    const controller = new AbortController()
+    const startedAt = Date.now()
+    const running = host.execute(
+      invocation("shell", { command: "sleep 10", timeout_ms: 10_000 }),
+      controller.signal,
+    )
+    setTimeout(() => controller.abort(new Error("operator interrupt")), 75)
+    const result = await running
+    assert.equal(result.status, "cancelled")
+    assert.match(result.output ?? "", /operator interrupt/)
     assert.ok(Date.now() - startedAt < 2_000)
   } finally {
     await host.stop()

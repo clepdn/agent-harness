@@ -29,6 +29,14 @@ export interface LoopState {
   memoryRecallPending: boolean
   shutdownRequested: boolean
   turnInFlight: boolean
+  /** Signal for the generation/tool chain currently occupying the main loop. */
+  operationSignal?: AbortSignal
+  /** Controller retained by the root runner so slash commands can abort it. */
+  activeTurnController?: AbortController
+  /** Set by /interrupt until the current generation/tool chain unwinds. */
+  interruptRequested?: boolean
+  /** Set by /discard until the active session has been archived and removed. */
+  discardRequested?: boolean
   /** When true, the loop exits with "rest" at the next turn boundary. */
   restRequested: boolean
   /** Reason for the programmatic rest (e.g. model swap). */
@@ -68,6 +76,10 @@ export interface RunnerStateInternal extends RunnerState {
   toolInFlight: boolean
   shutdownRequested: boolean
   turnInFlight: boolean
+  activeTurnController?: AbortController
+  operationSignal?: AbortSignal
+  interruptRequested?: boolean
+  discardRequested?: boolean
   deferredEvents: Array<{ event: UserMessage; priority: boolean }>
   restRequested: boolean
   restReason: string

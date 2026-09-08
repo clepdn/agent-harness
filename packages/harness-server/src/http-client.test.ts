@@ -51,3 +51,71 @@ test("client with authToken sends Authorization: Bearer on tool calls", async ()
   assert.equal(result.output, "hello")
   assert.equal(new Headers(requests[0]?.headers).get("authorization"), "Bearer s3cret")
 })
+
+test("client forwards incremental NDJSON output before returning the final result", async () => {
+  let releaseFinal!: () => void
+  const finalReady = new Promise<void>((resolve) => { releaseFinal = resolve })
+  const encoder = new TextEncoder()
+  const client = new HttpToolClient({
+    agentId: "mira",
+    endpoint: "http://client.example:3002",
+    fetchImpl: async (_input, init) => {
+      const invocation = JSON.parse(String(init?.body)) as { invocationId: string; agentId: string }
+      const body = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(encoder.encode(`${JSON.stringify({ type: "tool.output", output: "alpha" })}\n`))
+          await finalReady
+          controller.enqueue(encoder.encode(`${JSON.stringify({
+            type: "tool.result",
+            result: {
+              type: "tool.result",
+              invocationId: invocation.invocationId,
+              agentId: invocation.agentId,
+              status: "ok",
+              output: "alpha",
+              completedAt: new Date().toISOString(),
+            },
+          })}\n`))
+          controller.close()
+        },
+      })
+      return new Response(body, { headers: { "content-type": "application/x-ndjson" } })
+    },
+  })
+
+  let observed = ""
+  const running = client.execute({
+    agentId: "mira",
+    tool: "shell",
+    args: { command: "printf alpha" },
+    onOutput: (chunk) => { observed += chunk },
+  })
+  await new Promise((resolve) => setTimeout(resolve, 0))
+  assert.equal(observed, "alpha")
+  releaseFinal()
+  assert.equal((await running).output, "alpha")
+})
+
+test("caller abort signals cancel remote tool requests", async () => {
+  const client = new HttpToolClient({
+    agentId: "mira",
+    endpoint: "http://client.example:3002",
+    fetchImpl: async (_input, init) => {
+      await new Promise<void>((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true })
+      })
+      throw new Error("unreachable")
+    },
+  })
+  const controller = new AbortController()
+  const running = client.execute({
+    agentId: "mira",
+    tool: "shell",
+    args: { command: "sleep 10" },
+    signal: controller.signal,
+  })
+  controller.abort(new Error("operator interrupt"))
+  const result = await running
+  assert.equal(result.status, "cancelled")
+  assert.match(result.output ?? "", /operator interrupt/)
+})

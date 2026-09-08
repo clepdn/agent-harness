@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process"
+import { StringDecoder } from "node:string_decoder"
 import * as pty from "node-pty"
 import {
   CLIENT_WORKSPACE_ROOT,
@@ -125,6 +126,7 @@ function runProcess(command: string, cwd: string, options: RunRawOptions): Promi
   const { program, args } = commandArgs(wrappedCommand, false)
   return new Promise((resolve, reject) => {
     let raw = ""
+    const decoder = new StringDecoder("utf8")
     let settled = false
     let timer: ReturnType<typeof setTimeout> | undefined
     const child = spawn(program, args, {
@@ -148,7 +150,9 @@ function runProcess(command: string, cwd: string, options: RunRawOptions): Promi
     }
     const append = (chunk: Buffer): void => {
       if (settled) return
-      raw += chunk.toString("utf8")
+      const text = decoder.write(chunk)
+      raw += text
+      try { options.onOutput?.(cleanOutput(text)) } catch {}
       if (Buffer.byteLength(raw, "utf8") > captureLimitBytes()) {
         rejectAndKill(new Error(`command output exceeded ${captureLimitBytes()} bytes`))
       }
@@ -162,6 +166,11 @@ function runProcess(command: string, cwd: string, options: RunRawOptions): Promi
       settled = true
       cleanup()
       terminateRemainingChildren(child)
+      const tail = decoder.end()
+      if (tail) {
+        raw += tail
+        try { options.onOutput?.(cleanOutput(tail)) } catch {}
+      }
       const output = cleanOutput(raw).trimEnd()
       if (code === 0) resolve(output)
       else if (signal) reject(failure(command, output, `terminated by ${signal}`))
@@ -219,6 +228,7 @@ function runPty(command: string, cwd: string, options: RunRawOptions): Promise<s
     dataDisposable = proc.onData((chunk) => {
       if (settled) return
       raw += chunk
+      try { options.onOutput?.(cleanOutput(chunk)) } catch {}
       if (Buffer.byteLength(raw, "utf8") > captureLimitBytes()) {
         rejectAndKill(new Error(`command output exceeded ${captureLimitBytes()} bytes`))
       }

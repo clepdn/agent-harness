@@ -153,6 +153,49 @@ test("fatal-loop recovery quarantines both resumable checkpoints", async (t) => 
   assert.equal(files.filter((name) => name.includes(".corrupt-")).length, 2)
 })
 
+test("discard archives the current session as model-readable JSON and clears resumable state", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-session-discard-"))
+  const home = path.join(root, "home")
+  await fs.mkdir(home)
+  t.after(async () => fs.rm(root, { recursive: true, force: true }))
+
+  const sessionUrl = new URL("./session.ts", import.meta.url).href
+  const memoryUrl = new URL("../agent-state-tools.ts", import.meta.url).href
+  await runChild(
+    `
+      import fs from "node:fs/promises"
+      import path from "node:path"
+      import { createHash } from "node:crypto"
+      import { archiveDiscardedSession, saveSession } from ${JSON.stringify(sessionUrl)}
+      import { readMemory } from ${JSON.stringify(memoryUrl)}
+      const toolCatalog = []
+      const snapshot = {
+        version: 1,
+        messages: [{ role: "user", content: "keep this discarded turn", timestamp: 1 }],
+        toolCatalog,
+        toolCatalogEpoch: 1,
+        toolCatalogFingerprint: createHash("sha256").update(JSON.stringify(toolCatalog)).digest("hex"),
+      }
+      await saveSession(snapshot)
+      const archive = await archiveDiscardedSession(snapshot)
+      const modelRead = await readMemory(archive)
+      await fs.writeFile(path.join(process.env.NANO_HOME, "discard-result.json"), JSON.stringify({ archive, modelRead }))
+    `,
+    root,
+    { ...process.env, NANO_CONFIG: testConfig, NANO_HOME: home, HOME: home },
+  )
+
+  const result = JSON.parse(await fs.readFile(path.join(home, "discard-result.json"), "utf8")) as {
+    archive: string
+    modelRead: string
+  }
+  assert.match(result.archive, /^memory:\/\/discarded-.*\.json$/)
+  assert.match(result.modelRead, /keep this discarded turn/)
+  assert.equal(await fs.stat(path.join(home, "session.json")).then(() => true).catch(() => false), false)
+  assert.equal(await fs.stat(path.join(home, "session.json.bak")).then(() => true).catch(() => false), false)
+  assert.equal(await fs.stat(path.join(home, "memories", result.archive.slice("memory://".length))).then(() => true).catch(() => false), true)
+})
+
 test("home fallback honors managed overrides and uses OS home without them", () => {
   const osHome = os.homedir()
   assert.equal(resolveNiriHome({}, osHome), path.resolve(osHome))

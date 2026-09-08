@@ -20,7 +20,7 @@ export const TOOLS: Tool[] = [
   {
     name: "shell",
     description:
-      "Execute a bash command in a fresh process in your Linux environment. Every call starts at the workspace root; cd and environment changes do not persist. Set pty=true only for commands that require terminal semantics. Output is automatically capped (default 150 lines, 40 for known-verbose commands like apt/pip/npm). Pass max_lines to override; use 0 for unlimited. You can also pass timeout_ms (default 30000, max 600000).",
+      "Execute a bash command in a fresh process in your Linux environment. Every call starts at the workspace root; cd and environment changes do not persist. Set pty=true only for commands that require terminal semantics. Output is automatically capped (default 150 lines, 40 for known-verbose commands like apt/pip/npm). Pass max_lines to override; use 0 for unlimited. You can also pass timeout_ms (default 30000, max 600000). Commands still running after 120 seconds detach into a background job and return a job id.",
     parameters: s({
       type: "object",
       properties: {
@@ -39,6 +39,47 @@ export const TOOLS: Tool[] = [
         },
       },
       required: ["command"],
+    }),
+  },
+  {
+    name: "job_list",
+    description: "List background jobs and their current status, ids, and elapsed times.",
+    parameters: s({ type: "object", additionalProperties: false, properties: {} }),
+  },
+  {
+    name: "job_status",
+    description: "Inspect one background job by id, including its captured stdout length and any terminal error.",
+    parameters: s({
+      type: "object",
+      additionalProperties: false,
+      properties: { job_id: { type: "string", description: "Exact job id returned by shell or subagent." } },
+      required: ["job_id"],
+    }),
+  },
+  {
+    name: "job_stdout",
+    description:
+      "Read captured stdout from a background job using half-open character offsets [start, end). Omit start to read from the beginning or omit end to read through the currently available output. Reads are capped by max_chars and return nextStart when more output remains.",
+    parameters: s({
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        job_id: { type: "string", description: "Exact job id returned by shell or subagent." },
+        start: { type: "integer", minimum: 0, description: "Inclusive character offset. Defaults to 0." },
+        end: { type: "integer", minimum: 0, description: "Exclusive character offset. Defaults to the current stdout length." },
+        max_chars: { type: "integer", minimum: 1, maximum: 100000, description: "Maximum characters returned. Defaults to 20000." },
+      },
+      required: ["job_id"],
+    }),
+  },
+  {
+    name: "job_cancel",
+    description: "Cancel one running background job by id. Use only when that work should no longer continue.",
+    parameters: s({
+      type: "object",
+      additionalProperties: false,
+      properties: { job_id: { type: "string", description: "Exact id of the running job to cancel." } },
+      required: ["job_id"],
     }),
   },
   {
@@ -351,7 +392,16 @@ function getActiveTools(): Tool[] {
  * Returns true if a tool is available to a subagent.
  * Auto-blacklists event-loop tools (wait, rest, wait_then_continue, subagent).
  */
-const SUBAGENT_AUTO_BLACKLIST = new Set(["wait", "end_session", "wait_then_continue", "subagent"])
+const SUBAGENT_AUTO_BLACKLIST = new Set([
+  "wait",
+  "end_session",
+  "wait_then_continue",
+  "subagent",
+  "job_list",
+  "job_status",
+  "job_stdout",
+  "job_cancel",
+])
 
 export function isToolEnabledForSubagent(
   name: string,

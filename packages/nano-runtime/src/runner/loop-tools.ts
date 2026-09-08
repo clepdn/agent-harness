@@ -49,11 +49,19 @@ export async function processToolCalls(
   const handlers = buildToolHandlers()
 
   for (let i = 0; i < calls.length; i++) {
+    if (state.interruptRequested || state.discardRequested || state.operationSignal?.aborted) {
+      skipRemainingToolCalls(convId, state, calls, i, "operator interrupt")
+      return false
+    }
     const call = calls[i]!
     const outcome = await executeToolCall(convId, state, hooks, handlers, call)
 
     if (outcome.shouldRest) return true
     if (outcome.isWait) continue
+    if (state.interruptRequested || state.discardRequested || state.operationSignal?.aborted) {
+      skipRemainingToolCalls(convId, state, calls, i + 1, "operator interrupt")
+      return false
+    }
 
     const interrupted = maybeInterruptAfterTool(convId, state, hooks, calls, i + 1)
     if (interrupted) return false
