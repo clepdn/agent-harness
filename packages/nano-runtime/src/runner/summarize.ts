@@ -1,7 +1,7 @@
 import fs from "fs/promises"
 import path from "path"
-import { complete } from "../llm"
-import type { AssistantMessage, Context, Model, TextContent, ToolCall } from "../llm"
+import { Context } from "../llm"
+import type { AssistantMessage, Model, TextContent, ToolCall } from "../llm"
 import { NANO_HOME as HOME_DIR } from "../agent-config"
 import { readFrontendSoul } from "../frontend-soul"
 import type { Message } from "../types"
@@ -181,7 +181,7 @@ function summarizeMessageLine(message: Message): string | null {
  * Picks the largest tail of recent messages that fits the given char budget,
  * backing up over orphaned tool responses so the tail starts at a clean boundary.
  */
-function chooseTailStart(messages: Message[], floor: number, minKeep: number, maxKeep: number, charBudget: number): number {
+function chooseTailStart(messages: readonly Message[], floor: number, minKeep: number, maxKeep: number, charBudget: number): number {
   let chars = 0
   let kept = 0
   let start = messages.length
@@ -284,7 +284,7 @@ function looksLikeMetaReply(text: string): boolean {
   return SUMMARY_META_REPLY_PATTERNS.some((re) => re.test(text.slice(0, 400)))
 }
 
-function latestMessageTimestamp(messages: Message[]): string | null {
+function latestMessageTimestamp(messages: readonly Message[]): string | null {
   let latest = Number.NEGATIVE_INFINITY
   for (const message of messages) {
     if (Number.isFinite(message.timestamp)) latest = Math.max(latest, message.timestamp)
@@ -333,7 +333,7 @@ export function buildConversationSummaryContent(
 }
 
 export async function summarizeConversationViaLLM(
-  messages: Message[],
+  messages: readonly Message[],
   model: Model,
   apiKey: string | undefined,
   options: {
@@ -375,14 +375,15 @@ export async function summarizeConversationViaLLM(
     options.primaryHandoff === true,
   )
 
-  const summaryContext: Context = {
+  const summaryContext = new Context({
+    model,
+    apiKey,
     systemPrompt: systemContent,
-    messages: [{ role: "user", content: transcript, timestamp: Date.now() }],
-  }
+    items: [{ role: "user", content: transcript, timestamp: Date.now() }],
+  })
 
   try {
-    const opts = apiKey ? { apiKey } : {}
-    const resp = await complete(model, summaryContext, opts)
+    const resp = await summaryContext.complete()
     const summaryText = resp.content
       .filter((p): p is TextContent => p.type === "text")
       .map((p) => p.text)
@@ -442,14 +443,15 @@ async function summarizeToolResult(
     "Be concise but complete — the summary must be usable as a reference by the agent who originally called the tool. " +
     "Do not add commentary. Output only the summary."
 
-  const ctx: Context = {
+  const ctx = new Context({
+    model,
+    apiKey,
     systemPrompt,
-    messages: [{ role: "user", content, timestamp: Date.now() }],
-  }
+    items: [{ role: "user", content, timestamp: Date.now() }],
+  })
 
   try {
-    const opts = apiKey ? { apiKey } : {}
-    const resp = await complete(model, ctx, opts)
+    const resp = await ctx.complete()
     const summaryText = resp.content
       .filter((p): p is TextContent => p.type === "text")
       .map((p) => p.text)
@@ -478,7 +480,7 @@ type ToolResultSummarizer = (
  * before the next primary-model turn.
  */
 export async function proactiveCompaction(
-  messages: Message[],
+  messages: readonly Message[],
   model: Model,
   apiKey: string | undefined,
   turnAge: number,
@@ -527,7 +529,7 @@ export async function proactiveCompaction(
 
 // ── Fallback context window ───────────────────────────────────────────────────
 
-export function fallbackContextWindow(messages: Message[]): {
+export function fallbackContextWindow(messages: readonly Message[]): {
   estimate: number
   nearLimit: boolean
   skip: boolean

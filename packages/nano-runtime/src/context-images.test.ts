@@ -12,7 +12,7 @@ process.env.NANO_AGENT_STATE_DIR = `${home}/state`
 after(() => fs.rm(home, { recursive: true, force: true }))
 const { config } = await import("./config")
 const { enabledContextImages, markdownImageReferences, prepareContextImages } = await import("./context-images")
-const { complete, stream } = await import("./llm")
+const { complete, stream, Context } = await import("./llm")
 const { initDb, getDb, startConversation } = await import("./db")
 initDb(":memory:")
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=", "base64")
@@ -226,7 +226,7 @@ test("memory reads, skills, and search excerpts add references through the real 
   await fs.writeFile(`${home}/memories/journal/today.md`, "# Today\n![photo](../images/picture.png)\n")
   await fs.writeFile(`${home}/memories/skills/illustrated.md`, "---\ndescription: test\n---\n# Guide\n![guide][photo]\n\n[photo]: ../images/picture.png\n")
   const state = {
-    conversation: [],
+    context: new Context({ model }),
     pendingInputs: [],
     toolInFlight: false,
     toolCatalog: createNiriToolCatalog({ memory: true }),
@@ -235,12 +235,13 @@ test("memory reads, skills, and search excerpts add references through the real 
   const convId = startConversation("test", new Date().toISOString())
   for (const [name, args] of [["read_file", { path: "memory://journal/today.md" }], ["skill", { name: "illustrated" }]] as const) {
     await executeToolCall(convId, state, hooks, buildToolHandlers(), { type: "toolCall", id: name, name, arguments: args })
-    const msg = state.conversation.at(-1)!
+    const msg = state.context.items.at(-1)!
     assert.equal(msg.role, "toolResult")
     assert.equal(msg.imageReferences?.length, 1)
   }
-  await prepareContextImages(state.conversation)
-  assert.ok(state.conversation.every((msg) => msg.role !== "assistant" && msg.imageAttachments?.length === 1))
+  const prepared = state.context.snapshot()
+  await prepareContextImages(prepared)
+  assert.ok(prepared.every((msg) => msg.role !== "assistant" && msg.imageAttachments?.length === 1))
   const refs = await toolContextImageReferences("memory_search", {}, JSON.stringify([{ uri: "memory://journal/today.md", content: "![photo](../images/picture.png)" }]))
   assert.equal(refs[0]?.kind === "markdown" && refs[0].path, `${home}/memories/images/picture.png`)
 })

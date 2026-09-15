@@ -1,6 +1,5 @@
-import { stream } from "../llm"
+import { ContextChangedError } from "../llm"
 import type { AssistantMessage, AssistantMessageEvent, TextContent, ThinkingContent, Usage } from "../llm"
-import type { OpenAICompletionsOptions } from "../llm"
 import type { ToolDefinition } from "@nano/harness-core"
 import { logMessage } from "../db"
 import { setContextSize } from "../discord/status-updater"
@@ -12,7 +11,6 @@ import { notifyDiscordModelActivity } from "../discord/typing-lease"
 import { modelStateFor } from "./model-state"
 import type { LoopState } from "./types"
 import {
-  buildContext,
   errorSummary,
   estimatePromptTokens,
   fallbackContextWindow,
@@ -27,6 +25,7 @@ import {
   shouldFallback,
   summarizeConversationViaLLM,
 } from "./util"
+import { getCompletionTools } from "./tools"
 import type { CompletionTurnResult } from "./loop-shared"
 import type { Model } from "../llm"
 import { classifyApiError } from "../api-errors"
@@ -76,10 +75,9 @@ export function configuredSummaryProvider(
 }
 
 /**
- * Appends an assistant message to state and persists it to conversation logs.
+ * Persists an assistant message after Context.complete appended it atomically.
  */
-export function addAssistantMessage(convId: number, state: LoopState, msg: AssistantMessage): void {
-  state.conversation.push(msg)
+export function addAssistantMessage(convId: number, msg: AssistantMessage): void {
   const textContent = msg.content
     .filter((p): p is TextContent => p.type === "text")
     .map((p) => p.text)
@@ -100,7 +98,7 @@ function recordPromptResponse(
     type: "prompt_response",
     model,
     toolChoice,
-    ...summarizePromptResponse(state.conversation as import("../types").Message[], result.message),
+    ...summarizePromptResponse(state.context.items.slice(0, -1), result.message),
     usage: result.usage,
   })
 }
@@ -191,49 +189,56 @@ async function createStreamedCompletion(
 ): Promise<CompletionTurnResult> {
   const modelState = modelStateFor(state.runtimeKind)
   const startedAt = Date.now()
-  const context = buildContext(state, tools)
-
   const resolvedToolChoice = modelState.enableThinking && toolChoice === "required" ? "auto" : toolChoice
-  const options: OpenAICompletionsOptions = {
-    includeContextImages: modelState.primaryVision,
-    ...(apiKey ? { apiKey } : {}),
-    toolChoice: resolvedToolChoice,
-    ...(modelState.enableThinking ? { reasoningEffort: modelState.thinkingEffort } : {}),
-    ...(signal ? { signal } : {}),
+  const completionTools = getCompletionTools(tools)
+  const modelChanged = JSON.stringify(state.context.model) !== JSON.stringify(model)
+  const toolsChanged = JSON.stringify(state.context.tools ?? []) !== JSON.stringify(completionTools)
+  const settingsChanged =
+    modelChanged ||
+    toolsChanged ||
+    state.context.apiKey !== apiKey ||
+    state.context.toolChoice !== resolvedToolChoice ||
+    state.context.thinkingLevel !== (modelState.enableThinking ? modelState.thinkingEffort : undefined) ||
+    state.context.includeContextImages !== modelState.primaryVision
+  if (settingsChanged) {
+    state.context = state.context.fork({
+      model,
+      apiKey,
+      tools: completionTools,
+      toolChoice: resolvedToolChoice,
+      thinkingLevel: modelState.enableThinking ? modelState.thinkingEffort : undefined,
+      includeContextImages: modelState.primaryVision,
+      reason: modelChanged ? "model-change" : toolsChanged ? "tools-change" : "settings-change",
+    })
   }
-
-  const eventStream = stream(model, context, options)
 
   let emittedText = false
   let emittedThinking = false
   let bufferedThinking = ""
-  let errorMessage: string | undefined
-
-  for await (const event of eventStream as AsyncIterable<AssistantMessageEvent>) {
-    if (event.type === "text_delta") {
-      notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
-      emit({ type: "text", text: event.delta })
-      emittedText = true
-    } else if (event.type === "thinking_start") {
-      notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
-      bufferedThinking = ""
-    } else if (event.type === "thinking_delta") {
-      notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
-      if (modelState.enableThinking) bufferedThinking += event.delta
-    } else if (event.type === "thinking_end") {
-      if (modelState.enableThinking && bufferedThinking) {
-        emit({ type: "thinking", text: bufferedThinking })
-        emittedThinking = true
+  const completionContext = state.context
+  const finalMessage = await completionContext.complete({
+    ...(signal ? { signal } : {}),
+    onEvent: (event: AssistantMessageEvent) => {
+      if (event.type === "text_delta") {
+        notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
+        emit({ type: "text", text: event.delta })
+        emittedText = true
+      } else if (event.type === "thinking_start") {
+        notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
+        bufferedThinking = ""
+      } else if (event.type === "thinking_delta") {
+        notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
+        if (modelState.enableThinking) bufferedThinking += event.delta
+      } else if (event.type === "thinking_end") {
+        if (modelState.enableThinking && bufferedThinking) {
+          emit({ type: "thinking", text: bufferedThinking })
+          emittedThinking = true
+        }
       }
-    } else if (event.type === "error") {
-      errorMessage = event.error.errorMessage ?? "unknown API error"
-    }
-  }
-
-  const finalMessage = await (eventStream as { result(): Promise<AssistantMessage> }).result()
-
-  if (finalMessage.stopReason === "error" || errorMessage) {
-    throw new Error(errorMessage ?? finalMessage.errorMessage ?? "unknown API error")
+    },
+  })
+  if (state.context !== completionContext) {
+    throw new ContextChangedError("Context was replaced while completion was in flight; refusing a stale assistant response")
   }
 
   const usage = finalMessage.usage
@@ -256,9 +261,9 @@ async function createPrimaryCompletion(state: LoopState, tools?: ToolDefinition[
 }
 
 function logPromptSizeDebug(state: LoopState, errMsg: string, label: string): void {
-  const messageCount = state.conversation.length
-  const estimate = estimatePromptTokens(state.conversation)
-  const charLength = JSON.stringify(state.conversation).length
+  const messageCount = state.context.items.length
+  const estimate = estimatePromptTokens(state.context.items)
+  const charLength = JSON.stringify(state.context.items).length
   console.warn(
     `[api] ${label}: ${errMsg} - messages=${messageCount} est_tokens=${estimate} chars=${charLength} observedPromptTokens=${state.contextSize}`,
   )
@@ -277,7 +282,7 @@ function noteApiError(errorMessage: string, role: "primary" | "fallback", model:
 
 async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Promise<boolean> {
   const modelState = modelStateFor(state.runtimeKind)
-  const beforeEstimate = estimatePromptTokens(state.conversation)
+  const beforeEstimate = estimatePromptTokens(state.context.items)
   const summaryProvider = configuredSummaryProvider("default", state)
   if (!summaryProvider.model) {
     console.warn(`[context] recovery: no summary model available; cannot llm-summarize`)
@@ -287,7 +292,7 @@ async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Pro
   console.warn(`[context] recovery: attempting llm summarization via ${summaryProvider.model.id} (attempt=${attempt + 1})`)
   const agentContext = await loadAgentSummaryContext(state.runtimeKind)
   const summarized = await summarizeConversationViaLLM(
-    state.conversation,
+    state.context.items,
     summaryProvider.model,
     summaryProvider.apiKey,
     {
@@ -306,13 +311,13 @@ async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Pro
     return false
   }
 
-  state.conversation = summarized
+  state.context = state.context.fork({ items: summarized, reason: "compaction" })
   state.contextSize = afterEstimate
 
-  const summaryIdx = findSummaryMessageIndex(state.conversation)
-  const summary = summaryIdx >= 0 ? (state.conversation[summaryIdx]?.role === "user"
-    ? (typeof (state.conversation[summaryIdx] as { content: unknown }).content === "string"
-      ? (state.conversation[summaryIdx] as { content: string }).content
+  const summaryIdx = findSummaryMessageIndex(state.context.items)
+  const summary = summaryIdx >= 0 ? (state.context.items[summaryIdx]?.role === "user"
+    ? (typeof (state.context.items[summaryIdx] as { content: unknown }).content === "string"
+      ? (state.context.items[summaryIdx] as { content: string }).content
       : undefined)
     : undefined) : undefined
 
@@ -333,14 +338,18 @@ export async function fetchCompletion(
   const modelState = modelStateFor(state.runtimeKind)
   let promptTooLargeAttempts = 0
   let imagesScrubbed = false
+  let recallPrepared = false
+  let recalledChunkIds: number[] = []
 
   const recoverByScrubbingImages = (errMsg: string, label: string): boolean => {
     if (imagesScrubbed) return false
     if (!isContentFilterError(errMsg) && !isImageParseError(errMsg)) return false
     const reason = isContentFilterError(errMsg) ? "content-filter rejection" : "image parse/format rejection"
-    const scrubbed = scrubImagesFromConversation(state.conversation)
+    const scrubbedMessages = state.context.snapshot()
+    const scrubbed = scrubImagesFromConversation(scrubbedMessages)
     imagesScrubbed = true
     if (scrubbed > 0) {
+      state.context = state.context.fork({ items: scrubbedMessages, reason: "image-scrub" })
       console.warn(`[api] ${label} ${reason}; scrubbed ${scrubbed} image attachment(s) and retrying`)
       return true
     }
@@ -350,30 +359,38 @@ export async function fetchCompletion(
 
   while (true) {
     throwIfAborted(signal)
-    state.conversation = sanitizeMessages(state.conversation)
+    const currentMessages = state.context.snapshot()
+    const sanitized = sanitizeMessages(currentMessages)
+    if (JSON.stringify(sanitized) !== JSON.stringify(currentMessages)) {
+      state.context = state.context.fork({ items: sanitized, reason: "sanitize" })
+    }
 
-    const requestState = state.memoryRecallPending
-      ? await (async () => {
-          const ctx = await buildCompletionMessages(state.conversation, state.memoryRecallCooldowns, state.memoryRecallTurn)
-          return { ...state, conversation: ctx.messages, _recalledChunkIds: ctx.recalledChunkIds }
-        })()
-      : { ...state, _recalledChunkIds: [] as number[] }
-
-    const recalledChunkIds = (requestState as typeof requestState & { _recalledChunkIds: number[] })._recalledChunkIds
+    if (state.memoryRecallPending && !recallPrepared) {
+      const recalled = await buildCompletionMessages(state.context.snapshot(), state.memoryRecallCooldowns, state.memoryRecallTurn)
+      recalledChunkIds = recalled.recalledChunkIds
+      if (recalled.messages.length > state.context.items.length) {
+        state.context.append(recalled.messages.slice(state.context.items.length))
+      }
+      recallPrepared = true
+    }
 
     if (modelState.useFallback) {
-      const fallbackWindow = fallbackContextWindow(requestState.conversation)
+      const fallbackWindow = fallbackContextWindow(state.context.items)
       if (fallbackWindow.nearLimit) {
         console.warn(`[fallback] prompt estimate ${fallbackWindow.estimate} nearing fallback limit ${fallbackWindow.softLimit} (${modelState.fallbackModel.id})`)
       }
 
       try {
-        const completion = await createFallbackCompletion(requestState, tools, signal)
+        const completion = await createFallbackCompletion(state, tools, signal)
         state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
         state.memoryRecallPending = false
         return completion
       } catch (fallbackErr) {
         throwIfAborted(signal)
+        if (fallbackErr instanceof ContextChangedError) {
+          console.warn("[context] changed during fallback completion; retrying from the new tail")
+          continue
+        }
         const errMsg = errorSummary(fallbackErr)
         const failure = noteApiError(errMsg, "fallback", modelState.fallbackModel)
         if (isPromptTooLargeError(errMsg) && promptTooLargeAttempts < 2) {
@@ -400,12 +417,16 @@ export async function fetchCompletion(
     }
 
     try {
-      const completion = await createPrimaryCompletion(requestState, tools, signal)
+      const completion = await createPrimaryCompletion(state, tools, signal)
       state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
       state.memoryRecallPending = false
       return completion
     } catch (primaryErr) {
       throwIfAborted(signal)
+      if (primaryErr instanceof ContextChangedError) {
+        console.warn("[context] changed during primary completion; retrying from the new tail")
+        continue
+      }
       const errMsg = errorSummary(primaryErr)
       const primaryFailure = noteApiError(errMsg, "primary", modelState.primaryModel!)
       if (isPromptTooLargeError(errMsg) && promptTooLargeAttempts < 2) {
@@ -426,7 +447,7 @@ export async function fetchCompletion(
         throw primaryErr
       }
 
-      const fallbackWindow = fallbackContextWindow(requestState.conversation)
+      const fallbackWindow = fallbackContextWindow(state.context.items)
       if (fallbackWindow.skip) {
         if (primaryFailure.terminal) throw primaryErr
         console.warn(`[api] primary down (${errMsg}) and fallback context estimate ${fallbackWindow.estimate} exceeds hard limit; retrying primary after backoff`)
@@ -440,12 +461,16 @@ export async function fetchCompletion(
 
       console.warn(`[api] primary down (${errMsg}) - switching to fallback`)
       try {
-        const completion = await createFallbackCompletion(requestState, tools, signal)
+        const completion = await createFallbackCompletion(state, tools, signal)
         state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
         state.memoryRecallPending = false
         return completion
       } catch (fallbackErr) {
         throwIfAborted(signal)
+        if (fallbackErr instanceof ContextChangedError) {
+          console.warn("[context] changed during fallback failover; retrying from the new tail")
+          continue
+        }
         const fallbackErrMsg = errorSummary(fallbackErr)
         const fallbackFailure = noteApiError(fallbackErrMsg, "fallback", modelState.fallbackModel)
         if (isPromptTooLargeError(fallbackErrMsg) && promptTooLargeAttempts < 2) {

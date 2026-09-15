@@ -1,9 +1,8 @@
-import type { Context, Tool, TSchema } from "../llm"
+import type { Tool, TSchema } from "../llm"
 import { createReadFileToolDefinition, type ToolDefinition } from "@nano/harness-core"
 import { config } from "../config"
 import { imageRootForModelInput } from "../container/index"
 import { clientTools } from "../client"
-import type { LoopState } from "./types"
 import { MEMORY_FS_TOOL_DEFINITION } from "./tool-catalog"
 
 // Placeholder: the real root belongs to whichever client is attached, which
@@ -416,12 +415,7 @@ export function getSubagentTools(enabledTools: string[], blacklistedTools: strin
   return TOOLS.filter((t) => isToolEnabledForSubagent(t.name, enabledTools, blacklistedTools)).map(withImageRoot)
 }
 
-// ── Context builder ──────────────────────────────────────────────────────────
-
-/**
- * Assembles a Context from loop state.
- * The conversation is already in pi's native format; this just wraps it.
- */
+// ── Completion tool catalog ─────────────────────────────────────────────────
 const DYNAMICALLY_GATED_TOOLS = new Set([
   "shell",
   "read_file",
@@ -439,7 +433,7 @@ const DYNAMICALLY_GATED_TOOLS = new Set([
   "set_status",
 ])
 
-function getCompletionTools(toolDefinitions?: ToolDefinition[]): Tool[] {
+export function getCompletionTools(toolDefinitions?: ToolDefinition[]): Tool[] {
   if (!toolDefinitions) return getActiveTools()
 
   const tools = toolDefinitions.map((tool) => ({
@@ -452,12 +446,4 @@ function getCompletionTools(toolDefinitions?: ToolDefinition[]): Tool[] {
     if (!names.has(tool.name) && !DYNAMICALLY_GATED_TOOLS.has(tool.name)) tools.push(tool)
   }
   return tools.filter((tool) => isToolEnabled(tool.name))
-}
-
-export function buildContext(state: Pick<LoopState, "systemPrompt" | "conversation">, toolDefinitions?: ToolDefinition[]): Context {
-  return {
-    systemPrompt: state.systemPrompt || undefined,
-    messages: state.conversation,
-    tools: getCompletionTools(toolDefinitions),
-  }
 }

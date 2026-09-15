@@ -126,13 +126,13 @@ function insertMessage(db: Database.Database, message: Message, source: string, 
 }
 
 /** Persist every distinct raw message in an active checkpoint without changing model context. */
-export function archiveContextMessages(messages: Message[], source: string, runtimeKind: RuntimeKind = "main"): string[] {
+export function archiveContextMessages(messages: readonly Message[], source: string, runtimeKind: RuntimeKind = "main"): string[] {
   const db = getDb()
   const now = new Date().toISOString()
   const insert = db.transaction((items: Message[]) => items
     .filter((message) => !messageText(message).startsWith("[context summary v1]"))
     .map((message) => insertMessage(db, message, source, now, runtimeKind)))
-  return insert(messages)
+  return insert([...messages])
 }
 
 export function contextSummaryId(content: string): string | null {

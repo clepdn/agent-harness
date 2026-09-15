@@ -188,14 +188,14 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       // the rich summary compaction is slow or fails, next boot still rehydrates
       // from the raw conversation instead of waking clean with nothing.
       const note = args.note as string | undefined
-      await saveRestSnapshot(state.conversation, note, state.runtimeKind)
+      await saveRestSnapshot(state.context.items, note, state.runtimeKind)
       // Then compact-and-resave so a clean goodbye leaves a real rich summary
       // behind. Best-effort: the raw snapshot above already guarantees continuity.
       try {
         const compacted = await compactForShutdown(state)
         if (compacted === "rewritten") {
           console.log("[runner] end_session compacted the conversation before resting")
-          await saveRestSnapshot(state.conversation, note, state.runtimeKind)
+          await saveRestSnapshot(state.context.items, note, state.runtimeKind)
         }
       } catch (err) {
         console.warn(`[runner] end_session compaction failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -583,7 +583,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
           ],
           timestamp: Date.now(),
         }
-        state.conversation.push(imageMessage)
+        state.context.append(imageMessage)
         logMessage(convId, "user", `[image_tool] ${note}\npath=${image.path}`)
       } catch (err) {
         result = recordToolResult(convId, state, call, "image_tool", { path: args.path }, toolError(err))
@@ -857,7 +857,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
             ],
             timestamp: Date.now(),
           }
-          state.conversation.push(imageMessage)
+          state.context.append(imageMessage)
           logMessage(convId, "user", `[computer] screenshot\npath=${image.path}`)
         }
       } catch (err) {

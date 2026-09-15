@@ -1,4 +1,5 @@
-import type { DiscordMessageTarget, Message, UserMessage, RunnerState } from "../types"
+import type { DiscordMessageTarget, UserMessage, RunnerState } from "../types"
+import type { Context } from "../llm"
 import type { ClientToolExecutor, ToolDefinition } from "@nano/harness-core"
 
 export type CompactionResult = "none" | "rewritten" | "suppressed"
@@ -18,8 +19,7 @@ export type ImageDetail = "auto" | "low" | "high"
 export interface LoopState {
   /** Which virtual agent owns this independent conversation loop. */
   runtimeKind?: RuntimeKind
-  systemPrompt: string
-  conversation: Message[]
+  context: Context
   pendingInputs: UserMessage[]
   tokenCount: number
   contextSize: number

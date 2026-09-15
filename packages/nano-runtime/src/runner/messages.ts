@@ -41,7 +41,7 @@ export function messageStringContent(message: Message): string {
 
 // ── Structural message utilities ──────────────────────────────────────────────
 
-export function findSummaryMessageIndex(messages: Message[]): number {
+export function findSummaryMessageIndex(messages: readonly Message[]): number {
   return messages.findIndex((message) => {
     const content = messageStringContent(message)
     return content.startsWith(CONTEXT_SUMMARY_HEADER)
@@ -52,7 +52,7 @@ export function findSummaryMessageIndex(messages: Message[]): number {
  * Very rough tokenizer-agnostic estimate for prompt size guardrails.
  * Includes both messages and tool schema to mirror the actual completion payload.
  */
-export function estimatePromptTokens(messages: Message[]): number {
+export function estimatePromptTokens(messages: readonly Message[]): number {
   let imageCount = 0
   const estimatedMessages = messages.map((message) => {
     if (message.role === "assistant") return message

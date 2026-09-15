@@ -4,9 +4,8 @@
  * Just: stream → process tools → repeat → return final text.
  */
 
-import { stream } from "../llm"
-import type { AssistantMessage, ToolCall, Context, Model } from "../llm"
-import type { OpenAICompletionsOptions } from "../llm"
+import { Context } from "../llm"
+import type { ToolCall, Model } from "../llm"
 import { config, getModelPreset, type SubagentConfig } from "../config"
 import { logMessage } from "../db"
 import { emit } from "../stream"
@@ -110,10 +109,16 @@ export async function runSubagent(
   // Fresh conversation state
   const state: LoopState = {
     pendingInputs: [],
-    systemPrompt,
-    conversation: [
-      { role: "user", content: task, timestamp: Date.now() } as Message,
-    ],
+    context: new Context({
+      model,
+      systemPrompt,
+      tools,
+      apiKey,
+      toolChoice: (modelState.enableThinking && toolChoice === "required" ? "auto" : toolChoice) as "required" | "auto" | "none",
+      thinkingLevel: modelState.enableThinking ? modelState.thinkingEffort : undefined,
+      includeContextImages: modelState.primaryVision,
+      items: [{ role: "user", content: task, timestamp: Date.now() } as Message],
+    }),
     tokenCount: 0,
     contextSize: 0,
     toolCatalog: [],
@@ -148,37 +153,26 @@ export async function runSubagent(
   while (turnCount < subagent.max_turns) {
     turnCount++
 
-    // Build context for this turn
-    const context: Context = {
-      systemPrompt: state.systemPrompt || undefined,
-      messages: state.conversation,
-      tools,
-    }
-
-    const resolvedToolChoice = modelState.enableThinking && toolChoice === "required" ? "auto" : toolChoice
-    const options: OpenAICompletionsOptions = {
-      includeContextImages: modelState.primaryVision,
-      ...(apiKey ? { apiKey } : {}),
-      toolChoice: resolvedToolChoice as "required" | "auto" | "none",
-      ...(modelState.enableThinking ? { reasoningEffort: modelState.thinkingEffort } : {}),
-      ...(signal ? { signal } : {}),
-    }
-
     if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("subagent interrupted")
 
-    // Stream the completion
-    const eventStream = stream(model, context, options)
     let errorMessage: string | undefined
-
-    for await (const event of eventStream as AsyncIterable<{ type: string; delta?: string; error?: { errorMessage?: string } }>) {
-      if (event.type === "text_delta" && event.delta) {
-        emit({ type: "text", text: `[subagent:${subagent.name}] ${event.delta}` })
-      } else if (event.type === "error") {
-        errorMessage = event.error?.errorMessage ?? "unknown API error"
-      }
+    let finalMessage
+    try {
+      finalMessage = await state.context.complete({
+        ...(signal ? { signal } : {}),
+        onEvent: (event) => {
+          if (event.type === "text_delta" && event.delta) {
+            emit({ type: "text", text: `[subagent:${subagent.name}] ${event.delta}` })
+          } else if (event.type === "error") {
+            errorMessage = event.error.errorMessage ?? "unknown API error"
+          }
+        },
+      })
+    } catch (error) {
+      errorMessage = error instanceof Error ? error.message : String(error)
+      console.error(`[subagent] "${subagent.name}" stream error: ${errorMessage}`)
+      return `error: subagent "${subagent.name}" failed: ${errorMessage}`
     }
-
-    const finalMessage = await (eventStream as { result(): Promise<AssistantMessage> }).result()
 
     if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("subagent interrupted")
 
@@ -188,8 +182,6 @@ export async function runSubagent(
       return `error: subagent "${subagent.name}" failed: ${errMsg}`
     }
 
-    // Add assistant message to subagent conversation
-    state.conversation.push(finalMessage)
     const text = assistantContentText(finalMessage.content)
     if (text) lastText = text
     logMessage(convId, "assistant", `[subagent:${subagent.name}] ${text}`)

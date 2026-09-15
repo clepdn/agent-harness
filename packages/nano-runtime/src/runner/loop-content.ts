@@ -22,8 +22,8 @@ export function assistantContentText(content: AssistantMessage["content"]): stri
  * @returns Latest assistant text, or empty string when none exists.
  */
 export function latestAssistantContent(state: LoopState): string {
-  for (let i = state.conversation.length - 1; i >= 0; i--) {
-    const message = state.conversation[i]
+  for (let i = state.context.items.length - 1; i >= 0; i--) {
+    const message = state.context.items[i]
     if (!message || message.role !== "assistant") continue
     return assistantContentText(message.content)
   }

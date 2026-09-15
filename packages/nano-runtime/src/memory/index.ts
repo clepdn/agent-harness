@@ -59,7 +59,7 @@ function isMemoryRecallSkippedMessage(content: string): boolean {
   return false
 }
 
-function latestMemoryRecallQuery(conversation: Message[]): string | null {
+function latestMemoryRecallQuery(conversation: readonly Message[]): string | null {
   for (let i = conversation.length - 1; i >= 0; i -= 1) {
     const message = conversation[i]
     if (!message || message.role !== "user") continue
@@ -85,19 +85,19 @@ import { conciseDiscordBatchMemoryQuery } from "./discord-query"
  * @returns Updated messages (with recall injected) and recalled chunk ids.
  */
 export async function buildCompletionMessages(
-  conversation: Message[],
+  conversation: readonly Message[],
   cooldowns: Record<number, number>,
   currentTurn: number,
 ): Promise<{ messages: Message[]; recalledChunkIds: number[] }> {
   const memoryQuerySource = latestMemoryRecallQuery(conversation)
-  if (!memoryQuerySource) return { messages: conversation, recalledChunkIds: [] }
+  if (!memoryQuerySource) return { messages: [...conversation], recalledChunkIds: [] }
   const queryParts = memoryQueryForUserMessage(memoryQuerySource)
   const memoryQuery = memoryQueryToString(queryParts)
 
   await syncMemoryIndex()
 
   const profile = await buildSearchProfile(queryParts)
-  if (profile.tokens.length === 0) return { messages: conversation, recalledChunkIds: [] }
+  if (profile.tokens.length === 0) return { messages: [...conversation], recalledChunkIds: [] }
 
   let semanticSignal: import("./shared").SemanticQuerySignal | null = null
   try {
@@ -110,7 +110,7 @@ export async function buildCompletionMessages(
     console.log(
       `[memory] skipped query=${JSON.stringify(trimForPrompt(normalizeText(memoryQuery), 120))} sender=${profile.sender ?? "-"} reason=semantic-chatter chatter=${semanticSignal?.chatterSimilarity?.toFixed(3) ?? "-"} recallIntent=${semanticSignal?.recallIntentSimilarity?.toFixed(3) ?? "-"}`,
     )
-    return { messages: conversation, recalledChunkIds: [] }
+    return { messages: [...conversation], recalledChunkIds: [] }
   }
 
   const hasSemanticRecallIntent =
@@ -120,7 +120,7 @@ export async function buildCompletionMessages(
     console.log(
       `[memory] skipped query=${JSON.stringify(trimForPrompt(normalizeText(memoryQuery), 120))} sender=${profile.sender ?? "-"} reason=trivial-body`,
     )
-    return { messages: conversation, recalledChunkIds: [] }
+    return { messages: [...conversation], recalledChunkIds: [] }
   }
 
   const personCount = [...(profile.sender ? [profile.sender] : []), ...profile.bodyPeople].length
@@ -136,13 +136,13 @@ export async function buildCompletionMessages(
     console.log(
       `[memory] no-hits query=${JSON.stringify(trimForPrompt(normalizeText(memoryQuery), 120))} ${debugTag}`,
     )
-    return { messages: conversation, recalledChunkIds: [] }
+    return { messages: [...conversation], recalledChunkIds: [] }
   }
   if (!isRelevant(hits, profile)) {
     console.log(
       `[memory] skipped query=${JSON.stringify(trimForPrompt(normalizeText(memoryQuery), 120))} ${debugTag} reason=weak-match`,
     )
-    return { messages: conversation, recalledChunkIds: [] }
+    return { messages: [...conversation], recalledChunkIds: [] }
   }
 
   const recallContent = buildMemoryRecallMessage(hits)

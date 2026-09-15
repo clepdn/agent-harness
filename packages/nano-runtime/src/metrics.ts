@@ -330,7 +330,7 @@ function lastUserMessage(messages: unknown): string | undefined {
  * bodies into the DB. This is the whole point of the no-full-text change.
  */
 export function summarizePromptResponse(
-  messages: Message[],
+  messages: readonly Message[],
   response: AssistantMessage,
 ): Pick<PromptResponseMetric, "messageCount" | "lastUserMessage" | "responsePreview" | "toolCallCount"> {
   const responseText = response.content

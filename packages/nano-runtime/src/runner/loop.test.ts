@@ -3,6 +3,7 @@ import test from "node:test"
 import { __loopTest } from "./loop"
 import { __loopToolsTest, processToolCalls } from "./loop-tools"
 import { modelState } from "./model-state"
+import { fallbackModel } from "./config"
 import type { Message, UserMessage } from "../types"
 import type { LoopState } from "./types"
 import { makeUserMessage, makeAssistantMessage, makeToolResultMessage } from "./test-helpers"
@@ -13,6 +14,7 @@ import {
   __discordTypingLeaseTest,
 } from "../discord/typing-lease"
 import { initDb, startConversation } from "../db"
+import { Context } from "../llm"
 
 const testClientTools = {
   getCapabilities: () => [],
@@ -24,8 +26,7 @@ const testClientTools = {
 
 function makeState(): LoopState {
   return {
-    systemPrompt: "",
-    conversation: [],
+    context: new Context({ model: fallbackModel }),
     pendingInputs: [],
     tokenCount: 0,
     contextSize: 0,
@@ -65,7 +66,7 @@ function makeTypingSupersessionHooks(state: LoopState, injected: UserMessage[]) 
   return {
     injectIncomingEvent: (_convId: number, event: UserMessage) => {
       injected.push(event)
-      state.conversation.push(makeUserMessage(`[incoming — ${event.source}]\n\n${event.content}`))
+      state.context.append(makeUserMessage(`[incoming — ${event.source}]\n\n${event.content}`))
     },
   } as never
 }
@@ -90,7 +91,7 @@ test("new Discord event stops typing for the superseded turn", (t) => {
   try {
     assert.equal(__loopToolsTest.maybeInterruptAfterTool(1, state, makeTypingSupersessionHooks(state, injected), [], 0), true)
     assert.equal(injected[0]?.source, "discord")
-    assert.equal(__loopTest.pendingDiscordChannel(state.conversation, state.conversation.length), "new-channel")
+    assert.equal(__loopTest.pendingDiscordChannel(state.context.items, state.context.items.length), "new-channel")
     t.mock.timers.tick(__discordTypingLeaseTest.fallbackMs + __discordTypingLeaseTest.refreshMs)
     assert.deepEqual(typingChannels, ["old-channel"])
   } finally {
@@ -118,7 +119,7 @@ test("new non-Discord event stops typing for the superseded Discord turn", (t) =
   try {
     assert.equal(__loopToolsTest.maybeInterruptAfterTool(1, state, makeTypingSupersessionHooks(state, injected), [], 0), true)
     assert.equal(injected[0]?.source, "chat")
-    assert.equal(__loopTest.pendingDiscordChannel(state.conversation, state.conversation.length), undefined)
+    assert.equal(__loopTest.pendingDiscordChannel(state.context.items, state.context.items.length), undefined)
     t.mock.timers.tick(__discordTypingLeaseTest.fallbackMs + __discordTypingLeaseTest.refreshMs)
     assert.deepEqual(typingChannels, ["old-channel"])
   } finally {
@@ -136,8 +137,8 @@ test("applyDiscordSendNudge appends a follow-up user nudge for unsent Discord re
   const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
 
   assert.equal(nudged, true)
-  assert.equal(state.conversation.length, 1)
-  assert.match(String(state.conversation[0]?.content), /did not call discord_send/i)
+  assert.equal(state.context.items.length, 1)
+  assert.match(String(state.context.items[0]?.content), /did not call discord_send/i)
 })
 
 test("applyDiscordSendNudge fires for [discord batch] envelopes (space, not slash)", () => {
@@ -150,24 +151,24 @@ test("applyDiscordSendNudge fires for [discord batch] envelopes (space, not slas
   const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
 
   assert.equal(nudged, true)
-  assert.equal(state.conversation.length, 1)
-  assert.match(String(state.conversation[0]?.content), /did not call discord_send/i)
+  assert.equal(state.context.items.length, 1)
+  assert.match(String(state.context.items[0]?.content), /did not call discord_send/i)
 })
 
 test("applyDiscordSendNudge fires after a harness restart when the discord event is pre-turn context", () => {
   const state = makeState()
-  state.conversation.push(
+  state.context.append(
     makeUserMessage("[harness restarted — discord @ 2026-05-01T04:30:00.000Z]\n\n[discord/dm] hi starfish"),
     makeAssistantMessage("i keep getting bounced by harness restarts sorry ^^ still here though! what's up?"),
   )
 
-  const turnMessages: Message[] = [state.conversation[1]!]
+  const turnMessages: Message[] = [state.context.items[1]!]
 
   const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages, 1)
 
   assert.equal(nudged, true)
-  assert.equal(state.conversation.length, 3)
-  assert.match(String(state.conversation[2]?.content), /did not call discord_send/i)
+  assert.equal(state.context.items.length, 3)
+  assert.match(String(state.context.items[2]?.content), /did not call discord_send/i)
 })
 
 test("applyDiscordSendNudge does not fire when discord_send was already called", () => {
@@ -190,12 +191,12 @@ test("applyDiscordSendNudge does not fire when discord_send was already called",
   const nudged = __loopTest.applyDiscordSendNudge(state, turnMessages)
 
   assert.equal(nudged, false)
-  assert.equal(state.conversation.length, 0)
+  assert.equal(state.context.items.length, 0)
 })
 
 test("applyDiscordSendNudge keeps a wake DM active across a preliminary tool step", () => {
   const state = makeState()
-  state.conversation.push(
+  state.context.append(
     makeUserMessage("[wake] 7/14/2026, 3:22:59 AM — triggered by discord\n\n[discord/dm] @meowskullz\n\nboop"),
     makeAssistantMessage("", {
       content: [{ type: "toolCall", id: "call_memory", name: "memory_read", arguments: { path: "wake.md" } }],
@@ -204,15 +205,15 @@ test("applyDiscordSendNudge keeps a wake DM active across a preliminary tool ste
     makeAssistantMessage("hey you ^.^"),
   )
 
-  const nudged = __loopTest.applyDiscordSendNudge(state, state.conversation.slice(1), 1)
+  const nudged = __loopTest.applyDiscordSendNudge(state, state.context.items.slice(1), 1)
 
   assert.equal(nudged, true)
-  assert.match(String(state.conversation[4]?.content), /did not call discord_send/i)
+  assert.match(String(state.context.items[4]?.content), /did not call discord_send/i)
 })
 
 test("applyDiscordSendNudge sees discord_send from an earlier tool step in the active user turn", () => {
   const state = makeState()
-  state.conversation.push(
+  state.context.append(
     makeUserMessage("[wake] 7/14/2026, 3:22:59 AM — triggered by discord\n\n[discord/dm] @meowskullz\n\nboop"),
     makeAssistantMessage("", {
       content: [{ type: "toolCall", id: "call_send", name: "discord_send", arguments: { source_item_id: "1", content: "boop" } }],
@@ -221,10 +222,10 @@ test("applyDiscordSendNudge sees discord_send from an earlier tool step in the a
     makeAssistantMessage("okay, delivered"),
   )
 
-  const nudged = __loopTest.applyDiscordSendNudge(state, state.conversation.slice(1), 1)
+  const nudged = __loopTest.applyDiscordSendNudge(state, state.context.items.slice(1), 1)
 
   assert.equal(nudged, false)
-  assert.equal(state.conversation.length, 4)
+  assert.equal(state.context.items.length, 4)
 })
 
 test("applyLoopGuardNudge appends an in-band user nudge", async () => {
@@ -256,9 +257,9 @@ test("applyLoopGuardNudge appends an in-band user nudge", async () => {
   // Persistence is deliberately deferred: the nudge lands in-band and is
   // written out later by the rest snapshot, not by applyLoopGuardNudge.
   assert.equal(saved, false)
-  assert.equal(state.conversation.length, 1)
-  assert.equal(state.conversation[0]?.role, "user")
-  assert.match(String(state.conversation[0]?.content), /loop guard tripped after 120 turns/i)
+  assert.equal(state.context.items.length, 1)
+  assert.equal(state.context.items[0]?.role, "user")
+  assert.match(String(state.context.items[0]?.content), /loop guard tripped after 120 turns/i)
 })
 
 test("waitForNextEvent waits for and injects the next external event", async () => {
@@ -330,7 +331,7 @@ test("wait tool yields to the runner idle wait instead of blocking on the raw ev
 
   assert.equal(outcome, "wait")
   assert.equal(rawWaitCalls, 0)
-  assert.equal(state.conversation.at(-1)?.role, "toolResult")
+  assert.equal(state.context.items.at(-1)?.role, "toolResult")
 })
 
 test("waitForNextEvent returns after successful compaction for immediate reactivation", async () => {
@@ -496,10 +497,10 @@ test("applyCompaction attempts an idle burn even below the token trigger", async
 
   const state = makeState()
   state.contextSize = 1_000 // well below trigger
-  state.conversation = [
+  state.context = state.context.fork({ items: [
     makeUserMessage("hello"),
     makeAssistantMessage("hi there"),
-  ]
+  ], reason: "edit" })
 
   const result = await __loopTest.applyCompaction(state, "idle")
   assert.equal(result, "none")
@@ -513,7 +514,7 @@ test("voice delegation nudges until voice_reply is called", () => {
   const delegation = makeUserMessage("[incoming — voice]\n\n[voice delegation]\ndelegation_id: d1\ntranscript: find it")
   const unsent = [delegation, makeAssistantMessage("the private result")]
   assert.equal(__loopTest.applyVoiceReplyNudge(state, unsent), true)
-  assert.match(String(state.conversation.at(-1)?.content), /did not call voice_reply/)
+  assert.match(String(state.context.items.at(-1)?.content), /did not call voice_reply/)
 
   const sent = [delegation, makeAssistantMessage("", {
     content: [{ type: "toolCall", id: "call_voice", name: "voice_reply", arguments: { delegation_id: "d1", input_text: "the result" } }],

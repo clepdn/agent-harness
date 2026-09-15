@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import fs from "fs/promises"
 import path from "path"
 import type { DiscordMessageTarget, Message } from "../types"
+import type { ContextForkReason } from "../llm"
 import { NANO_HOME } from "../agent-config"
 import { atomicWriteFile, isMissingFileError, quarantineFile } from "../durable-file"
 import type { ToolDefinition } from "@nano/harness-core"
@@ -36,12 +37,12 @@ type RestSnapshot = {
   summary: string
 }
 
-export function restSummaryFromMessages(messages: Message[]): string {
+export function restSummaryFromMessages(messages: readonly Message[]): string {
   const summaryIndex = findSummaryMessageIndex(messages)
   return summaryIndex >= 0 ? messageStringContent(messages[summaryIndex]!) : "(no llm context summary yet)"
 }
 
-export async function saveRestSnapshot(messages: Message[], note?: string, kind: RuntimeKind = "main"): Promise<void> {
+export async function saveRestSnapshot(messages: readonly Message[], note?: string, kind: RuntimeKind = "main"): Promise<void> {
   const trimmedNote = typeof note === "string" ? note.trim() : ""
   const snapshot: RestSnapshot = {
     restedAt: new Date().toISOString(),
@@ -92,6 +93,19 @@ export async function loadRestSnapshot(kind: RuntimeKind = "main"): Promise<Rest
 // ── Session persistence ───────────────────────────────────────────────────────
 
 export const SESSION_SNAPSHOT_VERSION = 1 as const
+const CONTEXT_FORK_REASONS = new Set<ContextForkReason>([
+  "fork",
+  "edit",
+  "truncate",
+  "compaction",
+  "sanitize",
+  "image-scrub",
+  "model-change",
+  "tools-change",
+  "settings-change",
+  "restore",
+  "reset",
+])
 
 export type SessionSnapshot = {
   version: typeof SESSION_SNAPSHOT_VERSION
@@ -99,6 +113,11 @@ export type SessionSnapshot = {
   toolCatalog: ToolDefinition[]
   toolCatalogEpoch: number
   toolCatalogFingerprint: string
+  contextId?: string
+  parentContextId?: string
+  contextForkReason?: ContextForkReason
+  contextConfigurationFingerprint?: string
+  contextModelId?: string
   discordTargets?: DiscordMessageTarget[]
 }
 
@@ -198,6 +217,16 @@ function parseSession(raw: string): SessionSnapshot {
   if (typeof candidate.toolCatalogFingerprint !== "string" || candidate.toolCatalogFingerprint !== fingerprint(candidate.toolCatalog)) {
     throw new Error("invalid session tool catalog fingerprint")
   }
+  if (candidate.contextId !== undefined && typeof candidate.contextId !== "string") throw new Error("invalid context id")
+  if (candidate.parentContextId !== undefined && typeof candidate.parentContextId !== "string") throw new Error("invalid parent context id")
+  if (candidate.contextForkReason !== undefined &&
+      (typeof candidate.contextForkReason !== "string" || !CONTEXT_FORK_REASONS.has(candidate.contextForkReason as ContextForkReason))) {
+    throw new Error("invalid context fork reason")
+  }
+  if (candidate.contextConfigurationFingerprint !== undefined && typeof candidate.contextConfigurationFingerprint !== "string") {
+    throw new Error("invalid context configuration fingerprint")
+  }
+  if (candidate.contextModelId !== undefined && typeof candidate.contextModelId !== "string") throw new Error("invalid context model id")
   return candidate as unknown as SessionSnapshot
 }
 

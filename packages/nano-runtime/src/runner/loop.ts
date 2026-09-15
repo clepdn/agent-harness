@@ -101,7 +101,7 @@ async function applyLoopGuardNudge(state: LoopState, _hooks: LoopHooks, reason: 
   const guardMessage =
     `[system] hey, you've been going for a while (${reason}). this is just a heads-up in case you're stuck and need help — most likely you're fine and don't need to do anything different, especially if you're actively doing something, in conversation with people, or things are happening RIGHT NOW. just keep going. resting is only a suggestion for if nothing's actually happening and you're genuinely done; if you do rest, remember to tell your important people first.`
   console.warn(`[runner] ${reason}`)
-  state.conversation.push({
+  state.context.append({
     role: "user",
     content: guardMessage,
     timestamp: Date.now(),
@@ -125,7 +125,7 @@ async function processAssistantTurn(convId: number, state: LoopState, hooks: Loo
   })
 
   const msg = response.message
-  addAssistantMessage(convId, state, msg)
+  addAssistantMessage(convId, msg)
 
   if (modelState.enableThinking) {
     if (!response.emittedThinking && response.bufferedThinking) {
@@ -158,8 +158,8 @@ function isDiscordInputMessage(message: Message): boolean {
 }
 
 function hasDiscordInputForTurn(
-  conversation: Message[],
-  turnMessages: Message[],
+  conversation: readonly Message[],
+  turnMessages: readonly Message[],
   turnStart: number,
 ): boolean {
   if (turnMessages.some(isDiscordInputMessage)) return true
@@ -179,13 +179,13 @@ function hasDiscordInputForTurn(
 
 function applyDiscordSendNudge(
   state: LoopState,
-  turnMessages: Message[],
-  turnStart = state.conversation.length,
+  turnMessages: readonly Message[],
+  turnStart = state.context.items.length,
 ): boolean {
   // Check if the assistant is responding to active Discord input, including
   // the post-restart case where the triggering user message is already in the
   // conversation before the turn begins.
-  const hasDiscordInput = hasDiscordInputForTurn(state.conversation, turnMessages, turnStart)
+  const hasDiscordInput = hasDiscordInputForTurn(state.context.items, turnMessages, turnStart)
   if (!hasDiscordInput) return false
 
   // Check if the assistant called discord_send in this turn
@@ -213,7 +213,7 @@ function applyDiscordSendNudge(
   // never actually sent it. Nudge.
   const nudge = `[system] you wrote a response to a Discord message but did not call discord_send. your message was not delivered. call discord_send now or explicitly decide not to reply.`
   console.warn("[runner] discord_send nudge: assistant responded to Discord input without calling discord_send")
-  state.conversation.push({ role: "user", content: nudge, timestamp: Date.now() })
+  state.context.append({ role: "user", content: nudge, timestamp: Date.now() })
   return true
 }
 
@@ -221,11 +221,11 @@ function isVoiceDelegationMessage(message: Message): boolean {
   return message.role === "user" && typeof message.content === "string" && message.content.includes("[voice delegation]")
 }
 
-function applyVoiceReplyNudge(state: LoopState, turnMessages: Message[], turnStart = state.conversation.length): boolean {
+function applyVoiceReplyNudge(state: LoopState, turnMessages: readonly Message[], turnStart = state.context.items.length): boolean {
   let hasDelegation = turnMessages.some(isVoiceDelegationMessage)
   if (!hasDelegation) {
     for (let i = turnStart - 1; i >= 0; i -= 1) {
-      const message = state.conversation[i]
+      const message = state.context.items[i]
       if (!message) continue
       if (message.role === "assistant") break
       if (isVoiceDelegationMessage(message)) { hasDelegation = true; break }
@@ -237,7 +237,7 @@ function applyVoiceReplyNudge(state: LoopState, turnMessages: Message[], turnSta
     (message as AssistantMessage).content.some((part) => part.type === "toolCall" && (part as ToolCall).name === "voice_reply")
   )
   if (replied) return false
-  state.conversation.push({
+  state.context.append({
     role: "user",
     content: "[system] this turn is answering a live voice delegation but did not call voice_reply. private text is not spoken. call voice_reply with the pending delegation_id and only the final answer intended for speech.",
     timestamp: Date.now(),
@@ -269,7 +269,7 @@ async function applyProactiveCompaction(state: LoopState): Promise<CompactionRes
   if (!provider.model) return "none"
 
   const { messages, compacted, attempted } = await proactiveCompaction(
-    state.conversation,
+    state.context.items,
     provider.model,
     provider.apiKey,
     TOOL_RESULT_COMPACTION_MIN_AGE_TURNS,
@@ -277,14 +277,14 @@ async function applyProactiveCompaction(state: LoopState): Promise<CompactionRes
   )
 
   if (attempted === 0) return "none"
-  state.conversation = messages
+  state.context = state.context.fork({ items: messages, reason: "compaction" })
   if (compacted === 0) {
     console.warn("[context] proactive: tool result could not be reduced; suppressing repeat attempts")
     return "suppressed"
   }
 
   const beforeEstimate = state.contextSize
-  state.contextSize = estimatePromptTokens(state.conversation)
+  state.contextSize = estimatePromptTokens(state.context.items)
   setContextSize(state.contextSize)
 
   console.log(
@@ -303,7 +303,7 @@ async function applyProactiveCompaction(state: LoopState): Promise<CompactionRes
 }
 
 /** Pull the summary text out of a compacted conversation, if present. */
-function extractSummaryText(messages: Message[]): string | undefined {
+function extractSummaryText(messages: readonly Message[]): string | undefined {
   const idx = findSummaryMessageIndex(messages)
   if (idx < 0) return undefined
   const msg = messages[idx]
@@ -316,7 +316,7 @@ function extractSummaryText(messages: Message[]): string | undefined {
  * content no longer survives verbatim in `after`. Used to feed the deep archive
  * the specifics the summary compressed away.
  */
-function discardedMessages(before: Message[], after: Message[]): Message[] {
+function discardedMessages(before: readonly Message[], after: readonly Message[]): Message[] {
   const kept = new Set(after.map((m) => messageStringContent(m)))
   return before.filter((m) => !kept.has(messageStringContent(m)))
 }
@@ -375,7 +375,7 @@ async function applyLLMCompaction(
   // `force` bypasses the gate — used on a clean end_session so the goodbye
   // leaves a real summary behind even below the trigger.
   if (!force && state.contextSize < modelState.compactTriggerTokens) return "none"
-  const beforeEstimate = estimatePromptTokens(state.conversation)
+  const beforeEstimate = estimatePromptTokens(state.context.items)
 
   // companion + context-full salvage lessons from the same head that generated
   // the conversation (private-reasoning models hide their CoT otherwise), and
@@ -391,11 +391,11 @@ async function applyLLMCompaction(
     return "none"
   }
 
-  const beforeCount = state.conversation.length
-  const beforeMessages = state.conversation
+  const beforeCount = state.context.items.length
+  const beforeMessages = state.context.items
   const agentContext = await loadAgentSummaryContext(state.runtimeKind)
   const summarized = await summarizeConversationViaLLM(
-    state.conversation,
+    state.context.items,
     summaryProvider.model,
     summaryProvider.apiKey,
     {
@@ -445,11 +445,11 @@ async function applyLLMCompaction(
     if (archived) console.log(`[context] deep archive: ${archived.note}`)
   }
 
-  state.conversation = summarized
+  state.context = state.context.fork({ items: summarized, reason: "compaction" })
   state.contextSize = estimatePromptTokens(summarized)
 
-  const summaryIdx = findSummaryMessageIndex(state.conversation)
-  const summaryMsg = summaryIdx >= 0 ? state.conversation[summaryIdx] : undefined
+  const summaryIdx = findSummaryMessageIndex(state.context.items)
+  const summaryMsg = summaryIdx >= 0 ? state.context.items[summaryIdx] : undefined
   const summary = summaryMsg?.role === "user" && typeof summaryMsg.content === "string" ? summaryMsg.content : undefined
 
   console.log(
@@ -496,7 +496,7 @@ export async function compactForShutdown(state: LoopState): Promise<CompactionRe
   if (strategy === "snapcompact") return applyLLMCompaction(state, "shutdown", "context-full", true)
   return applyLLMCompaction(state, "shutdown", strategy, true)
 }
-function pendingDiscordChannel(conversation: Message[], endExclusive: number): string | undefined {
+function pendingDiscordChannel(conversation: readonly Message[], endExclusive: number): string | undefined {
   for (let index = endExclusive - 1; index >= 0; index -= 1) {
     const message = conversation[index]
     if (!message) continue
@@ -536,7 +536,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     // null, loop continues here) and during tool processing.
     if (state.restRequested) {
       console.log(`[runner] programmatic rest requested: ${state.restReason}`)
-      await saveRestSnapshot(state.conversation, state.restReason, state.runtimeKind)
+      await saveRestSnapshot(state.context.items, state.restReason, state.runtimeKind)
       clearDiscordTypingScope(state)
       setWorking(false)
       setPromWorking(false)
@@ -552,10 +552,10 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       return "discard"
     }
 
-    const turnStart = state.conversation.length
+    const turnStart = state.context.items.length
     const typingTurnId = state.discordTypingTurnId ?? `${convId}:${turnCount + 1}`
     if (!state.discordTypingTurnId) {
-      const channel = state.discordTargets?.at(-1)?.channelId ?? pendingDiscordChannel(state.conversation, turnStart)
+      const channel = state.discordTargets?.at(-1)?.channelId ?? pendingDiscordChannel(state.context.items, turnStart)
       if (channel) {
         state.discordTypingTurnId = typingTurnId
         state.discordTypingChannelId = channel
@@ -613,7 +613,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       continue
     }
 
-    const turnMessages = state.conversation.slice(turnStart)
+    const turnMessages = state.context.items.slice(turnStart)
     const interruptedByUserEvent = hasIncomingUserMessage(turnMessages)
     const turnSignature = buildTurnSignature(turnMessages)
 
@@ -647,7 +647,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     // Programmatic rest (e.g. model swap that requires fresh context)
     if (state.restRequested) {
       console.log(`[runner] programmatic rest requested: ${state.restReason}`)
-      await saveRestSnapshot(state.conversation, state.restReason, state.runtimeKind)
+      await saveRestSnapshot(state.context.items, state.restReason, state.runtimeKind)
       clearDiscordTypingScope(state)
       setWorking(false)
       setPromWorking(false)
@@ -657,7 +657,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     if (outcome === CycleOutcome.NoTools) {
       if (deliveryNudged) continue
       if (modelStateFor(state.runtimeKind).primaryNudgeOnNoTool) {
-        state.conversation.push({
+        state.context.append({
           role: "user",
           content: "[system] Your turn would have ended here. If you really want to wait, call one of your wait tools. You'll stay in a tool loop otherwise.",
           timestamp: Date.now(),

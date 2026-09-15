@@ -58,7 +58,7 @@ test("runner persistence uses NANO_HOME when cwd is read-only", async (t) => {
       const toolCatalog = []
       const toolCatalogFingerprint = (await import("node:crypto")).createHash("sha256").update(JSON.stringify(toolCatalog)).digest("hex")
       const discordTargets = [{ position: 1, channelId: "hidden-channel", messageId: "hidden-message", itemId: "hidden-message", content: "hello" }]
-      await saveSession({ version: 1, messages, toolCatalog, toolCatalogEpoch: 1, toolCatalogFingerprint, discordTargets })
+      await saveSession({ version: 1, messages, toolCatalog, toolCatalogEpoch: 1, toolCatalogFingerprint, discordTargets, contextId: "ctx-current", parentContextId: "ctx-parent", contextForkReason: "compaction", contextConfigurationFingerprint: "config-hash", contextModelId: "test-model" })
       await saveRestSnapshot(messages, "checkpoint")
       initMetricsDb()
     `,
@@ -71,6 +71,11 @@ test("runner persistence uses NANO_HOME when cwd is read-only", async (t) => {
   assert.equal(savedSession.version, 1)
   assert.equal(savedSession.messages[0]?.content, "hello")
   assert.equal(savedSession.discordTargets?.[0]?.messageId, "hidden-message")
+  assert.equal(savedSession.contextId, "ctx-current")
+  assert.equal(savedSession.parentContextId, "ctx-parent")
+  assert.equal(savedSession.contextForkReason, "compaction")
+  assert.equal(savedSession.contextConfigurationFingerprint, "config-hash")
+  assert.equal(savedSession.contextModelId, "test-model")
   assert.equal(savedRest.note, "checkpoint")
   assert.equal((await fs.stat(path.join(home, "session.json"))).mode & 0o777, 0o600)
   assert.equal((await fs.stat(path.join(home, ".nano-rest-snapshot.json"))).mode & 0o777, 0o600)

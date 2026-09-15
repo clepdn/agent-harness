@@ -1,11 +1,11 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { Context } from "../llm"
 import type { AssistantMessage, Tool } from "../llm"
-import type { LoopState } from "./types"
 import { assistantContentText } from "./loop-content"
 import { messageStringContent } from "./messages"
 import { applyUsage, configuredSummaryProvider } from "./loop-completion"
-import { buildContext } from "./tools"
+import { getCompletionTools } from "./tools"
 import { modelState } from "./model-state"
 import { fallbackModel } from "./config"
 
@@ -67,7 +67,7 @@ test("applyUsage counts cacheWrite tokens toward contextSize (regression)", () =
   const state = {
     tokenCount: 0,
     contextSize: 0,
-    conversation: [],
+    context: new Context({ model: fallbackModel }),
   } as unknown as import("./types").LoopState
   const usage = {
     input: 1000,
@@ -105,11 +105,7 @@ test("configured summary preference bypasses prompt-cache suppression without fa
 })
 
 test("completion context includes dynamic server memory tools without dropping legacy tools", () => {
-  const state = {
-    systemPrompt: "test",
-    conversation: [],
-  } as unknown as LoopState
-  const context = buildContext(state, [
+  const completionTools = getCompletionTools([
     {
       type: "function",
       function: {
@@ -127,7 +123,7 @@ test("completion context includes dynamic server memory tools without dropping l
       },
     },
   ])
-  const names = (context.tools as Tool[]).map((tool) => tool.name)
+  const names = (completionTools as Tool[]).map((tool) => tool.name)
 
   assert.equal(names.includes("memory_write"), true)
   assert.equal(names.includes("memory_read"), true)
@@ -136,11 +132,7 @@ test("completion context includes dynamic server memory tools without dropping l
 })
 
 test("completion context does not reopen dynamically gated Discord tools", () => {
-  const state = {
-    systemPrompt: "test",
-    conversation: [],
-  } as unknown as LoopState
-  const names = (buildContext(state, [
+  const names = (getCompletionTools([
     {
       type: "function",
       function: {
@@ -149,7 +141,7 @@ test("completion context does not reopen dynamically gated Discord tools", () =>
         parameters: { type: "object", properties: {} },
       },
     },
-  ]).tools as Tool[]).map((tool) => tool.name)
+  ]) as Tool[]).map((tool) => tool.name)
 
   assert.equal(names.includes("memory_read"), true)
   assert.equal(names.includes("discord_send"), false)

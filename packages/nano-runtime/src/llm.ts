@@ -5,9 +5,15 @@
  * but backed by the `openai` npm package instead of pi-ai's provider abstraction.
  */
 
+import { createHash, randomUUID } from "node:crypto"
 import OpenAI from "openai"
 import { codexServiceTier } from "./codex-fast-mode"
-import { enabledContextImages, prepareContextImages, type ContextImageState } from "./context-images"
+import {
+  enabledContextImages,
+  prepareContextImages,
+  type ContextImageAttachment,
+  type ContextImageState,
+} from "./context-images"
 
 // ── Content part types ────────────────────────────────────────────────────────
 
@@ -126,7 +132,8 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 
 // ── Context ────────────────────────────────────────────────────────────────────
 
-export interface Context {
+/** The wire-level prompt shape accepted by the low-level completion helpers. */
+export interface CompletionContext {
   systemPrompt?: string
   messages: Message[]
   tools?: Tool[]
@@ -150,6 +157,280 @@ export type ProviderStreamOptions = StreamOptions & Record<string, unknown>
 export interface OpenAICompletionsOptions extends StreamOptions {
   toolChoice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } }
   reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh"
+}
+
+export type ContextForkReason =
+  | "fork"
+  | "edit"
+  | "truncate"
+  | "compaction"
+  | "sanitize"
+  | "image-scrub"
+  | "model-change"
+  | "tools-change"
+  | "settings-change"
+  | "restore"
+  | "reset"
+
+export interface ContextOptions {
+  model: Model
+  systemPrompt?: string
+  tools?: Tool[]
+  toolChoice?: OpenAICompletionsOptions["toolChoice"]
+  thinkingLevel?: OpenAICompletionsOptions["reasoningEffort"]
+  includeContextImages?: boolean
+  temperature?: number
+  maxTokens?: number
+  headers?: Record<string, string>
+  apiKey?: string
+  items?: readonly Message[]
+  id?: string
+  parentId?: string
+  forkReason?: ContextForkReason
+}
+
+export interface ContextCompletionOptions {
+  signal?: AbortSignal
+  timeoutMs?: number
+  maxRetries?: number
+  onEvent?: (event: AssistantMessageEvent) => void | Promise<void>
+}
+
+export interface ContextForkOptions extends Partial<Omit<ContextOptions, "id" | "parentId" | "forkReason" | "model">> {
+  model?: Model
+  reason?: ContextForkReason
+}
+
+export type ContextItem = Message & { readonly context: Context }
+
+export class ContextChangedError extends Error {
+  constructor(message = "Context changed while completion was in flight") {
+    super(message)
+    this.name = "ContextChangedError"
+  }
+}
+
+function cloneMessage(message: Message): Message {
+  return structuredClone(message)
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value
+  if (ArrayBuffer.isView(value)) return value
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child)
+  return Object.freeze(value)
+}
+
+function contextItem(owner: Context, message: Message, index: number): ContextItem {
+  const item = cloneMessage(message) as ContextItem
+  Object.defineProperty(item, "context", {
+    configurable: false,
+    enumerable: false,
+    get: () => owner.forkAt(index),
+  })
+  return deepFreeze(item)
+}
+
+/**
+ * One cache lineage of model-visible state.
+ *
+ * `append` is the only operation that changes an existing Context. Anything
+ * that changes an earlier item or request configuration returns a new Context,
+ * making cache-invalidating operations explicit at the call site.
+ */
+export class Context {
+  readonly id: string
+  readonly parentId?: string
+  readonly forkReason?: ContextForkReason
+  readonly model: Model
+  readonly systemPrompt?: string
+  readonly tools?: readonly Tool[]
+  readonly toolChoice?: OpenAICompletionsOptions["toolChoice"]
+  readonly thinkingLevel?: OpenAICompletionsOptions["reasoningEffort"]
+  readonly includeContextImages: boolean
+  readonly temperature?: number
+  readonly maxTokens?: number
+  readonly headers?: Readonly<Record<string, string>>
+  readonly apiKey?: string
+
+  private _items: readonly ContextItem[] = Object.freeze([])
+  private revision = 0
+  private readonly imageHydration = new Map<number, {
+    imageAttachments?: ContextImageAttachment[]
+    imageNotes?: string[]
+  }>()
+
+  constructor(options: ContextOptions) {
+    this.id = options.id ?? randomUUID()
+    this.parentId = options.parentId
+    this.forkReason = options.forkReason
+    this.model = deepFreeze(structuredClone(options.model))
+    this.systemPrompt = options.systemPrompt
+    this.tools = options.tools ? deepFreeze(structuredClone(options.tools)) : undefined
+    this.toolChoice = typeof options.toolChoice === "object"
+      ? deepFreeze(structuredClone(options.toolChoice))
+      : options.toolChoice
+    this.thinkingLevel = options.thinkingLevel
+    this.includeContextImages = options.includeContextImages ?? true
+    this.temperature = options.temperature
+    this.maxTokens = options.maxTokens
+    this.headers = options.headers ? deepFreeze(structuredClone(options.headers)) : undefined
+    this.apiKey = options.apiKey
+    for (const item of options.items ?? []) this.append(item)
+  }
+
+  get items(): readonly ContextItem[] {
+    return this._items
+  }
+
+  get configurationFingerprint(): string {
+    return createHash("sha256").update(JSON.stringify({
+      model: this.model,
+      systemPrompt: this.systemPrompt,
+      tools: this.tools,
+      toolChoice: this.toolChoice,
+      thinkingLevel: this.thinkingLevel,
+      includeContextImages: this.includeContextImages,
+      temperature: this.temperature,
+      maxTokens: this.maxTokens,
+      headers: this.headers,
+    })).digest("hex")
+  }
+
+  /** Mutable snapshot for persistence or building an explicit fork. */
+  snapshot(): Message[] {
+    return this._items.map((item, index) => {
+      const message = cloneMessage(item)
+      if (message.role === "assistant") return message
+      const hydrated = this.imageHydration.get(index)
+      if (hydrated?.imageAttachments) message.imageAttachments = structuredClone(hydrated.imageAttachments)
+      if (hydrated?.imageNotes) message.imageNotes = [...hydrated.imageNotes]
+      return message
+    })
+  }
+
+  append(item: Message | readonly Message[], ...more: Message[]): this {
+    const additions = Array.isArray(item) ? [...item, ...more] : [item as Message, ...more]
+    if (additions.length === 0) return this
+    const start = this._items.length
+    const next = additions.map((message, offset) => contextItem(this, message, start + offset))
+    this._items = Object.freeze([...this._items, ...next])
+    this.revision += additions.length
+    return this
+  }
+
+  fork(options: ContextForkOptions = {}): Context {
+    const has = (key: keyof ContextForkOptions) => Object.prototype.hasOwnProperty.call(options, key)
+    return new Context({
+      model: has("model") ? options.model ?? this.model : this.model,
+      systemPrompt: has("systemPrompt") ? options.systemPrompt : this.systemPrompt,
+      tools: has("tools") ? options.tools : this.tools ? [...this.tools] : undefined,
+      toolChoice: has("toolChoice") ? options.toolChoice : this.toolChoice,
+      thinkingLevel: has("thinkingLevel") ? options.thinkingLevel : this.thinkingLevel,
+      includeContextImages: (has("includeContextImages") ? options.includeContextImages : this.includeContextImages) ?? true,
+      temperature: has("temperature") ? options.temperature : this.temperature,
+      maxTokens: has("maxTokens") ? options.maxTokens : this.maxTokens,
+      headers: has("headers") ? options.headers : this.headers ? { ...this.headers } : undefined,
+      apiKey: has("apiKey") ? options.apiKey : this.apiKey,
+      items: has("items") ? options.items : this._items,
+      parentId: this.id,
+      forkReason: options.reason ?? "fork",
+    })
+  }
+
+  forkAt(index: number): Context {
+    this.assertIndex(index)
+    return this.fork({ items: this._items.slice(0, index + 1), reason: "truncate" })
+  }
+
+  edit(index: number, replacement: Message): Context {
+    this.assertIndex(index)
+    const items = this.snapshot().slice(0, index)
+    items.push(replacement)
+    return this.fork({ items, reason: "edit" })
+  }
+
+  private assertIndex(index: number): void {
+    if (!Number.isInteger(index) || index < 0 || index >= this._items.length) {
+      throw new RangeError(`Context item index ${index} is out of bounds`)
+    }
+  }
+
+  /** Recreate a persisted lineage without treating restoration as a fresh fork. */
+  static restore(options: ContextOptions): Context {
+    return new Context({ ...options, forkReason: options.forkReason ?? "restore" })
+  }
+
+  private requestContext(messages: Message[]): CompletionContext {
+    return {
+      systemPrompt: this.systemPrompt,
+      messages,
+      tools: this.tools ? structuredClone([...this.tools]) : undefined,
+    }
+  }
+
+  private async requestMessages(): Promise<Message[]> {
+    const messages = this.snapshot()
+    if (!this.model.input.includes("image") || !this.includeContextImages) return messages
+    await prepareContextImages(messages)
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index]
+      if (!message || message.role === "assistant") continue
+      if (message.imageAttachments?.length || message.imageNotes?.length) {
+        this.imageHydration.set(index, {
+          ...(message.imageAttachments ? { imageAttachments: structuredClone(message.imageAttachments) } : {}),
+          ...(message.imageNotes ? { imageNotes: [...message.imageNotes] } : {}),
+        })
+      }
+    }
+    return messages
+  }
+
+  private completionOptions(options: ContextCompletionOptions = {}): OpenAICompletionsOptions {
+    return {
+      includeContextImages: this.includeContextImages,
+      ...(this.apiKey ? { apiKey: this.apiKey } : {}),
+      ...(this.toolChoice ? { toolChoice: this.toolChoice } : {}),
+      ...(this.thinkingLevel ? { reasoningEffort: this.thinkingLevel } : {}),
+      ...(this.temperature !== undefined ? { temperature: this.temperature } : {}),
+      ...(this.maxTokens !== undefined ? { maxTokens: this.maxTokens } : {}),
+      ...(this.headers ? { headers: { ...this.headers } } : {}),
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+      ...(options.maxRetries !== undefined ? { maxRetries: options.maxRetries } : {}),
+    }
+  }
+
+  /** Complete this lineage and append the assistant response as one atomic step. */
+  async complete(options: ContextCompletionOptions = {}): Promise<AssistantMessage> {
+    const expectedRevision = this.revision
+    const messages = await this.requestMessages()
+    const { onEvent, ...requestOptions } = options
+    let result: AssistantMessage
+    if (onEvent) {
+      const events = stream(
+        this.model,
+        this.requestContext(messages),
+        this.completionOptions(requestOptions),
+      )
+      for await (const event of events) await onEvent(event)
+      result = await events.result()
+    } else {
+      result = await requestCompletion(
+        this.model,
+        this.requestContext(messages),
+        this.completionOptions(requestOptions),
+      )
+    }
+    if (result.stopReason === "error" || result.stopReason === "aborted") {
+      throw new Error(result.errorMessage ?? `Completion ${result.stopReason}`)
+    }
+    if (this.revision !== expectedRevision) {
+      throw new ContextChangedError("Context changed while completion was in flight; refusing to append a stale assistant response")
+    }
+    this.append(result)
+    return result
+  }
 }
 
 // ── Event protocol ─────────────────────────────────────────────────────────────
@@ -276,7 +557,7 @@ function createClient(model: Model, apiKey: string, options?: StreamOptions): Op
 
 /** Convert our Context messages to OpenAI chat completion message params. */
 function convertMessages(
-  context: Context,
+  context: CompletionContext,
   model: Model,
   includeContextImages = true,
 ): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
@@ -470,7 +751,7 @@ function mapStopReason(reason: string | null): { stopReason: StopReason; errorMe
 /** Build the OpenAI completion params from our model, context, and options. */
 function buildParams(
   model: Model,
-  context: Context,
+  context: CompletionContext,
   options?: OpenAICompletionsOptions,
   stream: boolean = false,
 ): OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming | OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming {
@@ -588,7 +869,7 @@ function extractAssistantMessage(
  */
 export function stream(
   model: Model,
-  context: Context,
+  context: CompletionContext,
   options?: OpenAICompletionsOptions,
 ): AssistantMessageEventStream {
   const eventStream = new AssistantMessageEventStream()
@@ -815,9 +1096,9 @@ export function stream(
  * Get a non-streaming completion from an OpenAI-compatible endpoint.
  * Returns the final AssistantMessage directly.
  */
-export async function complete(
+async function requestCompletion(
   model: Model,
-  context: Context,
+  context: CompletionContext,
   options?: OpenAICompletionsOptions,
 ): Promise<AssistantMessage> {
   const apiKey = options?.apiKey || ""
@@ -833,4 +1114,13 @@ export async function complete(
 
   const response = await client.chat.completions.create(params, requestOptions)
   return extractAssistantMessage(response, model)
+}
+
+/** Low-level non-streaming helper for stateless request adapters and tests. */
+export async function complete(
+  model: Model,
+  context: CompletionContext,
+  options?: OpenAICompletionsOptions,
+): Promise<AssistantMessage> {
+  return requestCompletion(model, context, options)
 }

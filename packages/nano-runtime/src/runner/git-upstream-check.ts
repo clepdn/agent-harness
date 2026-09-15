@@ -98,7 +98,7 @@ export function checkGitUpstream(
       // 5. Nag only when fetch actually moved, created, or deleted a remote ref.
       if (remoteRefs === "changed") {
         const nag = `[system] This repo's remote has been updated! (${toplevel})\nRecent changes fetched from upstream. You may need to pull and rebase your local changes to stay in sync.`
-        state.conversation.push({
+        state.context.append({
           role: "user",
           content: nag,
           timestamp: Date.now(),

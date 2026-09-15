@@ -1,4 +1,4 @@
-import type { Message as PiMessage } from "./llm"
+import type { Context, Message as PiMessage } from "./llm"
 
 /**
  * Pi-ai's canonical conversation message type.
@@ -33,8 +33,7 @@ export interface UserMessage {
 
 export interface RunnerState {
   running: boolean
-  systemPrompt: string
-  conversation: Message[]
+  context: Context
   pendingInputs: UserMessage[]
   tokenCount: number
   contextSize: number

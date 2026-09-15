@@ -59,13 +59,13 @@ export function pushToolMessage(convId: number, state: LoopState, call: Function
     isError: safe.startsWith("error:"),
     timestamp: Date.now(),
   }
-  state.conversation.push(toolMsg)
+  state.context.append(toolMsg)
   logMessage(convId, "toolResult", safe, undefined, call.id)
   return safe
 }
 
 function hasToolResponse(state: LoopState, call: FunctionToolCall): boolean {
-  return state.conversation.some(
+  return state.context.items.some(
     (message) => message.role === "toolResult" && message.toolCallId === call.id,
   )
 }
@@ -114,10 +114,15 @@ export async function runStandardTool<
   const content = raw || spec.emptyFallback || raw
   const emitArgs = spec.emitArgKeys ? pickArgsByKeys(ctx.args, spec.emitArgKeys) : ctx.args
   recordToolResult(ctx.convId, ctx.state, ctx.call, spec.name, emitArgs, content)
-  const message = ctx.state.conversation.at(-1)
+  const message = ctx.state.context.items.at(-1)
   if (message?.role === "toolResult") {
     const refs = await toolContextImageReferences(spec.name, ctx.args, content).catch(() => [])
-    if (refs.length) message.imageReferences = refs
+    if (refs.length) {
+      ctx.state.context = ctx.state.context.edit(
+        ctx.state.context.items.length - 1,
+        { ...message, imageReferences: refs },
+      )
+    }
   }
   return {}
 }

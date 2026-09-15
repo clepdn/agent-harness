@@ -20,6 +20,8 @@ import { fromBoredom } from "../triggers/boredom"
 import { createBoredomTimer } from "./boredom-timer"
 import { discordEventImageReferences } from "../discord/context-avatars"
 import { cancelRunningJobs } from "./jobs"
+import { createRuntimeContext } from "./context"
+import { getCompletionTools } from "./tools"
 
 let shutdownResolvers: Array<() => void> = []
 const PROCESS_STARTED_AT = new Date().toISOString()
@@ -47,7 +49,8 @@ function refreshToolCatalog(reason: "new-session" | "post-compaction"): void {
   state.toolCatalogFingerprint = catalogFingerprint(catalog)
   state.toolCatalogEpoch += 1
   if (reason === "post-compaction") {
-    state.conversation.push({
+    state.context = state.context.fork({ tools: getCompletionTools(catalog), reason: "tools-change" })
+    state.context.append({
       role: "user",
       content: `[tool environment epoch ${state.toolCatalogEpoch}] Tool catalog refreshed after context rewrite. Active workspace and client capabilities are now those captured at this epoch.`,
       timestamp: Date.now(),
@@ -72,7 +75,8 @@ function reconcileAgentChannelCatalog(): void {
   }
   state.toolCatalogFingerprint = catalogFingerprint(state.toolCatalog)
   state.toolCatalogEpoch += 1
-  state.conversation.push({
+  state.context = state.context.fork({ tools: getCompletionTools(state.toolCatalog), reason: "tools-change" })
+  state.context.append({
     role: "user",
     content: `[tool environment epoch ${state.toolCatalogEpoch}] The durable main/frontend agent channel is now ${config.frontend.enable ? "available" : "unavailable"}.`,
     timestamp: Date.now(),
@@ -83,8 +87,7 @@ const state: RunnerStateInternal = {
   runtimeKind: "main",
   contextSize: 0,
   running: false,
-  systemPrompt: "",
-  conversation: [],
+  context: createRuntimeContext("main"),
   pendingInputs: [],
   tokenCount: 0,
   toolCatalog: [],
@@ -295,7 +298,7 @@ export function startBoredomTimer(): void {
  */
 export async function shutdown(): Promise<void> {
   boredomTimer.stop()
-  if (!state.running || state.conversation.length === 0) return
+  if (!state.running || state.context.items.length === 0) return
 
   state.shutdownRequested = true
   interruptEventWaiters()
@@ -322,16 +325,21 @@ function resolveShutdown(): void {
 }
 
 async function saveRuntimeSnapshot(): Promise<void> {
-  archiveContextMessages(state.conversation, "runtime-checkpoint", state.runtimeKind)
+  archiveContextMessages(state.context.items, "runtime-checkpoint", state.runtimeKind)
   await saveSession({
     version: 1,
-    messages: state.conversation,
+    messages: state.context.snapshot(),
+    contextId: state.context.id,
+    parentContextId: state.context.parentId,
+    contextForkReason: state.context.forkReason,
+    contextConfigurationFingerprint: state.context.configurationFingerprint,
+    contextModelId: state.context.model.id,
     toolCatalog: state.toolCatalog,
     toolCatalogEpoch: state.toolCatalogEpoch,
     toolCatalogFingerprint: state.toolCatalogFingerprint,
     ...(state.discordTargets?.length ? { discordTargets: state.discordTargets } : {}),
   })
-  await saveRestSnapshot(state.conversation, "runtime checkpoint")
+  await saveRestSnapshot(state.context.items, "runtime checkpoint")
 }
 
 /** Wait until the next event arrives (or return immediately if one is pending). */
@@ -417,7 +425,7 @@ function injectIncomingEvent(convId: number, event: UserMessage): void {
   applyDiscordTargets(event)
   autoSeeDiscordEvent(event)
   const incomingMessage = formatIncomingEvent(event)
-  state.conversation.push({
+  state.context.append({
     role: "user",
     content: incomingMessage,
     imageReferences: discordEventImageReferences(event),
@@ -463,7 +471,13 @@ export async function wake(event: UserMessage): Promise<void> {
 
   const saved = await loadSession()
   if (saved) {
-    state.conversation = saved.messages
+    state.context = createRuntimeContext("main", saved.messages, saved.toolCatalog, {
+      id: saved.contextId,
+      parentId: saved.parentContextId,
+      forkReason: saved.contextForkReason,
+      configurationFingerprint: saved.contextConfigurationFingerprint,
+      modelId: saved.contextModelId,
+    })
     state.toolCatalog = saved.toolCatalog
     state.toolCatalogEpoch = saved.toolCatalogEpoch
     state.toolCatalogFingerprint = saved.toolCatalogFingerprint
@@ -471,7 +485,7 @@ export async function wake(event: UserMessage): Promise<void> {
     applyDiscordTargets(event)
     reconcileAgentChannelCatalog()
     autoSeeDiscordEvent(event)
-    state.conversation.push({
+    state.context.append({
       role: "user",
       content: `[harness restarted — ${event.source} @ ${event.triggeredAt}]\n\n${event.content}`,
       imageReferences: discordEventImageReferences(event),
@@ -483,7 +497,7 @@ export async function wake(event: UserMessage): Promise<void> {
     autoSeeDiscordEvent(event)
     const restSnapshot = await loadRestSnapshot()
     const priorRest = restSnapshot ? { restedAt: restSnapshot.restedAt, note: restSnapshot.note, forest: restSnapshot.summary } : null
-    state.conversation = await buildBootstrap(event, priorRest, {
+    const bootstrap = await buildBootstrap(event, priorRest, {
       clientCapabilities: clientTools.getCapabilities(),
       workspace: clientTools.getWorkspace(),
       discord: areDiscordToolsAvailable(),
@@ -491,6 +505,7 @@ export async function wake(event: UserMessage): Promise<void> {
     })
     state.toolCatalogEpoch = 0
     refreshToolCatalog("new-session")
+    state.context = createRuntimeContext("main", bootstrap, state.toolCatalog)
   }
   const convId = startConversation(event.source, event.triggeredAt)
   console.log("[runner] nano is awake")
@@ -515,7 +530,12 @@ export async function wake(event: UserMessage): Promise<void> {
       discarded = true
       const archive = await archiveDiscardedSession({
         version: 1,
-        messages: state.conversation,
+        messages: state.context.snapshot(),
+        contextId: state.context.id,
+        parentContextId: state.context.parentId,
+        contextForkReason: state.context.forkReason,
+        contextConfigurationFingerprint: state.context.configurationFingerprint,
+        contextModelId: state.context.model.id,
         toolCatalog: state.toolCatalog,
         toolCatalogEpoch: state.toolCatalogEpoch,
         toolCatalogFingerprint: state.toolCatalogFingerprint,
@@ -537,7 +557,7 @@ export async function wake(event: UserMessage): Promise<void> {
     const wasShutdownRequested = state.shutdownRequested
     endConversation(convId, state.tokenCount)
     state.running = false
-    state.conversation = []
+    state.context = state.context.fork({ items: [], reason: "reset" })
     state.toolInFlight = false
     state.memoryRecallCooldowns = {}
     state.memoryRecallTurn = 0
