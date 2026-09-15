@@ -16,6 +16,8 @@ import { setGatewayCallbacks } from "./discord/slash-commands"
 import { startDiscordEmbeddingBackfill } from "./discord/search"
 import { setDiscordToolsAvailable } from "./discord/availability"
 import { ensureSoulFilePlacement } from "./bootstrap"
+import { reconcileFrontendSoul } from "./frontend-soul"
+import { clearSession } from "./runner/session"
 import { clientTools } from "./client"
 import { config } from "./config"
 
@@ -56,6 +58,15 @@ async function main() {
   await clientTools.start()
 
   await ensureSoulFilePlacement()
+  let frontendSoulConflict = false
+  if (config.frontend.enable) {
+    const frontendSoul = await reconcileFrontendSoul()
+    frontendSoulConflict = frontendSoul.conflicted
+    if (frontendSoul.requiresFreshSession) {
+      await clearSession("frontend")
+      console.warn(`[frontend soul] ${frontendSoul.conflicted ? "merge conflict requires frontend reconciliation" : "rebased onto the current main soul"}; cleared the stale frontend session`)
+    }
+  }
   initDb()
   initMetricsDb()
 
@@ -94,6 +105,15 @@ async function main() {
     console.warn("[discord gateway] startup failed:", err)
   }
   setDiscordToolsAvailable(Boolean(discordGateway))
+
+  if (frontendSoulConflict) {
+    activateFrontend({
+      source: "system",
+      triggeredAt: new Date().toISOString(),
+      raw: null,
+      content: "[frontend soul merge conflict] Your virtual memory://soul.md contains unresolved merge markers after the main soul changed. Read memory://soul.md, reconcile the main and frontend versions, then edit the virtual soul to remove all markers. Your edits update the frontend patch; the main soul is unchanged.",
+    })
+  }
 
   // Replay durable virtual-agent mail only after client, jobs, compaction, and
   // Discord availability are initialized. A replay may wake either loop and

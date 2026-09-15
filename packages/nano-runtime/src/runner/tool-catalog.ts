@@ -302,15 +302,14 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
       ),
       functionTool(
         "discord_send",
-        "Send a text message through this agent worker's Discord connection.",
+        "Send a Discord message. Omit target to answer the latest message in the active Discord event. Use its shown target number or a prefix of its text to select a specific message.",
         {
           type: "object",
           additionalProperties: false,
           properties: {
             channel_id: { type: "string" },
             content: { type: "string" },
-            source_item_id: { type: "string" },
-            reference_message: { type: "string" },
+            target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }] },
             reply_mode: { type: "string", enum: ["auto", "plain", "explicit"] },
           },
           required: ["content"],
@@ -355,8 +354,7 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
             channel_id: { type: "string" },
             file_path: { type: "string" },
             content: { type: "string" },
-            source_item_id: { type: "string" },
-            reference_message: { type: "string" },
+            target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }] },
             reply_mode: { type: "string", enum: ["auto", "plain", "explicit"] },
           },
           required: ["file_path"],
@@ -442,13 +440,12 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
     tools.push(
       functionTool(
         "agent_send",
-        "Send a durable message to the other virtual agent. The recipient is main when called by frontend, and frontend when called by main. The message wakes the recipient and the returned id can be used to correlate replies.",
+        "Send a durable message to the other virtual agent. The recipient is main when called by frontend, and frontend when called by main. The message wakes the recipient.",
         {
           type: "object",
           additionalProperties: false,
           properties: {
             content: { type: "string", minLength: 1 },
-            reply_to: { type: "string", description: "Optional agent-channel message id being answered." },
           },
           required: ["content"],
         },

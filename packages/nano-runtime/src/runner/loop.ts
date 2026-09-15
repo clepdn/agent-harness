@@ -393,7 +393,7 @@ async function applyLLMCompaction(
 
   const beforeCount = state.conversation.length
   const beforeMessages = state.conversation
-  const agentContext = await loadAgentSummaryContext()
+  const agentContext = await loadAgentSummaryContext(state.runtimeKind)
   const summarized = await summarizeConversationViaLLM(
     state.conversation,
     summaryProvider.model,
@@ -555,7 +555,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     const turnStart = state.conversation.length
     const typingTurnId = state.discordTypingTurnId ?? `${convId}:${turnCount + 1}`
     if (!state.discordTypingTurnId) {
-      const channel = pendingDiscordChannel(state.conversation, turnStart)
+      const channel = state.discordTargets?.at(-1)?.channelId ?? pendingDiscordChannel(state.conversation, turnStart)
       if (channel) {
         state.discordTypingTurnId = typingTurnId
         state.discordTypingChannelId = channel

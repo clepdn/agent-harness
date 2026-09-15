@@ -8,7 +8,6 @@ type AgentChannelRow = {
   sender: RuntimeKind
   recipient: RuntimeKind
   content: string
-  reply_to: string | null
   created_at: string
   delivered_at: string | null
 }
@@ -27,17 +26,14 @@ function eventFor(row: AgentChannelRow): UserMessage {
     triggeredAt: row.created_at,
     content: [
       `[agent channel] from ${row.sender}`,
-      `message_id: ${row.id}`,
-      row.reply_to ? `reply_to: ${row.reply_to}` : null,
       "",
       row.content,
-    ].filter((line): line is string => line !== null).join("\n"),
+    ].join("\n"),
     raw: {
       type: "agent_channel",
       id: row.id,
       sender: row.sender,
       recipient: row.recipient,
-      replyTo: row.reply_to,
     },
   }
 }
@@ -59,7 +55,7 @@ export function configureAgentChannelDelivery(callback: AgentChannelDelivery | n
   deliver = callback
   if (!callback) return
   const pending = getDb().prepare(
-    `select id, sender, recipient, content, reply_to, created_at, delivered_at
+    `select id, sender, recipient, content, created_at, delivered_at
      from agent_channel_messages
      where delivered_at is null
      order by created_at asc, id asc`,
@@ -71,32 +67,24 @@ export function configureAgentChannelDelivery(callback: AgentChannelDelivery | n
 export function sendAgentChannelMessage(
   sender: RuntimeKind,
   content: unknown,
-  replyTo?: unknown,
 ): Record<string, unknown> {
   if (typeof content !== "string" || !content.trim()) throw new Error("content is required")
   const cleanContent = content.trim()
   if (Buffer.byteLength(cleanContent, "utf8") > 64_000) {
     throw new Error("agent channel content exceeds 64000 bytes")
   }
-  const cleanReplyTo = typeof replyTo === "string" && replyTo.trim() ? replyTo.trim() : null
-  if (cleanReplyTo) {
-    const exists = getDb().prepare("select 1 from agent_channel_messages where id = ?").get(cleanReplyTo)
-    if (!exists) throw new Error(`unknown agent channel reply_to id: ${cleanReplyTo}`)
-  }
-
   const row: AgentChannelRow = {
     id: `agent_${randomUUID()}`,
     sender,
     recipient: otherAgent(sender),
     content: cleanContent,
-    reply_to: cleanReplyTo,
     created_at: new Date().toISOString(),
     delivered_at: null,
   }
   getDb().prepare(
     `insert into agent_channel_messages
-       (id, sender, recipient, content, reply_to, created_at, delivered_at)
-     values (@id, @sender, @recipient, @content, @reply_to, @created_at, null)`,
+       (id, sender, recipient, content, created_at, delivered_at)
+     values (@id, @sender, @recipient, @content, @created_at, null)`,
   ).run(row)
   const delivered = tryDeliver(row)
   return {
@@ -104,7 +92,6 @@ export function sendAgentChannelMessage(
     id: row.id,
     sender: row.sender,
     recipient: row.recipient,
-    reply_to: row.reply_to,
     created_at: row.created_at,
     delivered,
   }
@@ -126,7 +113,7 @@ export function listAgentChannelMessages(params: {
     beforeCreatedAt = row.created_at
   }
   const rows = getDb().prepare(
-    `select id, sender, recipient, content, reply_to, created_at, delivered_at
+    `select id, sender, recipient, content, created_at, delivered_at
      from agent_channel_messages
      where (? = '' or created_at < ? or (created_at = ? and id < ?))
      order by created_at desc, id desc
@@ -138,7 +125,6 @@ export function listAgentChannelMessages(params: {
       sender: row.sender,
       recipient: row.recipient,
       content: row.content,
-      reply_to: row.reply_to,
       created_at: row.created_at,
       delivered: row.delivered_at !== null,
     })),

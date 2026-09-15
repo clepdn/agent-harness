@@ -1,4 +1,4 @@
-import type { Message, UserMessage, RunnerState } from "../types"
+import type { DiscordMessageTarget, Message, UserMessage, RunnerState } from "../types"
 import type { ClientToolExecutor, ToolDefinition } from "@nano/harness-core"
 
 export type CompactionResult = "none" | "rewritten" | "suppressed"
@@ -57,6 +57,8 @@ export interface LoopState {
   /** Stable outbound Discord response scope across tool-producing iterations. */
   discordTypingTurnId?: string
   discordTypingChannelId?: string
+  /** Exact targets for the active Discord event; never serialized into model text. */
+  discordTargets?: DiscordMessageTarget[]
 }
 
 /** Lifecycle hooks injected by the runner orchestrator into the loop. */
@@ -98,4 +100,5 @@ export interface RunnerStateInternal extends RunnerState {
   compactionRequest?: ManualCompactionRequest
   discordTypingTurnId?: string
   discordTypingChannelId?: string
+  discordTargets?: DiscordMessageTarget[]
 }

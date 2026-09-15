@@ -53,10 +53,16 @@ Both are nullable; when set, they're appended to the service's `ExecStart`.
 
 Enables a second virtual nano inside the same worker. Owner-authored DMs route
 to the main runtime; all other Discord ingress that would normally wake nano
-routes to the frontend runtime. The two runtimes share soul, authored memories,
-and Discord storage, but keep independent conversation loops, resumable session
+routes to the frontend runtime. The frontend sees the main soul through a private
+patch: its `memory://soul.md` edits never change the main `soul.md`. The two runtimes
+share authored memories and Discord storage, but keep independent conversation loops, resumable session
 files, rest snapshots, and context archives. They can exchange durable messages
 with `agent_send` and inspect that mailbox with `agent_channel`.
+
+The patch and virtual view live under `<home>/.nano/frontend-soul/`. At worker
+startup, Git's three-way merge rebases frontend changes onto the current main
+soul. A failed merge puts standard diff3 conflict markers in the frontend's
+virtual `memory://soul.md`, clears its stale session, and wakes it to reconcile.
 
 The frontend has the normal server-side tools, except that executor-backed
 tools, executor job output, subagents, client uploads, and skills are unavailable.
@@ -207,7 +213,7 @@ directory, which should be bind-mounted into the container.
 |---|---|---|
 | `markdown` | `true` | Attach local Markdown images from loaded soul/core files, journal and memory reads/search/recall, and loaded skills when the model supports vision. |
 | `max_bytes` | `5000000` | Maximum bytes per local image. Supports PNG, JPEG, GIF, and WebP. |
-| `max_per_message` | `8` | Maximum image references loaded per context message, including avatars. Clamped to 1–32. |
+| `max_per_message` | `8` | Maximum image references loaded per context message, including Discord avatars and emoji. Clamped to 1–32. |
 
 Use standard Markdown such as `![portrait](../images/portrait.png)`. Relative paths resolve from the Markdown file's directory; `memory://images/portrait.png` resolves under the agent's memories directory. Absolute paths are also accepted within the agent home. Symlinks must resolve inside that home. Remote URLs are not fetched. Inline and reference-style images work; code examples are ignored. Missing, invalid, or oversized images produce a short note without failing the model request.
 
@@ -224,6 +230,7 @@ The harness explains this capability when it assembles each fresh context. It do
 | `bot_token` *(secret)* | — | Discord bot token. **Required** for any Discord functionality. Without it the gateway and REST client are both disabled. |
 | `bot_user_id` | *(auto-detected)* | Bot user id. Auto-populated from the gateway READY payload on first connect. |
 | `owner_id` | `""` | Discord user id allowed to use runtime control commands. The owner also receives deduplicated model API error DMs and can permanently mute one error fingerprint from its message button. |
+| `attach_emoji_bitmap` | `true` | Attach custom Discord emoji as bitmap images when they enter vision context. Animated emoji are fetched as PNG, so only the first frame is included. |
 | `include_user_avatars` | `false` | Attach an author's Discord avatar the first time their message enters vision context, including wake events, inbox, backread, and search results. Deduplicated while their avatar remains in context; the bot uses the separate option below. |
 | `include_bot_avatar` | `false` | Attach the bot user's Discord avatar on each fresh context. Resuming a saved context retains the existing image. |
 | `scan_channel_ids` | `[]` | Channel ids the bot treats as its inbox. DMs are always included regardless. Example: `["1234567890", "0987654321"]`. |

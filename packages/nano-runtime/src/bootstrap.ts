@@ -5,6 +5,7 @@ import { NANO_HOME } from "./agent-config"
 import { config } from "./config"
 import { markdownImageReferences } from "./context-images"
 import { botAvatarReference, discordEventImageReferences } from "./discord/context-avatars"
+import { readFrontendSoul } from "./frontend-soul"
 import type { ToolCapability, WorkspaceDescriptor } from "@nano/harness-protocol"
 
 const HOME_DIR = NANO_HOME
@@ -75,7 +76,7 @@ function buildEnvironmentSection(options: BootstrapCapabilities = {}): string {
       ? `You have an attached ${workspace.platform ?? "local"} client workspace (${workspace.root}). Shell, file reads, edits, and images run there; the model and durable session state stay on the server.${workspace.persistentShell ? " Its shell keeps its working directory and environment between calls." : ""}`
       : "No client workspace is attached right now. Client-local shell, read, edit, and image tools are intentionally unavailable; do not assume the server can access a client filesystem."
   const discordToolLines = options.discord
-    ? `\n### Discord tools\n\n**IMPORTANT: Writing text in your message content does NOT send it to Discord. You must call \`discord_send\` to actually deliver a message.**\n\n- \`discord_send\`: send a message from the server; requires \`content\` plus either \`channel_id\` or a \`source_item_id\`\n- \`discord_inbox\`, \`discord_backread\`, \`discord_search\`, \`discord_scan\`, \`discord_channels\`, \`discord_channel_note\`: use the server-side Discord inbox and history`
+    ? `\n### Discord tools\n\n**IMPORTANT: Writing text in your message content does NOT send it to Discord. You must call \`discord_send\` to actually deliver a message.**\n\n- \`discord_send\`: reply with \`content\`; omit \`target\` for the latest active message, or use a shown target number or message-text prefix. Provide \`channel_id\` only for a proactive message outside an active Discord event.\n- \`discord_inbox\`, \`discord_backread\`, \`discord_search\`, \`discord_scan\`, \`discord_channels\`, \`discord_channel_note\`: use the server-side Discord inbox and history`
     : "\nDiscord tools are not currently available on this server. Do not promise a Discord reply unless the tool is present."
   const skillGuidance = options.frontend
     ? "Skill documents and the memories/skills namespace are intentionally unavailable in this frontend runtime. Do not try to discover or load them."
@@ -98,7 +99,7 @@ journal entries, scattered notes, things you wrote once and forgot. When in \
 doubt, search. A few extra searches cost nothing; missing something costs \
 everything. Memory search is server-side and works even when no client is attached.
 
-**Use \`read_file\` with \`memory://\` URIs and \`memory_grep\` to interact with your server-owned memories. Reading \`memory://\` lists the memory root; reading any other memory directory lists its immediate contents. Use the unified \`edit_file\` tool for authored-memory mutations: memory:// URIs edit server-side even without a client${options.frontend ? "; ordinary paths are unavailable in this runtime" : ", while ordinary paths require an attached client with edit capability"}. To expunge a bad authored result, call \`edit_file\` with its exact \`uri\` as \`path\`, exact \`content\` as \`old_text\`, \`new_text: ""\`, and its \`documentHash\` as \`expected_hash\`. Discord vector results instead have a \`discord:<message_id>\` id for \`memory_prune\`. Use \`memory_prune\` ONLY when explicitly asked, or when a surfaced memory is clearly wrong/bad or stale; never prune merely irrelevant results.${options.frontend ? " The owner-DM Discord transcript and skill memories are excluded from every lookup in this runtime." : ""} NEVER use shell commands to access server memories or soul.**
+**Use \`read_file\` with \`memory://\` URIs and \`memory_grep\` to interact with your server-owned memories. Reading \`memory://\` lists the memory root; reading any other memory directory lists its immediate contents. Use the unified \`edit_file\` tool for authored-memory mutations: memory:// URIs edit server-side even without a client${options.frontend ? "; ordinary paths are unavailable in this runtime. Your memory://soul.md is a virtual view: edits persist as a private patch over the main soul and never modify the main soul. If it contains Git conflict markers, reconcile both versions and remove every marker" : ", while ordinary paths require an attached client with edit capability"}. To expunge a bad authored result, call \`edit_file\` with its exact \`uri\` as \`path\`, exact \`content\` as \`old_text\`, \`new_text: ""\`, and its \`documentHash\` as \`expected_hash\`. Discord vector results instead have a \`discord:<message_id>\` id for \`memory_prune\`. Use \`memory_prune\` ONLY when explicitly asked, or when a surfaced memory is clearly wrong/bad or stale; never prune merely irrelevant results.${options.frontend ? " The owner-DM Discord transcript and skill memories are excluded from every lookup in this runtime." : ""} NEVER use shell commands to access server memories or soul.**
 Your authored long-term memories and your immutable conversation archive are different systems. Context summaries may contain a \`[context-summary-id sum_...]\` handle. Use \`lcm_describe\` when you already know a summary id and need its summary content, lineage, source counts, time range, or expansion cost. If a summary seems to have omitted an exact detail, use \`context_grep\` to search the verbatim archived messages, optionally scoped to that summary id. Use \`context_expand\` only when you need to read the original messages beneath a known summary id; expand in bounded pages so recovered history does not flood your active context. Describe or search before expanding. The context archive is recovery infrastructure, not a substitute for journaling or maintaining your authored memories.
 
 ${skillGuidance}
@@ -255,7 +256,7 @@ export async function buildBootstrap(
 ): Promise<Message[]> {
   await ensureSoulFilePlacement()
 
-  const soul = await readFile(SOUL_FILE)
+  const soul = options.frontend ? await readFrontendSoul() : await readFile(SOUL_FILE)
   const coreMemories = await readFile(path.join(HOME_DIR, "memories", "core.md"))
   const skillsIndex = options.frontend ? "" : await buildSkillsIndex()
 

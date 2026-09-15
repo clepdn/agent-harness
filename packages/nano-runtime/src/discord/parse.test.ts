@@ -33,6 +33,8 @@ test("discord user mentions render names instead of ids", () => {
 
   const event = fromDiscord(mentionPayload)
   assert.match(event.content, /hey @dawn and @nova/)
+  assert.match(event.content, /^target: 1$/m)
+  assert.doesNotMatch(event.content, /1513348392011694264|1497733589545123981|source_item_id|message_id/)
   assert.doesNotMatch(event.content, /<@!?/)
 })
 
@@ -89,8 +91,13 @@ test("a debounced DM burst delivers every message in arrival order", () => {
   ])
 
   assert.ok(event.content.indexOf("first thought") < event.content.indexOf("second thought"))
-  assert.match(event.content, /^source_item_id: message-1$/m)
-  assert.match(event.content, /^source_item_id: message-2$/m)
+  assert.match(event.content, /^target: 1$/m)
+  assert.match(event.content, /^target: 2$/m)
+  assert.doesNotMatch(event.content, /message-[12]|source_item_id|message_id/)
+  assert.deepEqual(event.discordTargets?.map(({ position, channelId, messageId, content }) => ({ position, channelId, messageId, content })), [
+    { position: 1, channelId: "dm-123", messageId: "message-1", content: "first thought" },
+    { position: 2, channelId: "dm-123", messageId: "message-2", content: "second thought" },
+  ])
   assert.deepEqual(event.raw, [
     dm("message-1", "first thought", "2026-06-15T12:00:00.000Z"),
     dm("message-2", "second thought", "2026-06-15T12:00:03.000Z"),

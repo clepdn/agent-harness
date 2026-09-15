@@ -89,6 +89,9 @@ test("frontend Discord lookups exclude the complete owner DM channel", async () 
     assert.ok(digest)
     assert.doesNotMatch(digest.content, /owner secret marker/)
     assert.match(digest.content, /friend public marker/)
+    assert.match(digest.content, /target: 1/)
+    assert.doesNotMatch(digest.content, /910000000000000002|920000000000000002|source_item_id|message_id/)
+    assert.equal(digest.targets[0]?.messageId, "910000000000000002")
   } finally {
     config.discord.owner_id = oldOwner
     config.discord.dm_whitelist = oldWhitelist

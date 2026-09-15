@@ -43,8 +43,19 @@ export const SHELL_DETACH_AFTER_MS = 120_000
 
 function memoryAccessFor(state: { runtimeKind?: string }): MemoryAccessOptions | undefined {
   return state.runtimeKind === "frontend"
-    ? { excludeSkills: true, excludeMainSessionArchives: true, allowLocalCopy: false }
+    ? { excludeSkills: true, excludeMainSessionArchives: true, allowLocalCopy: false, virtualizeSoul: true }
     : undefined
+}
+
+function discordDeliveryToolResult(result: Record<string, unknown>): string {
+  return JSON.stringify({
+    ok: result.ok === true,
+    reply_mode: result.reply_mode,
+    replied: Boolean(result.used_reference_message_id),
+    stored: result.stored === true,
+    ...(typeof result.file_name === "string" ? { file_name: result.file_name } : {}),
+    ...(typeof result.file_size === "number" ? { file_size: result.file_size } : {}),
+  }, null, 2)
 }
 
 function jobView(job: Job): Record<string, unknown> {
@@ -111,10 +122,10 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
     agent_send: (ctx) =>
       runStandardTool(ctx, {
         name: "agent_send",
-        logArgKeys: ["reply_to"] as const,
-        runArgKeys: ["content", "reply_to"] as const,
-        run: async (content, replyTo) => JSON.stringify(
-          sendAgentChannelMessage(ctx.state.runtimeKind ?? "main", content, replyTo),
+        logArgKeys: [] as const,
+        runArgKeys: ["content"] as const,
+        run: async (content) => JSON.stringify(
+          sendAgentChannelMessage(ctx.state.runtimeKind ?? "main", content),
           null,
           2,
         ),
@@ -681,21 +692,21 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
     discord_send: (ctx) =>
       runStandardTool(ctx, {
         name: "discord_send",
-        logArgKeys: ["channel_id", "source_item_id", "reply_mode"] as const,
-        runArgKeys: ["channel_id", "content", "source_item_id", "reply_mode", "reference_message"] as const,
-        run: async (channel_id, content, source_item_id, reply_mode, reference_message) => {
+        logArgKeys: ["target", "reply_mode"] as const,
+        runArgKeys: ["channel_id", "content", "target", "reply_mode", "source_item_id", "reference_message"] as const,
+        run: async (channel_id, content, target, reply_mode, source_item_id, reference_message) => {
           try {
-            return JSON.stringify(
+            return discordDeliveryToolResult(
               await sendDiscordMessage({
                 channelId: channel_id as string,
                 content: content as string,
+                target,
+                turnTargets: ctx.state.discordTargets,
                 sourceItemId: source_item_id as string | undefined,
                 replyMode: reply_mode as string | undefined,
                 referenceMessage: reference_message as string | undefined,
                 runtimeKind: ctx.state.runtimeKind,
               }),
-              null,
-              2,
             )
           } finally {
             stopDiscordTyping(ctx.state.discordTypingTurnId)
@@ -708,21 +719,21 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
     discord_upload: (ctx) =>
       runStandardTool(ctx, {
         name: "discord_upload",
-        logArgKeys: ["channel_id", "file_path", "source_item_id", "reply_mode"] as const,
-        runArgKeys: ["channel_id", "file_path", "content", "source_item_id", "reply_mode", "reference_message"] as const,
-        run: async (channel_id, file_path, content, source_item_id, reply_mode, reference_message) =>
-          JSON.stringify(
+        logArgKeys: ["file_path", "target", "reply_mode"] as const,
+        runArgKeys: ["channel_id", "file_path", "content", "target", "reply_mode", "source_item_id", "reference_message"] as const,
+        run: async (channel_id, file_path, content, target, reply_mode, source_item_id, reference_message) =>
+          discordDeliveryToolResult(
             await uploadDiscordFile({
               channelId: channel_id as string,
               filePath: file_path as string,
               content: content as string | undefined,
+              target,
+              turnTargets: ctx.state.discordTargets,
               sourceItemId: source_item_id as string | undefined,
               replyMode: reply_mode as string | undefined,
               referenceMessage: reference_message as string | undefined,
               runtimeKind: ctx.state.runtimeKind,
             }),
-            null,
-            2,
           ),
       }),
 

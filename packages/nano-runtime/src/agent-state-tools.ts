@@ -5,6 +5,7 @@ import path from "node:path"
 import { NANO_HOME } from "./agent-config"
 import { isDbInitialized } from "./db"
 import { syncMemoryIndex } from "./memory"
+import { FRONTEND_SOUL_VIEW_PATH, readFrontendSoul, writeFrontendSoul } from "./frontend-soul"
 const MAX_STATE_WRITE_BYTES = 256_000
 const MEMORY_ROOT = path.join(NANO_HOME, "memories")
 
@@ -12,6 +13,8 @@ export type MemoryAccessOptions = {
   excludeSkills?: boolean
   excludeMainSessionArchives?: boolean
   allowLocalCopy?: boolean
+  /** Present memory://soul.md as a private patch over the main soul. */
+  virtualizeSoul?: boolean
 }
 
 function isSkillMemoryPath(filePath: string): boolean {
@@ -424,8 +427,9 @@ export async function editMemoryResource(
   if (expectedHash !== undefined && (typeof expectedHash !== "string" || !/^[a-f0-9]{40}$/i.test(expectedHash))) {
     throw new Error("expected_hash must be a SHA-1 document hash")
   }
-  await prepareExistingMemoryResource(resource)
-  const existing = await fs.readFile(resource.filePath, "utf8")
+  const virtualSoul = options?.virtualizeSoul === true && resource.filePath === path.join(NANO_HOME, "soul.md")
+  if (!virtualSoul) await prepareExistingMemoryResource(resource)
+  const existing = virtualSoul ? await readFrontendSoul() : await fs.readFile(resource.filePath, "utf8")
   if (expectedHash !== undefined) {
     const actualHash = createHash("sha1").update(existing).digest("hex")
     if (actualHash !== expectedHash.toLowerCase()) {
@@ -439,6 +443,11 @@ export async function editMemoryResource(
   }
   const content = existing.slice(0, index) + newText + existing.slice(index + oldText.length)
   validateContent(content, true)
+  if (virtualSoul) {
+    const result = await writeFrontendSoul(existing, content)
+    const warning = await getWarningForFile(FRONTEND_SOUL_VIEW_PATH)
+    return `edited virtual memory://soul.md; diff saved to ${result.patchPath}${result.conflicted ? "; unresolved merge markers remain" : ""}${warning}`
+  }
   if (resource.backup) await backupFile(resource.filePath)
   await replaceFile(resource.filePath, content)
   if (resource.indexed) await syncMemoryAfterWrite()
@@ -609,6 +618,10 @@ export async function readMemory(relativePath: unknown, startLine?: unknown, end
   const { filePath, displayPath, root } = memoryReadTarget(relativePath)
   assertMemoryAccess(filePath, options)
   if (filePath === MEMORY_ROOT) await fs.mkdir(MEMORY_ROOT, { recursive: true, mode: 0o700 })
+  const virtualSoul = options?.virtualizeSoul === true && filePath === path.join(NANO_HOME, "soul.md")
+  if (virtualSoul) {
+    return formatMemoryRead(displayPath, await readFrontendSoul(), startLine, endLine)
+  }
   const stat = await verifyMemoryReadTarget(filePath, root)
   if (stat.isDirectory()) {
     const entries = (await fs.readdir(filePath))
@@ -633,6 +646,10 @@ export async function readMemory(relativePath: unknown, startLine?: unknown, end
     throw error
   }
 
+  return formatMemoryRead(displayPath, content, startLine, endLine)
+}
+
+function formatMemoryRead(displayPath: string, content: string, startLine?: unknown, endLine?: unknown): string {
   const start = Math.max(1, Math.trunc(Number(startLine)) || 1)
   const lines = content.split("\n")
   if (lines.at(-1) === "") lines.pop()

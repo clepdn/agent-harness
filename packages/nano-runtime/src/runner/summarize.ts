@@ -3,7 +3,9 @@ import path from "path"
 import { complete } from "../llm"
 import type { AssistantMessage, Context, Model, TextContent, ToolCall } from "../llm"
 import { NANO_HOME as HOME_DIR } from "../agent-config"
+import { readFrontendSoul } from "../frontend-soul"
 import type { Message } from "../types"
+import type { RuntimeKind } from "./types"
 import {
   AGENT_NAME,
   FALLBACK_CONTEXT_MARGIN,
@@ -236,14 +238,14 @@ async function latestJournalEntry(journalDir: string): Promise<{ date: string; c
  * Assembles the agent's grounding context for the summarizer: soul, core
  * memories, and today's journal (or most recent if today's isn't written yet).
  */
-export async function loadAgentSummaryContext(): Promise<string | null> {
+export async function loadAgentSummaryContext(runtimeKind: RuntimeKind = "main"): Promise<string | null> {
   const soulPath = path.join(HOME_DIR, "soul.md")
   const corePath = path.join(HOME_DIR, "memories", "core.md")
   const journalDir = path.join(HOME_DIR, "memories", "journal")
   const today = localDateStamp()
 
   const [soul, core, todayJournal] = await Promise.all([
-    readTextFile(soulPath),
+    runtimeKind === "frontend" ? readFrontendSoul() : readTextFile(soulPath),
     readTextFile(corePath),
     readTextFile(path.join(journalDir, `${today}.md`)),
   ])

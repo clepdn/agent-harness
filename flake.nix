@@ -54,7 +54,8 @@
 			# Worker — one process per agent, reads its TOML from --config
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/nano \
 			    --add-flags "$out/lib/nano/node_modules/.bin/tsx" \
-			    --add-flags "$out/lib/nano/packages/nano-runtime/src/index.ts"
+			    --add-flags "$out/lib/nano/packages/nano-runtime/src/index.ts" \
+			    --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.gitMinimal ]}
 
 			# Control plane — spawns one worker per agent file
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/nano-server \

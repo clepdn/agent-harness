@@ -5,10 +5,12 @@ import { NANO_HOME } from "./agent-config"
 import { config } from "./config"
 import type { ImageContent, Message } from "./llm"
 import { loadDiscordAvatar } from "./discord/context-avatars"
+import { loadDiscordEmoji } from "./discord/context-emojis"
 
 export type ContextImageReference =
   | { kind: "markdown"; path: string; label: string }
   | { kind: "discord-avatar"; userId: string; label: string; avatar?: string | null; discriminator?: string; own?: boolean }
+  | { kind: "discord-emoji"; emojiId: string; name: string; animated: boolean; label: string }
 
 export interface ContextImageAttachment extends ImageContent {
   key: string
@@ -24,11 +26,14 @@ export interface ContextImageState {
 
 function referenceEnabled(ref: ContextImageReference): boolean {
   return ref.kind === "markdown" ? config.context_images.markdown
+    : ref.kind === "discord-emoji" ? config.discord.attach_emoji_bitmap
     : ref.own ? config.discord.include_bot_avatar : config.discord.include_user_avatars
 }
 
 function referenceKey(ref: ContextImageReference): string {
-  return ref.kind === "markdown" ? `markdown:${ref.path}` : `discord-avatar:${ref.userId}`
+  return ref.kind === "markdown" ? `markdown:${ref.path}`
+    : ref.kind === "discord-emoji" ? `discord-emoji:${ref.emojiId}`
+    : `discord-avatar:${ref.userId}`
 }
 
 /** Recheck settings when restored sessions already contain image bytes. */
@@ -114,11 +119,11 @@ async function loadLocalImage(ref: Extract<ContextImageReference, { kind: "markd
 
 /** Keep text intact for routing/recall; materialize image bytes only for vision requests. */
 export async function prepareContextImages(messages: Message[]): Promise<void> {
-  const seenAvatars = new Set<string>()
+  const seenDiscordImages = new Set<string>()
   for (const message of messages) {
     if (message.role === "assistant" || message.imagesSuppressed) continue
     for (const image of enabledContextImages(message)) {
-      if (image.key.startsWith("discord-avatar:")) seenAvatars.add(image.key)
+      if (image.key.startsWith("discord-avatar:") || image.key.startsWith("discord-emoji:")) seenDiscordImages.add(image.key)
     }
     const refs = (message.imageReferences ?? []).filter(referenceEnabled)
     if (refs.length === 0) continue
@@ -126,16 +131,19 @@ export async function prepareContextImages(messages: Message[]): Promise<void> {
     const notes = new Set(message.imageNotes)
     for (const ref of refs.slice(0, config.context_images.max_per_message)) {
       const key = referenceKey(ref)
-      if (loaded.has(key) || (ref.kind === "discord-avatar" && seenAvatars.has(key))) continue
+      const discordImage = ref.kind === "discord-avatar" || ref.kind === "discord-emoji"
+      if (loaded.has(key) || (discordImage && seenDiscordImages.has(key))) continue
       const failure = `[image unavailable: ${ref.label}]`
       if (notes.has(failure)) continue
       try {
-        const image = ref.kind === "markdown" ? await loadLocalImage(ref) : await loadDiscordAvatar(ref)
+        const image = ref.kind === "markdown" ? await loadLocalImage(ref)
+          : ref.kind === "discord-emoji" ? await loadDiscordEmoji(ref)
+          : await loadDiscordAvatar(ref)
         // @me may resolve to a user already pictured in this context.
-        if (ref.kind === "discord-avatar" && seenAvatars.has(image.key)) continue
+        if (discordImage && seenDiscordImages.has(image.key)) continue
         ;(message.imageAttachments ??= []).push(image)
         loaded.add(image.key)
-        if (ref.kind === "discord-avatar") seenAvatars.add(image.key)
+        if (discordImage) seenDiscordImages.add(image.key)
       } catch {
         notes.add(failure)
       }

@@ -75,8 +75,9 @@ env = "default"
 # git_upstream_nag = false
 
 # Optional second virtual agent for Discord traffic outside the owner's DMs.
-# It shares soul and authored memories with nano, but has an independent
-# conversation/session and no executor, subagent, or skill access.
+# It inherits nano's soul through a private patch and shares authored memories,
+# but has an independent conversation/session and no executor, subagent, or
+# skill access.
 [frontend]
 enable = false
 # Optional preset name or raw model id. Omit this key entirely to follow the
@@ -173,6 +174,9 @@ max_bytes = 5000000
 max_per_message = 8
 
 [discord]
+# Attach custom emoji as bitmap images in model context. Animated emoji use
+# only their first frame.
+attach_emoji_bitmap = true
 # Include each author's avatar once while their image remains in context.
 include_user_avatars = false
 # Include the bot's own avatar whenever a fresh context starts.

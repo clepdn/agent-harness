@@ -423,6 +423,7 @@ export const config = {
     max_per_message: Math.max(1, Math.min(32, int(contextImagesT.max_per_message, 8))),
   },
   discord: {
+    attach_emoji_bitmap: bool(discordT.attach_emoji_bitmap, true),
     include_user_avatars: bool(discordT.include_user_avatars, false),
     include_bot_avatar: bool(discordT.include_bot_avatar, false),
     bot_token: str(discordT.bot_token, "").trim(),

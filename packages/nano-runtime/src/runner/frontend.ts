@@ -170,6 +170,7 @@ async function saveRuntimeSnapshot(): Promise<void> {
     toolCatalog: state.toolCatalog,
     toolCatalogEpoch: state.toolCatalogEpoch,
     toolCatalogFingerprint: state.toolCatalogFingerprint,
+    ...(state.discordTargets?.length ? { discordTargets: state.discordTargets } : {}),
   }, "frontend")
   await saveRestSnapshot(state.conversation, "runtime checkpoint", "frontend")
 }
@@ -220,8 +221,11 @@ function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null>
 
 function autoSeeDiscordEvent(event: UserMessage): void {
   if (event.source !== "discord") return
-  const itemIds = [...event.content.matchAll(/^source_item_id:\s*(\S+)/gm)]
-    .map((match) => match[1]?.trim())
+  const itemIds = [
+    ...(event.discordTargets ?? []).map((target) => target.itemId ?? target.messageId),
+    ...[...event.content.matchAll(/^source_item_id:\s*(\S+)/gm)].map((match) => match[1]),
+  ]
+    .map((itemId) => itemId?.trim())
     .filter((itemId): itemId is string => Boolean(itemId))
   for (const itemId of new Set(itemIds)) {
     try {
@@ -232,8 +236,14 @@ function autoSeeDiscordEvent(event: UserMessage): void {
   }
 }
 
+function applyDiscordTargets(event: UserMessage): void {
+  if (event.source === "discord") state.discordTargets = event.discordTargets ?? []
+  else if (event.source !== "job") state.discordTargets = []
+}
+
 function injectIncomingEvent(convId: number, event: UserMessage): void {
   clearDiscordTypingScope(state)
+  applyDiscordTargets(event)
   autoSeeDiscordEvent(event)
   const incomingMessage = `[incoming — ${event.source}]\n\n${event.content}`
   state.conversation.push({
@@ -272,6 +282,8 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
     state.toolCatalog = saved.toolCatalog
     state.toolCatalogEpoch = saved.toolCatalogEpoch
     state.toolCatalogFingerprint = saved.toolCatalogFingerprint
+    state.discordTargets = saved.discordTargets ?? []
+    applyDiscordTargets(event)
     autoSeeDiscordEvent(event)
     state.conversation.push({
       role: "user",
@@ -280,6 +292,8 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
       timestamp: Date.now(),
     } as Message)
   } else {
+    state.discordTargets = []
+    applyDiscordTargets(event)
     autoSeeDiscordEvent(event)
     const restSnapshot = await loadRestSnapshot("frontend")
     const priorRest = restSnapshot
@@ -352,6 +366,7 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
     state.restRequested = false
     state.restReason = ""
     state.compactionRequest = undefined
+    state.discordTargets = []
     if (!wasShutdownRequested && !discarded) flushDeferredEvents()
     state.deferredEvents = []
     eventResolvers = []

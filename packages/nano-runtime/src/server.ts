@@ -95,6 +95,7 @@ export function createServer(options: {
         source: "discord",
         triggeredAt: new Date().toISOString(),
         content: digest.content,
+        discordTargets: digest.targets,
         raw: {
           type: "discord_batch",
           digest,

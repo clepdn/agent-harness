@@ -82,6 +82,7 @@ test("frontend bootstrap shares soul and memories without exposing skills or exe
   const system = String(messages[0]?.content)
   assert.match(system, /shared test soul/)
   assert.match(system, /virtual frontend agent/)
+  assert.match(system, /private patch over the main soul/)
   assert.match(system, /agent_send/)
   assert.doesNotMatch(system, /zzz-frontend-hidden/)
   assert.doesNotMatch(system, /- `skill`:/)

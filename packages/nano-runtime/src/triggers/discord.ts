@@ -85,7 +85,7 @@ function replyContextLine(message: Record<string, unknown>, body: Record<string,
     content: "",
   }
   const author = reply.author_username ? `@${reply.author_username}` : "unknown"
-  return `reply_to: ${author} msg/${reply.message_id}: ${JSON.stringify(reply.content)}`
+  return `reply_to: ${author}: ${JSON.stringify(reply.content)}`
 }
 
 function formatImageBlock(images: ReturnType<typeof extractImageAttachments>): string {
@@ -124,7 +124,7 @@ export function fromDiscord(body: unknown): UserMessage {
 
   const channelType = Number(message.channel_type ?? b.channel_type ?? channel?.type ?? NaN)
   const guildId = String(message.guild_id ?? b.guild_id ?? channel?.guild_id ?? "").trim()
-  const guildName = String((b.guild_name ?? channel?.guild_name ?? guildId) || "").trim()
+  const guildName = String((b.guild_name ?? channel?.guild_name ?? "") || "").trim()
   const channelName = String(channel?.name ?? b.channel_name ?? "").trim()
   const isDm =
     Boolean(b.is_dm) ||
@@ -136,7 +136,8 @@ export function fromDiscord(body: unknown): UserMessage {
     renderDiscordUserMentions(body, String(message.content ?? b.content ?? "")).trim() ||
     "(no text content)"
   const triggeredAt = new Date().toISOString()
-  const timestamp = formatDiscordTimestamp(asIsoTimestamp(message.timestamp ?? b.timestamp, triggeredAt))
+  const createdAt = asIsoTimestamp(message.timestamp ?? b.timestamp, triggeredAt)
+  const timestamp = formatDiscordTimestamp(createdAt)
   const member =
     typeof message.member === "object" && message.member
       ? (message.member as Record<string, unknown>)
@@ -166,8 +167,8 @@ export function fromDiscord(body: unknown): UserMessage {
   const channelId = String(message.channel_id ?? b.channel_id ?? channel?.id ?? "unknown")
   const messageId = String(message.id ?? b.message_id ?? "unknown")
   const location = isDm
-    ? `DM ${channelId}`
-    : `${guildName || guildId || "unknown server"}/#${channelName || channelId} (${channelId})`
+    ? "DM"
+    : `${guildName || "Discord"}/#${channelName || "channel"}`
   const header = isDm ? "[discord/dm]" : "[discord/channel]"
   const action = isDm
     ? "This is a direct message. Reply if it needs a response."
@@ -179,7 +180,19 @@ export function fromDiscord(body: unknown): UserMessage {
   return {
     source: "discord",
     triggeredAt,
-    content: `${header} @${authorName}${pronounsSuffix}\ncontext: ${location}\nmessage_id: ${messageId}\nsource_item_id: ${messageId}\ntimestamp: ${timestamp}${replyLine ? `\n${replyLine}` : ""}\naction: ${action}\n\n${content}${imageBlock}${fileBlock}`,
+    content: `${header} @${authorName}${pronounsSuffix}\ntarget: 1\ncontext: ${location}\ntimestamp: ${timestamp}${replyLine ? `\n${replyLine}` : ""}\naction: ${action}\n\n${content}${imageBlock}${fileBlock}`,
+    ...(channelId !== "unknown" && messageId !== "unknown"
+      ? {
+          discordTargets: [{
+            position: 1,
+            channelId,
+            messageId,
+            itemId: messageId,
+            content,
+            createdAt,
+          }],
+        }
+      : {}),
     raw: body,
   }
 }
@@ -194,9 +207,9 @@ export function fromDiscordMessages(bodies: readonly unknown[]): UserMessage {
   return {
     source: "discord",
     triggeredAt: latest.triggeredAt,
-    content: events.map((event, index) => index === 0
-      ? event.content
-      : `[next discord message]\n\n${event.content}`).join("\n\n"),
+    content: events.map((event, index) => event.content.replace(/^target:\s*1$/m, `target: ${index + 1}`)).join("\n\n[next discord message]\n\n"),
+    discordTargets: events.flatMap((event, index) =>
+      (event.discordTargets ?? []).map((target) => ({ ...target, position: index + 1 }))),
     raw: [...bodies],
   }
 }

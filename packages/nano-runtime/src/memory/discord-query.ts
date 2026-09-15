@@ -151,7 +151,7 @@ export function conciseDiscordBatchMemoryQuery(raw: string): MemoryQueryParts | 
   const senders: string[] = []
   const sources: string[] = []
   const bodies: string[] = []
-  const entryPattern = /(?:^|\s)\[([^\]]+)\]\s+\[[^\]]+\]\s+@([^:]+):\s*(.*)$/i
+  const entryPattern = /(?:^|\s)(?:target:\s*\d+\s+)?\[([^\]]+)\]\s+\[[^\]]+\]\s+@([^:]+):\s*(.*)$/i
   for (const entry of selected) {
     const match = entry.match(entryPattern)
     if (!match) {

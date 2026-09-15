@@ -223,14 +223,13 @@ export const TOOLS: Tool[] = [
   {
     name: "discord_send",
     description:
-      "Send a Discord message. reply_mode=auto sends plain unless conversation continuity is ambiguous, then it uses an explicit reply reference.",
+      "Send a Discord message. Omit target to answer the latest active message; use its shown target number or a prefix of its text to select a specific message.",
     parameters: s({
       type: "object",
       properties: {
         channel_id: { type: "string", description: "Target channel id." },
         content: { type: "string", description: "Message content to send." },
-        source_item_id: { type: "string", description: "Optional inbox item id to mark as acted after sending." },
-        reference_message: { type: "string", description: "Optional specific message to treat as reply target. Provide message content, username (for their latest message), or message id" },
+        target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }], description: "Shown target number or message-text prefix." },
         reply_mode: { type: "string", enum: ["auto", "plain", "explicit"], description: "Reply behavior policy (default auto)." },
       },
       required: ["content"],
@@ -246,8 +245,7 @@ export const TOOLS: Tool[] = [
         channel_id: { type: "string", description: "Target channel id." },
         file_path: { type: "string", description: "Absolute or relative path to the file on your filesystem." },
         content: { type: "string", description: "Optional text caption to send with the file." },
-        source_item_id: { type: "string", description: "Optional inbox item id to mark as acted after sending." },
-        reference_message: { type: "string", description: "Optional specific message to treat as reply target." },
+        target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }], description: "Shown target number or message-text prefix." },
         reply_mode: { type: "string", enum: ["auto", "plain", "explicit"], description: "Reply behavior policy (default auto)." },
       },
       required: ["file_path"],

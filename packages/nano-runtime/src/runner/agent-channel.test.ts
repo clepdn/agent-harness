@@ -21,15 +21,17 @@ test("agent channel persists bidirectional messages and wakes the recipient", (t
   assert.equal(first.delivered, true)
   assert.equal(delivered[0]?.recipient, "main")
   assert.match(delivered[0]?.content ?? "", /from frontend/)
+  assert.doesNotMatch(delivered[0]?.content ?? "", /message_id:/)
 
-  const second = sendAgentChannelMessage("main", "yes — here is the answer", first.id)
+  const second = sendAgentChannelMessage("main", "yes — here is the answer")
   assert.equal(second.recipient, "frontend")
   assert.equal(delivered[1]?.recipient, "frontend")
-  assert.match(delivered[1]?.content ?? "", new RegExp(String(first.id)))
+  assert.doesNotMatch(delivered[1]?.content ?? "", /message_id:/)
+  assert.doesNotMatch(delivered[1]?.content ?? "", /reply_to:/)
 
   const history = listAgentChannelMessages({ limit: 10 }) as { messages: Array<Record<string, unknown>> }
   assert.equal(history.messages.length, 2)
-  assert.equal(history.messages[0]?.reply_to, first.id)
+  assert.equal("reply_to" in history.messages[0]!, false)
   assert.equal(history.messages.every((message) => message.delivered === true), true)
 })
 

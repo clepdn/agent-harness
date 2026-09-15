@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import fs from "fs/promises"
 import path from "path"
-import type { Message } from "../types"
+import type { DiscordMessageTarget, Message } from "../types"
 import { NANO_HOME } from "../agent-config"
 import { atomicWriteFile, isMissingFileError, quarantineFile } from "../durable-file"
 import type { ToolDefinition } from "@nano/harness-core"
@@ -99,6 +99,7 @@ export type SessionSnapshot = {
   toolCatalog: ToolDefinition[]
   toolCatalogEpoch: number
   toolCatalogFingerprint: string
+  discordTargets?: DiscordMessageTarget[]
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -107,6 +108,16 @@ function record(value: unknown): Record<string, unknown> | null {
 
 function finiteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value)
+}
+
+function validDiscordTarget(value: unknown): value is DiscordMessageTarget {
+  const target = record(value)
+  return Boolean(target) && Number.isSafeInteger(target!.position) && (target!.position as number) >= 1 &&
+    typeof target!.channelId === "string" && target!.channelId.length > 0 &&
+    typeof target!.messageId === "string" && target!.messageId.length > 0 &&
+    (target!.itemId === undefined || typeof target!.itemId === "string") &&
+    typeof target!.content === "string" &&
+    (target!.createdAt === undefined || typeof target!.createdAt === "string")
 }
 
 const USER_CONTENT_TYPES = new Set(["text", "image"])
@@ -128,6 +139,7 @@ function validMessage(value: unknown): value is Message {
   if (message.imageReferences !== undefined && (!Array.isArray(message.imageReferences) || !message.imageReferences.every((value) => {
     const ref = record(value)
     return ref && typeof ref.label === "string" && (ref.kind === "markdown" ? typeof ref.path === "string"
+      : ref.kind === "discord-emoji" ? typeof ref.emojiId === "string" && typeof ref.name === "string" && typeof ref.animated === "boolean"
       : ref.kind === "discord-avatar" && typeof ref.userId === "string" &&
         (ref.avatar === undefined || ref.avatar === null || typeof ref.avatar === "string") &&
         (ref.discriminator === undefined || typeof ref.discriminator === "string") &&
@@ -178,6 +190,10 @@ function parseSession(raw: string): SessionSnapshot {
   if (!candidate || candidate.version !== SESSION_SNAPSHOT_VERSION) throw new Error("unsupported session snapshot version")
   if (!Array.isArray(candidate.messages) || !candidate.messages.every(validMessage)) throw new Error("invalid session messages")
   if (!Array.isArray(candidate.toolCatalog) || !candidate.toolCatalog.every(validToolDefinition)) throw new Error("invalid session tool catalog")
+  if (candidate.discordTargets !== undefined &&
+      (!Array.isArray(candidate.discordTargets) || !candidate.discordTargets.every(validDiscordTarget))) {
+    throw new Error("invalid session Discord targets")
+  }
   if (!Number.isInteger(candidate.toolCatalogEpoch) || (candidate.toolCatalogEpoch as number) < 1) throw new Error("invalid session tool catalog epoch")
   if (typeof candidate.toolCatalogFingerprint !== "string" || candidate.toolCatalogFingerprint !== fingerprint(candidate.toolCatalog)) {
     throw new Error("invalid session tool catalog fingerprint")

@@ -211,7 +211,6 @@ export function initDb(dbPathOverride?: string): void {
       sender       text not null check (sender in ('main', 'frontend')),
       recipient    text not null check (recipient in ('main', 'frontend')),
       content      text not null,
-      reply_to     text references agent_channel_messages(id),
       created_at   text not null,
       delivered_at text
     );

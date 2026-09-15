@@ -865,6 +865,21 @@ export function findMessageByContent(channelId: string, contentPattern: string):
   return row?.message_id ?? null
 }
 
+/** Finds the newest non-bot message whose content starts with the given text. */
+export function findMessageByContentPrefix(channelId: string, prefix: string): string | null {
+  const db = getDb()
+  const row = db
+    .prepare(
+      `select message_id from discord_messages
+       where channel_id = ?
+         and substr(trim(content), 1, length(?)) = ? collate nocase
+         and is_from_bot = 0
+       order by cast(message_id as integer) desc limit 1`,
+    )
+    .get(channelId, prefix.trim(), prefix.trim()) as { message_id?: string } | undefined
+  return row?.message_id ?? null
+}
+
 /**
  * Finds the most recent message in a channel by author username.
  *

@@ -6,7 +6,17 @@ import type { Message as PiMessage } from "./llm"
  */
 export type Message = PiMessage
 
-export type TriggerSource = "discord" | "voice" | "bsky" | "webhook" | "cron" | "chat" | "job" | "boredom" | "client" | "agent"
+export type TriggerSource = "discord" | "voice" | "bsky" | "webhook" | "cron" | "chat" | "job" | "boredom" | "client" | "agent" | "system"
+
+/** Exact Discord routing metadata kept outside model-visible message text. */
+export interface DiscordMessageTarget {
+  position: number
+  channelId: string
+  messageId: string
+  itemId?: string
+  content: string
+  createdAt?: string
+}
 
 /**
  * Trigger event from an external source (Discord, cron, etc.).
@@ -17,6 +27,7 @@ export interface UserMessage {
   triggeredAt: string
   content: string
   clientId?: string
+  discordTargets?: DiscordMessageTarget[]
   raw: unknown
 }
 

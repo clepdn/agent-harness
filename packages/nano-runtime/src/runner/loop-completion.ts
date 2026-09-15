@@ -285,7 +285,7 @@ async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Pro
   }
 
   console.warn(`[context] recovery: attempting llm summarization via ${summaryProvider.model.id} (attempt=${attempt + 1})`)
-  const agentContext = await loadAgentSummaryContext()
+  const agentContext = await loadAgentSummaryContext(state.runtimeKind)
   const summarized = await summarizeConversationViaLLM(
     state.conversation,
     summaryProvider.model,

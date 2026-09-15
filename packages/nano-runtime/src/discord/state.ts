@@ -26,7 +26,7 @@ import {
   countInterveningMessages,
   countPendingInbox,
   ensureConfiguredChannelsMaterialized,
-  findMessageByContent,
+  findMessageByContentPrefix,
   findMessageByUsername,
   findPendingDmItemId,
   getChannelRow,
@@ -64,7 +64,9 @@ import {
 import { maybeFetchAndCachePronouns } from "./pronouns"
 import { readClientFile } from "../client"
 import type { RuntimeKind } from "../runner/types"
+import type { DiscordMessageTarget } from "../types"
 import { assertDiscordChannelAccess, assertDiscordItemAccess, filterDiscordRowsForRuntime, isOwnerDmChannel, ownerDmChannelIds } from "./access"
+import { hasDiscordTargetSelector, selectDiscordTarget } from "./targets"
 
 // ── result types ───────────────────────────────────────────────────────
 
@@ -85,6 +87,7 @@ export type DiscordIngestResult = {
 
 export type DiscordBatchDigest = {
   content: string
+  targets: DiscordMessageTarget[]
   messageCount: number
   pendingCount: number
   from: string
@@ -154,13 +157,13 @@ function formatBatchAttachments(rawJson: string): string {
 function formatReplyContext(reply: DiscordReplyContext | undefined): string {
   if (!reply) return ""
   const author = reply.author_username ? `@${reply.author_username}` : "unknown"
-  return ` [reply_to ${author} msg/${reply.message_id}: ${JSON.stringify(reply.content)}]`
+  return ` [reply_to ${author}: ${JSON.stringify(reply.content)}]`
 }
 
 function channelLabel(row: { is_dm: number; guild_name: string | null; guild_id: string | null; channel_name: string | null; channel_id: string }): string {
-  if (row.is_dm === 1) return `dm/${row.channel_id}`
-  const guild = row.guild_name ?? row.guild_id ?? "unknown-guild"
-  const channel = row.channel_name ?? row.channel_id
+  if (row.is_dm === 1) return "dm"
+  const guild = row.guild_name ?? "Discord"
+  const channel = row.channel_name ?? "channel"
   return `channel/${guild}/#${channel}`
 }
 
@@ -437,6 +440,32 @@ export function buildDiscordBatchDigest(params?: {
   if (visibleRecentMessages.length === 0 && visiblePendingPreview.length === 0) return null
 
   const replyContextByMessageId = buildReplyTargetContextMap([...visibleRecentMessages, ...visiblePendingPreview])
+  const targets: DiscordMessageTarget[] = []
+  const targetByMessageId = new Map<string, DiscordMessageTarget>()
+  const targetLabel = (row: {
+    message_id: string
+    channel_id: string
+    item_id?: string | null
+    content: string
+    created_at: string
+  }): string => {
+    let target = targetByMessageId.get(row.message_id)
+    if (!target) {
+      target = {
+        position: targets.length + 1,
+        channelId: row.channel_id,
+        messageId: row.message_id,
+        ...(row.item_id ? { itemId: row.item_id } : {}),
+        content: fullMessageText(row.content),
+        createdAt: row.created_at,
+      }
+      targetByMessageId.set(row.message_id, target)
+      targets.push(target)
+    } else if (!target.itemId && row.item_id) {
+      target.itemId = row.item_id
+    }
+    return `target: ${target.position}`
+  }
   const hasImages = [...visibleRecentMessages, ...visiblePendingPreview].some(
     (row) => extractImageAttachmentsFromRawJson(row.raw_json).length > 0,
   )
@@ -469,7 +498,7 @@ export function buildDiscordBatchDigest(params?: {
     const author = row.author_username ? `@${row.author_username}${pronounsSuffix}` : "@unknown"
     const ts = formatBatchTimestamp(row.created_at)
     const replyTo = replyContextByMessageId.get(row.message_id)
-    lines.push(`- source_item_id=${row.message_id} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${fullMessageText(row.content)}${formatBatchAttachments(row.raw_json)}`)
+    lines.push(`- ${targetLabel(row)} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${fullMessageText(row.content)}${formatBatchAttachments(row.raw_json)}`)
   }
 
   if (truncated) {
@@ -487,12 +516,12 @@ export function buildDiscordBatchDigest(params?: {
       const author = row.author_username ? `@${row.author_username}${pronounsSuffix}` : "@unknown"
       const ts = formatBatchTimestamp(row.created_at)
       const replyTo = replyContextByMessageId.get(row.message_id)
-      lines.push(`- source_item_id=${row.item_id} bucket=${row.bucket} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${compactText(row.content, 120)}${formatBatchAttachments(row.raw_json)}`)
+      lines.push(`- ${targetLabel(row)} bucket=${row.bucket} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${compactText(row.content, 120)}${formatBatchAttachments(row.raw_json)}`)
     }
   }
 
   lines.push("")
-  lines.push("you can reply if useful via discord_send using source_item_id from the target message, or choose not to reply.")
+  lines.push("you can reply if useful via discord_send; omit target for the latest message, or use its shown target number or a prefix of its text.")
 
   // Only mark items we actually surfaced as seen. Inactive cooldown-channel
   // items are left `pending` so they reappear once their window opens.
@@ -510,6 +539,7 @@ export function buildDiscordBatchDigest(params?: {
 
   return {
     content: lines.join("\n"),
+    targets,
     messageCount: visibleRecentMessages.length,
     pendingCount,
     from,
@@ -524,11 +554,9 @@ type ReplyMode = "auto" | "plain" | "explicit"
 function resolveReferenceMessage(channelId: string, sourceItemId?: string, referenceMessage?: string): string | null {
   const ref = referenceMessage?.trim()
   if (ref) {
-    if (/^\d+$/.test(ref)) {
-      return messageExistsById(ref) ? ref : null
-    }
+    if (/^\d+$/.test(ref) && messageExistsById(ref)) return ref
 
-    const byContent = findMessageByContent(channelId, `%${ref}%`)
+    const byContent = findMessageByContentPrefix(channelId, ref)
     if (byContent) return byContent
 
     const byUsername = findMessageByUsername(channelId, `%${ref}%`)
@@ -570,21 +598,6 @@ function shouldUseExplicitReference(channelId: string, sourceMessageId: string):
   return intervening > 0
 }
 
-async function chooseMessageReference(options: {
-  channelId: string
-  replyMode: ReplyMode
-  sourceItemId?: string
-  referenceMessage?: string
-}): Promise<string | null> {
-  const sourceMessageId = resolveReferenceMessage(options.channelId, options.sourceItemId, options.referenceMessage)
-  if (!sourceMessageId) return null
-
-  if (options.replyMode === "plain") return null
-  if (options.replyMode === "explicit") return sourceMessageId
-
-  return shouldUseExplicitReference(options.channelId, sourceMessageId) ? sourceMessageId : null
-}
-
 function inferPendingDmItemId(channelId: string): string | null {
   return findPendingDmItemId(channelId)
 }
@@ -592,6 +605,84 @@ function inferPendingDmItemId(channelId: string): string | null {
 function normalizeReplyMode(value: unknown): ReplyMode {
   if (value === "plain" || value === "explicit" || value === "auto") return value
   return "auto"
+}
+
+type DeliveryTargetParams = {
+  channelId?: string
+  sourceItemId?: string
+  referenceMessage?: string
+  target?: unknown
+  turnTargets?: readonly DiscordMessageTarget[]
+  replyMode?: string
+}
+
+export async function resolveDiscordDeliveryTarget(params: DeliveryTargetParams): Promise<{
+  channelId: string
+  replyMode: ReplyMode
+  sourceItemId: string | null
+  sourceMessageId: string | null
+  referenceMessageId: string | null
+  inferredSourceItemId: string | null
+}> {
+  const turnTargets = params.turnTargets ?? []
+  const selectorSupplied = hasDiscordTargetSelector(params.target)
+  const requestedChannelId = String(params.channelId ?? "").trim()
+  const selected = selectorSupplied || !requestedChannelId
+    ? selectDiscordTarget(turnTargets, params.target)
+    : null
+  const latest = requestedChannelId ? null : selectDiscordTarget(turnTargets)
+
+  if (selectorSupplied && !selected && typeof params.target === "number") {
+    throw new Error(`target ${String(params.target)} is not present in the active Discord event`)
+  }
+
+  let channelId = requestedChannelId
+  const contextualChannelId = selected?.channelId ?? latest?.channelId
+  if (channelId && selected && channelId !== selected.channelId) {
+    throw new Error("target belongs to a different Discord channel")
+  }
+  if (!channelId) channelId = contextualChannelId ?? ""
+  if (!channelId && params.sourceItemId?.trim()) {
+    channelId = getItemChannelId(params.sourceItemId.trim()) ?? resolveSourceChannelId(params.sourceItemId) ?? ""
+  }
+  if (!channelId) throw new Error("no active Discord target; provide channel_id for a proactive message")
+
+  const explicitSourceItemId = selected?.itemId ?? selected?.messageId ?? params.sourceItemId?.trim() ?? null
+  const inferredSourceItemId = explicitSourceItemId ? null : inferPendingDmItemId(channelId)
+  let resolvedSourceItemId = explicitSourceItemId ?? inferredSourceItemId
+  const referenceSelector = selectorSupplied
+    ? selected?.messageId ?? String(params.target).trim()
+    : params.referenceMessage
+  const requestedReferenceId = selectorSupplied && selected
+    ? selected.messageId
+    : resolveReferenceMessage(
+        channelId,
+        resolvedSourceItemId ?? undefined,
+        referenceSelector,
+      )
+  if (selectorSupplied && !requestedReferenceId) {
+    throw new Error(`no message starts with target prefix ${JSON.stringify(String(params.target).trim())}`)
+  }
+  if (selectorSupplied && !resolvedSourceItemId && requestedReferenceId) resolvedSourceItemId = requestedReferenceId
+
+  const replyMode = normalizeReplyMode(params.replyMode)
+  const effectiveReplyMode = selectorSupplied && replyMode === "auto" ? "explicit" : replyMode
+  const referenceMessageId = requestedReferenceId
+    ? effectiveReplyMode === "plain"
+      ? null
+      : effectiveReplyMode === "explicit" || shouldUseExplicitReference(channelId, requestedReferenceId)
+        ? requestedReferenceId
+        : null
+    : null
+
+  return {
+    channelId,
+    replyMode,
+    sourceItemId: resolvedSourceItemId,
+    sourceMessageId: resolveSourceMessageId(resolvedSourceItemId ?? undefined),
+    referenceMessageId,
+    inferredSourceItemId,
+  }
 }
 
 /**
@@ -603,32 +694,20 @@ function normalizeReplyMode(value: unknown): ReplyMode {
 export async function sendDiscordMessage(params: {
   channelId?: string
   content: string
+  target?: unknown
+  turnTargets?: readonly DiscordMessageTarget[]
   sourceItemId?: string
   replyMode?: string
   referenceMessage?: string
   runtimeKind?: RuntimeKind
 }): Promise<Record<string, unknown>> {
-  let channelId = String(params.channelId ?? "").trim()
-  if (!channelId && params.sourceItemId?.trim()) {
-    channelId = getItemChannelId(params.sourceItemId.trim()) ?? resolveSourceChannelId(params.sourceItemId) ?? ""
-  }
-  if (!channelId) throw new Error("channel_id is required (or provide source_item_id that maps to one)")
+  const delivery = await resolveDiscordDeliveryTarget(params)
+  const { channelId, replyMode, sourceItemId: resolvedSourceItemId, sourceMessageId: resolvedSourceMessageId,
+    referenceMessageId, inferredSourceItemId } = delivery
   assertDiscordChannelAccess(channelId, params.runtimeKind)
 
   const content = String(params.content ?? "").trim()
   if (!content) throw new Error("content is required")
-
-  const replyMode = normalizeReplyMode(params.replyMode)
-  const explicitSourceItemId = params.sourceItemId?.trim() ? params.sourceItemId.trim() : null
-  const inferredSourceItemId = explicitSourceItemId ? null : inferPendingDmItemId(channelId)
-  const resolvedSourceItemId = explicitSourceItemId ?? inferredSourceItemId
-  const resolvedSourceMessageId = resolveSourceMessageId(resolvedSourceItemId ?? undefined)
-  const referenceMessageId = await chooseMessageReference({
-    channelId,
-    replyMode,
-    sourceItemId: resolvedSourceItemId ?? undefined,
-    referenceMessage: params.referenceMessage,
-  })
 
   const rest = makeRestClient()
   const botUserId = await getBotUserId(rest)
@@ -666,7 +745,7 @@ export async function sendDiscordMessage(params: {
   )
 
   if (resolvedSourceItemId && getItemMessageId(resolvedSourceItemId)) {
-    const wasInferred = !explicitSourceItemId
+    const wasInferred = inferredSourceItemId !== null
     markDiscordItem(
       resolvedSourceItemId,
       "acted",
@@ -702,16 +781,16 @@ export async function uploadDiscordFile(params: {
   channelId?: string
   filePath: string
   content?: string
+  target?: unknown
+  turnTargets?: readonly DiscordMessageTarget[]
   sourceItemId?: string
   replyMode?: string
   referenceMessage?: string
   runtimeKind?: RuntimeKind
 }): Promise<Record<string, unknown>> {
-  let channelId = String(params.channelId ?? "").trim()
-  if (!channelId && params.sourceItemId?.trim()) {
-    channelId = getItemChannelId(params.sourceItemId.trim()) ?? ""
-  }
-  if (!channelId) throw new Error("channel_id is required (or provide source_item_id that maps to one)")
+  const delivery = await resolveDiscordDeliveryTarget(params)
+  const { channelId, replyMode, sourceItemId: resolvedSourceItemId, referenceMessageId,
+    inferredSourceItemId } = delivery
   assertDiscordChannelAccess(channelId, params.runtimeKind)
 
   const filePath = String(params.filePath ?? "").trim()
@@ -734,16 +813,6 @@ export async function uploadDiscordFile(params: {
   }
 
   const content = String(params.content ?? "").trim()
-  const replyMode = normalizeReplyMode(params.replyMode)
-  const explicitSourceItemId = params.sourceItemId?.trim() ? params.sourceItemId.trim() : null
-  const inferredSourceItemId = explicitSourceItemId ? null : inferPendingDmItemId(channelId)
-  const resolvedSourceItemId = explicitSourceItemId ?? inferredSourceItemId
-  const referenceMessageId = await chooseMessageReference({
-    channelId,
-    replyMode,
-    sourceItemId: resolvedSourceItemId ?? undefined,
-    referenceMessage: params.referenceMessage,
-  })
 
   const rest = makeRestClient()
   const botUserId = await getBotUserId(rest)
@@ -792,7 +861,7 @@ export async function uploadDiscordFile(params: {
     .filter(Boolean)
 
   if (resolvedSourceItemId) {
-    const wasInferred = !explicitSourceItemId
+    const wasInferred = inferredSourceItemId !== null
     markDiscordItem(
       resolvedSourceItemId,
       "acted",

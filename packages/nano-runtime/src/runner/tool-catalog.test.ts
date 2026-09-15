@@ -72,14 +72,18 @@ test("every advertised server tool has a runner handler", () => {
 })
 
 test("Discord and client tools are independently gated", () => {
-  const names = createNiriToolCatalog({
+  const tools = createNiriToolCatalog({
     clientCapabilities: ["read_file"],
     workspace: { id: "client", root: "/client" },
     discord: true,
-  }).map((tool) => tool.function.name)
+  })
+  const names = tools.map((tool) => tool.function.name)
   assert.equal(names.includes("read_file"), true)
   assert.equal(names.includes("shell"), false)
   assert.equal(names.includes("discord_send"), true)
+  const sendProperties = tools.find((tool) => tool.function.name === "discord_send")!
+    .function.parameters.properties as Record<string, unknown>
+  assert.deepEqual(Object.keys(sendProperties).sort(), ["channel_id", "content", "reply_mode", "target"])
 })
 
 test("server memory keeps read_file available without an attached client", () => {

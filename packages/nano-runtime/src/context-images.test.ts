@@ -95,6 +95,46 @@ test("avatars attach once per author in retained context across direct messages,
   assert.deepEqual(discordEventImageReferences({ source: "discord", content: "hello", triggeredAt: "", raw: payload }), [])
 })
 
+test("custom Discord emoji attach as PNG bitmaps and animated emoji use one frame", async (t) => {
+  const { discordEventImageReferences, discordToolImageReferences } = await import("./discord/context-avatars")
+  const old = config.discord.attach_emoji_bitmap
+  assert.equal(old, true)
+  t.after(() => { config.discord.attach_emoji_bitmap = old })
+  config.discord.attach_emoji_bitmap = true
+
+  const staticId = "523456789012345678"
+  const animatedId = "623456789012345678"
+  const content = `hello <:wave:${staticId}> <a:dance:${animatedId}> <:wave:${staticId}>`
+  const event = { source: "discord" as const, content, triggeredAt: new Date().toISOString(), raw: { content } }
+  const refs = discordEventImageReferences(event)
+  assert.deepEqual(refs.map((ref) => ref.kind), ["discord-emoji", "discord-emoji"])
+  assert.deepEqual(refs.map((ref) => ref.kind === "discord-emoji" && [ref.emojiId, ref.animated]), [
+    [staticId, false],
+    [animatedId, true],
+  ])
+  assert.equal(discordToolImageReferences(JSON.stringify([{ content }])).length, 2)
+
+  const requested: string[] = []
+  t.mock.method(globalThis, "fetch", async (url: unknown) => {
+    const parsed = new URL(String(url))
+    requested.push(parsed.toString())
+    assert.match(parsed.pathname, new RegExp(`/emojis/(${staticId}|${animatedId})\\.png$`))
+    assert.equal(parsed.searchParams.get("size"), "128")
+    return new Response(png, { headers: { "content-type": "image/png" } })
+  })
+
+  const direct = { ...message(content), imageReferences: refs }
+  const repeated = { ...message(content), imageReferences: discordToolImageReferences(JSON.stringify([{ content }])) }
+  await prepareContextImages([direct, repeated])
+  assert.equal(requested.length, 2)
+  assert.deepEqual(direct.imageAttachments?.map((image) => image.mimeType), ["image/png", "image/png"])
+  assert.equal(repeated.imageAttachments, undefined)
+
+  config.discord.attach_emoji_bitmap = false
+  assert.deepEqual(discordEventImageReferences(event), [])
+  assert.equal(enabledContextImages(direct).length, 0)
+})
+
 test("prompt estimates budget images without tokenizing their base64 bytes", async () => {
   const { estimatePromptTokens } = await import("./runner/messages")
   const msg = message("picture")

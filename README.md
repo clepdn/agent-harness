@@ -59,8 +59,9 @@ include a **Mute this error forever** button. Muting is stored in `nano.db` and
 applies only to that error fingerprint.
 
 Set `[frontend].enable = true` to run a second virtual nano for every model-eligible
-Discord event except DMs authored by `discord.owner_id`. It shares soul and
-memories with the main agent but has its own session and model loop, no executor
+Discord event except DMs authored by `discord.owner_id`. It sees the main soul
+through a private, three-way-rebased patch and shares memories with the main agent,
+but has its own session and model loop, no executor
 or skill access, no owner-DM lookup access, and a durable `agent_send` /
 `agent_channel` bridge to the main agent. Omit `frontend.model` to follow the
 main agent's live model; set it to a preset or raw model id to pin a separate one.
