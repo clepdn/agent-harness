@@ -448,3 +448,50 @@ test("loadSkill strips frontmatter, resolves names, and rejects bad input", asyn
 
   assert.equal(code, 0)
 })
+
+test("frontend memory policy hides skills and blocks local copy escape hatches", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-frontend-memory-"))
+  const home = path.join(root, "home")
+  const memories = path.join(home, "memories")
+  await fs.mkdir(path.join(memories, "skills"), { recursive: true })
+  await fs.writeFile(path.join(memories, "core.md"), "# Core\nshared marker\n", "utf8")
+  await fs.writeFile(path.join(memories, "skills", "hidden.md"), "# Hidden\nsecret skill marker\n", "utf8")
+  await fs.writeFile(path.join(memories, "discarded-2026-09-11.json"), "owner DM transcript marker", "utf8")
+  await fs.writeFile(path.join(memories, "frontend-discarded-2026-09-11.json"), "frontend transcript marker", "utf8")
+  const localFile = path.join(root, "local.txt")
+  await fs.writeFile(localFile, "local marker", "utf8")
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+
+  const moduleUrl = new URL("./agent-state-tools.ts", import.meta.url).href
+  const script = `
+    import assert from "node:assert/strict"
+    const { editMemoryResource, grepMemory, listMemory, memoryFs, readMemory } = await import(${JSON.stringify(moduleUrl)})
+    const policy = { excludeSkills: true, excludeMainSessionArchives: true, allowLocalCopy: false }
+    assert.match(await readMemory("memory://", undefined, undefined, policy), /core\.md/)
+    assert.doesNotMatch(await readMemory("memory://", undefined, undefined, policy), /skills/)
+    assert.doesNotMatch(await listMemory(policy), /skills/)
+    assert.doesNotMatch(await listMemory(policy), /^discarded-2026-09-11/m)
+    assert.match(await listMemory(policy), /frontend-discarded-2026-09-11/)
+    assert.equal(await grepMemory("secret skill marker", false, policy), "(no matches found)")
+    assert.equal(await grepMemory("owner DM transcript marker", false, policy), "(no matches found)")
+    await assert.rejects(() => readMemory("memory://skills/hidden.md", undefined, undefined, policy), /skill memories are unavailable/)
+    await assert.rejects(() => editMemoryResource("memory://skills/hidden.md", "secret", "changed", undefined, policy), /skill memories are unavailable/)
+    await assert.rejects(() => memoryFs("skills/new.md", "create", undefined, policy), /skill memories are unavailable/)
+    await assert.rejects(() => readMemory("memory://discarded-2026-09-11.json", undefined, undefined, policy), /main session archives are unavailable/)
+    await assert.rejects(
+      () => memoryFs(${JSON.stringify(`local://${localFile}`)}, "copy", "copied.txt", policy),
+      (error) => String(error).includes("local:// copies are unavailable"),
+    )
+  `
+  const result = await new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      env: { ...process.env, NANO_HOME: home },
+      stdio: ["ignore", "ignore", "pipe"],
+    })
+    let stderr = ""
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk })
+    child.on("error", reject)
+    child.on("close", (code) => resolve({ code, stderr }))
+  })
+  assert.equal(result.code, 0, result.stderr)
+})

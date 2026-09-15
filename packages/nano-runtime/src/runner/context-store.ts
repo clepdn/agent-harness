@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import type Database from "better-sqlite3"
 import { getDb } from "../db"
 import type { Message } from "../types"
+import type { RuntimeKind } from "./types"
 
 const SUMMARY_ID_PATTERN = /^\[context-summary-id\s+(sum_[0-9a-f-]+)\]$/m
 const DEFAULT_EXPAND_LIMIT = 12
@@ -14,6 +15,7 @@ const CONTEXT_SUMMARY_NOTE =
 
 type ContextMessageRow = {
   id: string
+  runtime_kind: RuntimeKind
   role: string
   content_json: string
   content_text: string
@@ -103,8 +105,8 @@ function canonicalMessage(message: Message): string {
   return JSON.stringify(message)
 }
 
-function contextMessageId(message: Message): string {
-  return `msg_${createHash("sha256").update(canonicalMessage(message)).digest("hex").slice(0, 32)}`
+function contextMessageId(message: Message, runtimeKind: RuntimeKind): string {
+  return `msg_${createHash("sha256").update(`${runtimeKind}\0${canonicalMessage(message)}`).digest("hex").slice(0, 32)}`
 }
 
 function boundedInteger(value: number | undefined, fallback: number, max: number): number {
@@ -112,24 +114,24 @@ function boundedInteger(value: number | undefined, fallback: number, max: number
   return Math.min(Math.floor(value), max)
 }
 
-function insertMessage(db: Database.Database, message: Message, source: string, now: string): string {
-  const id = contextMessageId(message)
+function insertMessage(db: Database.Database, message: Message, source: string, now: string, runtimeKind: RuntimeKind): string {
+  const id = contextMessageId(message, runtimeKind)
   const role = typeof recordOf(message)?.role === "string" ? String(recordOf(message)?.role) : "unknown"
   db.prepare(`
     insert or ignore into context_messages
-      (id, role, content_json, content_text, first_seen_at, source)
-    values (?, ?, ?, ?, ?, ?)
-  `).run(id, role, canonicalMessage(message), messageText(message), now, source)
+      (id, runtime_kind, role, content_json, content_text, first_seen_at, source)
+    values (?, ?, ?, ?, ?, ?, ?)
+  `).run(id, runtimeKind, role, canonicalMessage(message), messageText(message), now, source)
   return id
 }
 
 /** Persist every distinct raw message in an active checkpoint without changing model context. */
-export function archiveContextMessages(messages: Message[], source: string): string[] {
+export function archiveContextMessages(messages: Message[], source: string, runtimeKind: RuntimeKind = "main"): string[] {
   const db = getDb()
   const now = new Date().toISOString()
   const insert = db.transaction((items: Message[]) => items
     .filter((message) => !messageText(message).startsWith("[context summary v1]"))
-    .map((message) => insertMessage(db, message, source, now)))
+    .map((message) => insertMessage(db, message, source, now, runtimeKind)))
   return insert(messages)
 }
 
@@ -156,7 +158,7 @@ export function attachContextSummaryId(messages: Message[], summaryId: string): 
  * Closes an active session into a new provenance node. The previous summary
  * becomes its parent and every newer raw message becomes a direct source.
  */
-export function recordRestContextSnapshot(messages: Message[], note?: string): {
+export function recordRestContextSnapshot(messages: Message[], note?: string, runtimeKind: RuntimeKind = "main"): {
   summaryId: string
   forest: string
   sourceCount: number
@@ -177,6 +179,7 @@ export function recordRestContextSnapshot(messages: Message[], note?: string): {
     compactedMessages,
     priorSummaryContent,
     method: "rest-snapshot",
+    runtimeKind,
   })
   const baseForest = priorSummaryContent
     ?? `${CONTEXT_SUMMARY_HEADER}\n${CONTEXT_SUMMARY_NOTE}\n[segments]\n${summaryText}`
@@ -195,20 +198,22 @@ export function recordContextCompaction(input: {
   compactedMessages: Message[]
   priorSummaryContent?: string | null
   method: string
+  runtimeKind?: RuntimeKind
 }): string {
   const db = getDb()
+  const runtimeKind = input.runtimeKind ?? "main"
   const id = `sum_${randomUUID()}`
   const now = new Date().toISOString()
   const candidateParentId = input.priorSummaryContent ? contextSummaryId(input.priorSummaryContent) : null
-  const parentId = candidateParentId && db.prepare("select 1 from context_summaries where id = ?").get(candidateParentId)
+  const parentId = candidateParentId && db.prepare("select 1 from context_summaries where id = ? and runtime_kind = ?").get(candidateParentId, runtimeKind)
     ? candidateParentId
     : null
 
   db.transaction(() => {
     db.prepare(`
-      insert into context_summaries (id, summary_text, method, created_at)
-      values (?, ?, ?, ?)
-    `).run(id, input.summaryText, input.method, now)
+      insert into context_summaries (id, runtime_kind, summary_text, method, created_at)
+      values (?, ?, ?, ?, ?)
+    `).run(id, runtimeKind, input.summaryText, input.method, now)
 
     if (parentId) {
       db.prepare(`
@@ -225,7 +230,7 @@ export function recordContextCompaction(input: {
       values (?, ?, ?)
     `)
     sources.forEach((message, ordinal) => {
-      const messageId = insertMessage(db, message, `compaction:${input.method}`, now)
+      const messageId = insertMessage(db, message, `compaction:${input.method}`, now, runtimeKind)
       link.run(id, messageId, ordinal)
     })
   })()
@@ -233,7 +238,7 @@ export function recordContextCompaction(input: {
   return id
 }
 
-export function grepContext(query: string, limit?: number, summaryId?: string): ContextSearchResult[] {
+export function grepContext(query: string, limit?: number, summaryId?: string, runtimeKind: RuntimeKind = "main"): ContextSearchResult[] {
   const trimmed = query.trim()
   if (!trimmed) return []
   const db = getDb()
@@ -252,11 +257,12 @@ export function grepContext(query: string, limit?: number, summaryId?: string): 
   const rows = db.prepare(`
     select m.*
     from context_messages m
-    where instr(lower(m.content_text), lower(?)) > 0
+    where m.runtime_kind = ?
+      and instr(lower(m.content_text), lower(?)) > 0
     ${scopeSql}
     order by m.first_seen_at desc
     limit ?
-  `).all(...(summaryId ? [trimmed, summaryId, cappedLimit] : [trimmed, cappedLimit])) as ContextMessageRow[]
+  `).all(...(summaryId ? [runtimeKind, trimmed, summaryId, cappedLimit] : [runtimeKind, trimmed, cappedLimit])) as ContextMessageRow[]
 
   const summariesFor = db.prepare(`
     select summary_id from context_summary_messages where message_id = ? order by summary_id
@@ -358,11 +364,11 @@ function collectSummaryManifest(
 }
 
 /** Describe a known summary node before spending context on verbatim expansion. */
-export function describeContextSummary(summaryId: string, tokenCap?: number): ContextSummaryDescription | null {
+export function describeContextSummary(summaryId: string, tokenCap?: number, runtimeKind: RuntimeKind = "main"): ContextSummaryDescription | null {
   const db = getDb()
   const summary = db.prepare(`
-    select id, summary_text, method, created_at from context_summaries where id = ?
-  `).get(summaryId) as { id: string; summary_text: string; method: string; created_at: string } | undefined
+    select id, summary_text, method, created_at from context_summaries where id = ? and runtime_kind = ?
+  `).get(summaryId, runtimeKind) as { id: string; summary_text: string; method: string; created_at: string } | undefined
   if (!summary) return null
 
   const resolvedTokenCap = Number.isFinite(tokenCap) && Number(tokenCap) > 0
@@ -406,11 +412,11 @@ export function describeContextSummary(summaryId: string, tokenCap?: number): Co
   }
 }
 
-export function expandContextSummary(summaryId: string, offset?: number, limit?: number): ContextExpansion | null {
+export function expandContextSummary(summaryId: string, offset?: number, limit?: number, runtimeKind: RuntimeKind = "main"): ContextExpansion | null {
   const db = getDb()
   const summary = db.prepare(`
-    select id, summary_text, method, created_at from context_summaries where id = ?
-  `).get(summaryId) as { id: string; summary_text: string; method: string; created_at: string } | undefined
+    select id, summary_text, method, created_at from context_summaries where id = ? and runtime_kind = ?
+  `).get(summaryId, runtimeKind) as { id: string; summary_text: string; method: string; created_at: string } | undefined
   if (!summary) return null
 
   const allIds = collectSummaryMessageIds(db, summaryId)

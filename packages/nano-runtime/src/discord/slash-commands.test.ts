@@ -33,6 +33,26 @@ test("/interrupt and /discard are registered as top-level commands", async () =>
   assert.ok(commands.some((entry) => entry.name === "discard"))
 })
 
+test("/compact registers force and snapcompact boolean options", async () => {
+  let commands: any[] = []
+  await registerSlashCommands({
+    application: { commands: { set: async (value: any[]) => { commands = value } } },
+  } as unknown as Client)
+  const compact = commands.find((entry) => entry.name === "compact")
+  assert.ok(compact)
+  assert.deepEqual(
+    compact.options.map((option: { name: string; type: number; required?: boolean }) => ({
+      name: option.name,
+      type: option.type,
+      required: option.required,
+    })),
+    [
+      { name: "force", type: 5, required: false },
+      { name: "snapcompact", type: 5, required: false },
+    ],
+  )
+})
+
 test("/interrupt and /discard report when no session is running", async (t) => {
   const previousOwner = config.discord.owner_id
   t.after(() => { config.discord.owner_id = previousOwner })

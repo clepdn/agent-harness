@@ -14,6 +14,10 @@ export type NiriToolCatalogOptions = {
   subagents?: boolean
   computer?: boolean
   webSearch?: boolean
+  /** Build the lower-trust virtual frontend lane (no executor or skills). */
+  frontend?: boolean
+  /** Expose the durable main/frontend mailbox. */
+  agentChannel?: boolean
 }
 
 const functionTool = (name: string, description: string, parameters: JsonSchema): ToolDefinition => ({
@@ -434,6 +438,36 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
     )
   }
 
+  if (options.agentChannel) {
+    tools.push(
+      functionTool(
+        "agent_send",
+        "Send a durable message to the other virtual agent. The recipient is main when called by frontend, and frontend when called by main. The message wakes the recipient and the returned id can be used to correlate replies.",
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            content: { type: "string", minLength: 1 },
+            reply_to: { type: "string", description: "Optional agent-channel message id being answered." },
+          },
+          required: ["content"],
+        },
+      ),
+      functionTool(
+        "agent_channel",
+        "Read recent durable messages exchanged between the main and frontend virtual agents.",
+        {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            limit: { type: "integer", minimum: 1, maximum: 100 },
+            before_id: { type: "string" },
+          },
+        },
+      ),
+    )
+  }
+
   tools.push(
     functionTool(
       "voice_reply",
@@ -469,5 +503,43 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
     ),
   )
 
+  if (!options.frontend) return tools
+
+  // The frontend is normal nano at the server boundary, but it cannot reach
+  // the attached executor, inspect executor jobs, load skills, or upload a
+  // client-side path through Discord.
+  const unavailable = new Set([
+    "shell",
+    "job_list",
+    "job_status",
+    "job_stdout",
+    "job_cancel",
+    "image_tool",
+    "computer",
+    "subagent",
+    "skill",
+    "discord_upload",
+  ])
   return tools
+    .filter((tool) => !unavailable.has(tool.function.name))
+    .map((tool) => {
+      if (tool.function.name === "read_file") {
+        const definition = createReadFileToolDefinition({ memory: true })
+        return {
+          ...definition,
+          function: {
+            ...definition.function,
+            description: "Read a server-owned memory:// file or directory. Ordinary and attached-client paths are unavailable; memories/skills is also unavailable.",
+          },
+        }
+      }
+      if (tool.function.name === "edit_file") {
+        return functionTool(
+          "edit_file",
+          "Edit a server-owned memory:// Markdown resource by replacing exactly one old_text occurrence. Local and attached-client paths are unavailable.",
+          tool.function.parameters,
+        )
+      }
+      return tool
+    })
 }

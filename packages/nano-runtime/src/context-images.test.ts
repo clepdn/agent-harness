@@ -181,13 +181,19 @@ test("bootstrap attaches soul/core images and the bot avatar on each fresh conte
 test("memory reads, skills, and search excerpts add references through the real tool path", async () => {
   const { buildToolHandlers } = await import("./runner/loop-tool-registry")
   const { executeToolCall } = await import("./runner/loop-tool-runtime")
+  const { createNiriToolCatalog } = await import("./runner/tool-catalog")
   const { toolContextImageReferences } = await import("./tool-context-images")
   await fs.writeFile(`${home}/memories/journal/today.md`, "# Today\n![photo](../images/picture.png)\n")
   await fs.writeFile(`${home}/memories/skills/illustrated.md`, "---\ndescription: test\n---\n# Guide\n![guide][photo]\n\n[photo]: ../images/picture.png\n")
-  const state = { conversation: [], pendingInputs: [], toolInFlight: false } as unknown as LoopState
+  const state = {
+    conversation: [],
+    pendingInputs: [],
+    toolInFlight: false,
+    toolCatalog: createNiriToolCatalog({ memory: true }),
+  } as unknown as LoopState
   const hooks = { flushDeferredEvents() {} } as LoopHooks
   const convId = startConversation("test", new Date().toISOString())
-  for (const [name, args] of [["memory_read", { path: "memory://journal/today.md" }], ["skill", { name: "illustrated" }]] as const) {
+  for (const [name, args] of [["read_file", { path: "memory://journal/today.md" }], ["skill", { name: "illustrated" }]] as const) {
     await executeToolCall(convId, state, hooks, buildToolHandlers(), { type: "toolCall", id: name, name, arguments: args })
     const msg = state.conversation.at(-1)!
     assert.equal(msg.role, "toolResult")

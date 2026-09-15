@@ -74,6 +74,16 @@ env = "default"
 # and nags the agent if the remote has changed. Throttled to 10 min per repo.
 # git_upstream_nag = false
 
+# Optional second virtual agent for Discord traffic outside the owner's DMs.
+# It shares soul and authored memories with nano, but has an independent
+# conversation/session and no executor, subagent, or skill access.
+[frontend]
+enable = false
+# Optional preset name or raw model id. Omit this key entirely to follow the
+# main runtime's currently active model, including live model swaps. An empty
+# string is invalid.
+# model = "umans"
+
 # Optional: route shell tools through a Docker container instead of the local shell.
 # Set both to enable. Mutually exclusive with [ssh].
 [container]

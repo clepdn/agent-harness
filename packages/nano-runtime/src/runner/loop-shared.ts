@@ -7,7 +7,13 @@ export type FunctionToolCall = ToolCall
 /** Tool argument map — pi args are already parsed objects. */
 export type ToolArgs = Record<string, unknown>
 
-export type ToolExecutionOutcome = { shouldRest?: boolean; isWait?: boolean }
+export type ToolExecutionOutcome = {
+  shouldRest?: boolean
+  /** Return control to the runner's idle wait, which also owns idle compaction. */
+  shouldWaitForEvent?: boolean
+  /** The tool performed its own bounded wait and received an event. */
+  isWait?: boolean
+}
 
 export type CompletionTurnResult = {
   message: AssistantMessage

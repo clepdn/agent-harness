@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { __loopTest } from "./loop"
-import { __loopToolsTest } from "./loop-tools"
+import { __loopToolsTest, processToolCalls } from "./loop-tools"
 import { modelState } from "./model-state"
 import type { Message, UserMessage } from "../types"
 import type { LoopState } from "./types"
@@ -12,6 +12,7 @@ import {
   notifyDiscordModelActivity,
   __discordTypingLeaseTest,
 } from "../discord/typing-lease"
+import { initDb, startConversation } from "../db"
 
 const testClientTools = {
   getCapabilities: () => [],
@@ -298,6 +299,40 @@ test("waitForNextEvent waits for and injects the next external event", async () 
   assert.deepEqual(calls, ["wait", "inject:still here"])
 })
 
+test("wait tool yields to the runner idle wait instead of blocking on the raw event hook", async () => {
+  initDb(":memory:")
+  const convId = startConversation("test", new Date().toISOString())
+  const state = makeState()
+  state.toolCatalog = [{
+    type: "function",
+    function: { name: "wait", description: "wait", parameters: { type: "object", properties: {} } },
+  }]
+  let rawWaitCalls = 0
+
+  const outcome = await processToolCalls(convId, state, {
+    clientTools: testClientTools,
+    refreshToolCatalog: () => {},
+    waitForEvent: async () => {
+      rawWaitCalls += 1
+      return null
+    },
+    waitForEventWithTimeout: async () => {
+      throw new Error("wait handler must leave timeout selection to waitForNextEvent")
+    },
+    injectIncomingEvent: () => {},
+    flushDeferredEvents: () => {},
+    clearSession: async () => {},
+    saveSession: async () => {},
+    saveShutdownSnapshot: async () => {},
+    shouldShutdown: () => false,
+    resolveShutdown: () => {},
+  }, [{ type: "toolCall", id: "call_wait", name: "wait", arguments: {} }])
+
+  assert.equal(outcome, "wait")
+  assert.equal(rawWaitCalls, 0)
+  assert.equal(state.conversation.at(-1)?.role, "toolResult")
+})
+
 test("waitForNextEvent returns after successful compaction for immediate reactivation", async () => {
   const calls: string[] = []
   const state = makeState()
@@ -376,7 +411,7 @@ test("waitForNextEvent clears a manual compaction request after running the idle
   modelState.idleCompactionMs = 60_000
 
   const state = makeState()
-  state.compactionRequested = true
+  state.compactionRequest = { forceSummaryModel: true, snapcompact: true }
   // Below any trigger — idle compaction must still attempt regardless.
   state.contextSize = 0
 
@@ -393,7 +428,11 @@ test("waitForNextEvent clears a manual compaction request after running the idle
     waitForEventWithTimeout: async () => {
       timeouts += 1
       if (timeouts === 1) {
-        assert.equal(state.compactionRequested, true, "flag should still be set before the first pass")
+        assert.deepEqual(
+          state.compactionRequest,
+          { forceSummaryModel: true, snapcompact: true },
+          "request should still be set before the first pass",
+        )
       } else {
         shuttingDown = true
       }
@@ -411,7 +450,41 @@ test("waitForNextEvent clears a manual compaction request after running the idle
   modelState.idleCompactionMs = savedIdle
 
   // The manual flag is cleared once the pass has run.
-  assert.equal(state.compactionRequested, false)
+  assert.equal(state.compactionRequest, undefined)
+})
+
+test("manual compaction interrupts a plain wait when idle compaction is disabled", async () => {
+  const savedIdle = modelState.idleCompactionMs
+  modelState.idleCompactionMs = 0
+  const state = makeState()
+  const request = { forceSummaryModel: true, snapcompact: false }
+  state.compactionRequest = request
+  const calls: string[] = []
+
+  try {
+    await __loopTest.waitForNextEvent(9, state, {
+      clientTools: testClientTools,
+      refreshToolCatalog: () => calls.push("refresh"),
+      waitForEvent: async () => { calls.push("wait"); return null },
+      waitForEventWithTimeout: async () => { throw new Error("unexpected timeout wait") },
+      injectIncomingEvent: () => {},
+      flushDeferredEvents: () => {},
+      clearSession: async () => {},
+      saveSession: async () => {},
+      saveShutdownSnapshot: async () => {},
+      shouldShutdown: () => false,
+      resolveShutdown: () => {},
+    }, async (_state, received) => {
+      assert.deepEqual(received, request)
+      calls.push("compact")
+      return "rewritten"
+    })
+  } finally {
+    modelState.idleCompactionMs = savedIdle
+  }
+
+  assert.deepEqual(calls, ["wait", "compact", "refresh"])
+  assert.equal(state.compactionRequest, undefined)
 })
 
 test("applyCompaction attempts an idle burn even below the token trigger", async () => {

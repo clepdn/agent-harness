@@ -2,11 +2,22 @@ import type { Message, UserMessage, RunnerState } from "../types"
 import type { ClientToolExecutor, ToolDefinition } from "@nano/harness-core"
 
 export type CompactionResult = "none" | "rewritten" | "suppressed"
+export type RuntimeKind = "main" | "frontend"
+
+/** Options carried from the Discord /compact command to the idle loop. */
+export interface ManualCompactionRequest {
+  /** Require the dedicated [summary] model instead of the active generation model. */
+  forceSummaryModel: boolean
+  /** Preserve the discarded span in a snapcompact bitmap frame when possible. */
+  snapcompact: boolean
+}
 
 export type ImageDetail = "auto" | "low" | "high"
 
 /** Mutable state consumed by the runner loop on each turn. */
 export interface LoopState {
+  /** Which virtual agent owns this independent conversation loop. */
+  runtimeKind?: RuntimeKind
   systemPrompt: string
   conversation: Message[]
   pendingInputs: UserMessage[]
@@ -41,8 +52,8 @@ export interface LoopState {
   restRequested: boolean
   /** Reason for the programmatic rest (e.g. model swap). */
   restReason: string
-  /** When true, force a compaction pass at the next idle wait, regardless of token count. */
-  compactionRequested?: boolean
+  /** Pending operator-requested compaction, always run regardless of token count. */
+  compactionRequest?: ManualCompactionRequest
   /** Stable outbound Discord response scope across tool-producing iterations. */
   discordTypingTurnId?: string
   discordTypingChannelId?: string
@@ -70,6 +81,7 @@ export interface LoopHooks {
 }
 
 export interface RunnerStateInternal extends RunnerState {
+  runtimeKind: RuntimeKind
   toolCatalog: ToolDefinition[]
   toolCatalogEpoch: number
   toolCatalogFingerprint: string
@@ -83,7 +95,7 @@ export interface RunnerStateInternal extends RunnerState {
   deferredEvents: Array<{ event: UserMessage; priority: boolean }>
   restRequested: boolean
   restReason: string
-  compactionRequested?: boolean
+  compactionRequest?: ManualCompactionRequest
   discordTypingTurnId?: string
   discordTypingChannelId?: string
 }

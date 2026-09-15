@@ -6,6 +6,8 @@
 
 import { createHash } from "crypto"
 import { getDb, isVecAvailable, MEMORY_EMBEDDING_DIMENSIONS } from "../db"
+import type { RuntimeKind } from "../runner/types"
+import { assertDiscordChannelAccess, filterDiscordRowsForRuntime } from "./access"
 import { EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, embeddingsConfigured, embedTexts } from "../embeddings"
 import { MEMORY_SEMANTIC_MIN_SIMILARITY, normalizeText, type DiscordMemorySearchResult } from "../memory/shared"
 
@@ -478,6 +480,7 @@ export async function searchDiscordMemoryEntries(
   query: string,
   limit: number,
   queryVector?: number[],
+  runtimeKind: RuntimeKind = "main",
 ): Promise<DiscordMemorySearchResult[]> {
   const skipped = queryVector
     ? (!isVecAvailable() ? "sqlite-vec unavailable" : null)
@@ -509,7 +512,7 @@ export async function searchDiscordMemoryEntries(
     )
     .all(vectorParam(vector), Math.max(boundedLimit * 4, 20)) as Array<DiscordSearchRow & { distance: number }>
 
-  return rows
+  return filterDiscordRowsForRuntime(rows, runtimeKind)
     .filter((row) => 1 - row.distance >= MEMORY_SEMANTIC_MIN_SIMILARITY)
     .slice(0, boundedLimit)
     .map((row) => ({
@@ -537,6 +540,7 @@ export function pruneDiscordMemory(
   id: string,
   reason: MemoryPruneReason,
   note?: string,
+  runtimeKind: RuntimeKind = "main",
 ): Record<string, unknown> {
   const match = /^discord:([0-9]+)$/.exec(String(id ?? "").trim())
   if (!match) throw new Error("memory_prune only accepts a discord:<message_id> returned by memory_search")
@@ -546,6 +550,10 @@ export function pruneDiscordMemory(
 
   const messageId = match[1]!
   const db = getDb()
+  const source = db.prepare("select channel_id from discord_messages where message_id = ?").get(messageId) as
+    | { channel_id: string }
+    | undefined
+  if (source) assertDiscordChannelAccess(source.channel_id, runtimeKind)
   const indexed = db
     .prepare("select 1 as present from discord_message_embedding_meta where message_id = ?")
     .get(messageId) as { present: number } | undefined
@@ -591,9 +599,11 @@ export async function searchDiscordMessages(params: {
   query?: string
   messageId?: string
   limit?: number
+  runtimeKind?: RuntimeKind
 }): Promise<Record<string, unknown>> {
   const channelId = String(params.channelId ?? "").trim()
   if (!channelId) throw new Error("channel_id is required")
+  assertDiscordChannelAccess(channelId, params.runtimeKind)
 
   const messageId = String(params.messageId ?? "").trim()
   const query = String(params.query ?? "").trim()

@@ -9,7 +9,7 @@ import { recordMetric, summarizePromptResponse } from "../metrics"
 import { recordLlmRequest } from "../prometheus"
 import { emit } from "../stream"
 import { notifyDiscordModelActivity } from "../discord/typing-lease"
-import { modelState } from "./model-state"
+import { modelStateFor } from "./model-state"
 import type { LoopState } from "./types"
 import {
   buildContext,
@@ -33,7 +33,8 @@ import { classifyApiError } from "../api-errors"
 import { reportApiError } from "../discord/owner-alerts"
 
 /** The currently active model pair (fallback when degraded, else primary). */
-export function activeModelProvider(): { model: Model | null; apiKey: string | undefined } {
+export function activeModelProvider(state?: Pick<LoopState, "runtimeKind">): { model: Model | null; apiKey: string | undefined } {
+  const modelState = modelStateFor(state?.runtimeKind)
   return {
     model: modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel,
     apiKey: modelState.useFallback ? modelState.fallbackApiKey : modelState.primaryApiKey,
@@ -43,7 +44,7 @@ export function activeModelProvider(): { model: Model | null; apiKey: string | u
 /**
  * Resolves the summary model pair for a compaction pass.
  *
- * `preferActiveModel` (companion / context-full strategies) forces the model
+ * `"active"` (companion / context-full strategies) forces the model
  * that actually generated the conversation, so the summary is written from the
  * same head that holds the reasoning — the only way to salvage lessons from a
  * provider that hides its chain-of-thought. Otherwise a configured `summary`
@@ -52,15 +53,26 @@ export function activeModelProvider(): { model: Model | null; apiKey: string | u
  * When prompt-cache preservation is on AND we are not explicitly preferring the
  * active model, we return null so an incidental summary can't invalidate the
  * cached prefix. An intentional cliff-defense compaction passes
- * `preferActiveModel` and accepts the one-time cache bust.
+ * `"active"` and accepts the one-time cache bust. `"configured"` is the
+ * operator-forced small-model path and never falls back to the active model.
  */
+export type SummaryProviderPreference = "default" | "active" | "configured"
+
 export function configuredSummaryProvider(
-  preferActiveModel = false,
+  preference: SummaryProviderPreference = "default",
+  state?: Pick<LoopState, "runtimeKind">,
 ): { model: Model | null; apiKey: string | undefined } {
-  if (preferActiveModel) return activeModelProvider()
+  const modelState = modelStateFor(state?.runtimeKind)
+  if (preference === "active") return activeModelProvider(state)
+  // An explicit /compact force=true means exactly the configured small model:
+  // do not substitute the active model and do not suppress the intentional
+  // cache bust. The Discord handler rejects this mode when no model exists.
+  if (preference === "configured") {
+    return { model: modelState.summaryModel, apiKey: modelState.summaryApiKey }
+  }
   if (modelState.respectPromptCache) return { model: null, apiKey: undefined }
   if (modelState.summaryModel) return { model: modelState.summaryModel, apiKey: modelState.summaryApiKey }
-  return activeModelProvider()
+  return activeModelProvider(state)
 }
 
 /**
@@ -177,6 +189,7 @@ async function createStreamedCompletion(
   tools?: ToolDefinition[],
   signal?: AbortSignal,
 ): Promise<CompletionTurnResult> {
+  const modelState = modelStateFor(state.runtimeKind)
   const startedAt = Date.now()
   const context = buildContext(state, tools)
 
@@ -234,9 +247,11 @@ async function createStreamedCompletion(
   return { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond }
 }
 async function createFallbackCompletion(state: LoopState, tools?: ToolDefinition[], signal?: AbortSignal): Promise<CompletionTurnResult> {
+  const modelState = modelStateFor(state.runtimeKind)
   return createStreamedCompletion(modelState.fallbackModel, modelState.fallbackApiKey, modelState.fallbackToolChoice, state, tools, signal)
 }
 async function createPrimaryCompletion(state: LoopState, tools?: ToolDefinition[], signal?: AbortSignal): Promise<CompletionTurnResult> {
+  const modelState = modelStateFor(state.runtimeKind)
   return createStreamedCompletion(modelState.primaryModel!, modelState.primaryApiKey, modelState.primaryToolChoice, state, tools, signal)
 }
 
@@ -261,8 +276,9 @@ function noteApiError(errorMessage: string, role: "primary" | "fallback", model:
 }
 
 async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Promise<boolean> {
+  const modelState = modelStateFor(state.runtimeKind)
   const beforeEstimate = estimatePromptTokens(state.conversation)
-  const summaryProvider = configuredSummaryProvider()
+  const summaryProvider = configuredSummaryProvider("default", state)
   if (!summaryProvider.model) {
     console.warn(`[context] recovery: no summary model available; cannot llm-summarize`)
     return false
@@ -274,7 +290,10 @@ async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Pro
     state.conversation,
     summaryProvider.model,
     summaryProvider.apiKey,
-    { agentContext },
+    {
+      agentContext,
+      primaryHandoff: summaryProvider.model === modelState.summaryModel,
+    },
   )
   if (!summarized) {
     console.warn(`[context] recovery: llm summarization returned no changes`)
@@ -311,6 +330,7 @@ export async function fetchCompletion(
   _baseState: LoopState = state,
   signal?: AbortSignal,
 ): Promise<CompletionTurnResult> {
+  const modelState = modelStateFor(state.runtimeKind)
   let promptTooLargeAttempts = 0
   let imagesScrubbed = false
 

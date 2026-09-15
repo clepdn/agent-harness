@@ -86,6 +86,7 @@ export function initDb(dbPathOverride?: string): void {
 
     create table if not exists context_messages (
       id           text primary key,
+      runtime_kind text not null default 'main',
       role         text not null,
       content_json text not null,
       content_text text not null,
@@ -98,6 +99,7 @@ export function initDb(dbPathOverride?: string): void {
 
     create table if not exists context_summaries (
       id           text primary key,
+      runtime_kind text not null default 'main',
       summary_text text not null,
       method       text not null,
       created_at   text not null
@@ -204,6 +206,21 @@ export function initDb(dbPathOverride?: string): void {
       updated_at text not null
     );
 
+    create table if not exists agent_channel_messages (
+      id           text primary key,
+      sender       text not null check (sender in ('main', 'frontend')),
+      recipient    text not null check (recipient in ('main', 'frontend')),
+      content      text not null,
+      reply_to     text references agent_channel_messages(id),
+      created_at   text not null,
+      delivered_at text
+    );
+
+    create index if not exists idx_agent_channel_created
+      on agent_channel_messages(created_at desc, id desc);
+    create index if not exists idx_agent_channel_delivery
+      on agent_channel_messages(recipient, delivered_at, created_at);
+
     create table if not exists owner_api_alerts (
       fingerprint      text primary key,
       error_code       text not null,
@@ -300,6 +317,17 @@ export function initDb(dbPathOverride?: string): void {
       updated_at   text    not null default (datetime('now'))
     );
   `)
+
+  // Older homes predate virtual-agent context partitioning. SQLite's
+  // create-table-if-missing does not add columns to existing tables.
+  const ensureColumn = (table: string, column: string, declaration: string) => {
+    const columns = db.prepare(`pragma table_info(${table})`).all() as Array<{ name: string }>
+    if (!columns.some((entry) => entry.name === column)) {
+      db.exec(`alter table ${table} add column ${column} ${declaration}`)
+    }
+  }
+  ensureColumn("context_messages", "runtime_kind", "text not null default 'main'")
+  ensureColumn("context_summaries", "runtime_kind", "text not null default 'main'")
 
   if (vecAvailable) {
     db.exec(`

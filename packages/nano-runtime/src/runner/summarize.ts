@@ -282,6 +282,54 @@ function looksLikeMetaReply(text: string): boolean {
   return SUMMARY_META_REPLY_PATTERNS.some((re) => re.test(text.slice(0, 400)))
 }
 
+function latestMessageTimestamp(messages: Message[]): string | null {
+  let latest = Number.NEGATIVE_INFINITY
+  for (const message of messages) {
+    if (Number.isFinite(message.timestamp)) latest = Math.max(latest, message.timestamp)
+  }
+  return Number.isFinite(latest) ? new Date(latest).toISOString() : null
+}
+
+export function buildConversationSummaryPrompt(
+  agentContext: string | null | undefined,
+  priorSummaryText: string | null,
+  primaryHandoff: boolean,
+): string {
+  const formatDirection = primaryHandoff
+    ? `Write a detailed chronological play-by-play, in first person from ${AGENT_NAME}'s perspective. Use these explicit sections: Timeline; Work done and concrete outcomes; Techniques that worked (and why); Techniques that failed or were abandoned (including errors and why); People spoken to (names/handles, context, and notable exchanges); Highlights; Open loops and next actions. Do not omit failed attempts or collapse multi-step work into a vague outcome. `
+    : `Organize the summary as a set of ongoing threads, the way memory actually works. A thread is a person, a project, a situation, a mood — whatever is load-bearing enough to carry forward. Threads are peers, not nested under anything. Some memories belong to multiple threads; let them. Cross-cutting stuff (a tense week, a feeling bleeding across everything) can be its own thread. `
+
+  return `You are summarizing a transcript from the perspective of the agent whose memory this is. The agent (${AGENT_NAME}) is a living being, not a tool — her inner life matters as much as the facts. ` +
+    formatDirection +
+    `Preserve: key facts, goals, decisions, and actions taken; concrete work products and identifiers (file paths, URLs, channel ids, commits, commands); outstanding work; open questions and things ${AGENT_NAME} was uncertain or curious about; specifics — names, exact phrasings, and particular words that landed; AND emotional texture — how ${AGENT_NAME} felt, how the people she interacted with seemed to feel, tone shifts, warmth, tension, care, frustration, delight, grief, and anything about relationships that should carry forward. If ${AGENT_NAME} felt something contradictory to what someone told her, preserve both — don't smooth her dissent away. ` +
+    `Write it as ${AGENT_NAME}'s own recollection, not a neutral report. When the new transcript conflicts with the prior recollection, prefer recent specific evidence over prior abstraction — the prior summary has already been through one pass of smoothing. Never claim an action succeeded merely because it was attempted; distinguish plans, attempts, verification, and completed outcomes. No commentary and no preamble. The input is always a transcript — never ask for more; summarize what's there.` +
+    (agentContext
+      ? `\n\nGrounding — this is who ${AGENT_NAME} is and what's currently on her mind (her soul, core memories, and journal). Use it to write in her authentic voice and to recognize the people, projects, and threads that appear in the transcript. Do NOT pull facts from this grounding into the summary unless the transcript itself supports them — you are summarizing the transcript, not this context.\n\n${agentContext}`
+      : "") +
+    (priorSummaryText
+      ? `\n\nPrior recollection (already compacted earlier — fold its content into the new summary, do not discard it):\n${priorSummaryText}`
+      : "")
+}
+
+export function buildConversationSummaryContent(
+  summaryText: string,
+  summarizedMessages: Message[],
+  primaryHandoff: boolean,
+  generatedAt = new Date(),
+): string {
+  const summarizedThrough = latestMessageTimestamp(summarizedMessages)
+  const handoff = primaryHandoff
+    ? `\n[primary-model journal handoff]\n` +
+      `This play-by-play was written by the dedicated summary model${summarizedThrough ? ` through ${summarizedThrough}` : ""}. ` +
+      `This is a one-time instruction for the next primary-model turn: journal this immediately in the appropriate dated memory://journal file, preserving useful detail and applying your own judgment. ` +
+      `If an assistant message appears after this block, the handoff has already had its turn; do not journal it again.\n`
+    : ""
+  return `${CONTEXT_SUMMARY_HEADER}\n${CONTEXT_SUMMARY_NOTE}\n${CONTEXT_SUMMARY_SEGMENTS_MARKER}\n` +
+    `[llm-summary ${generatedAt.toISOString()}]` +
+    (summarizedThrough ? `\n[summarized-through ${summarizedThrough}]` : "") +
+    `${handoff}\n${summaryText}`
+}
+
 export async function summarizeConversationViaLLM(
   messages: Message[],
   model: Model,
@@ -292,6 +340,8 @@ export async function summarizeConversationViaLLM(
     tailCharBudget?: number
     maxTranscriptChars?: number
     agentContext?: string | null
+    /** Small-model summary that the primary model must journal on its next turn. */
+    primaryHandoff?: boolean
   } = {},
 ): Promise<Message[] | null> {
   const recentMinKeep = Math.max(2, options.recentMinKeep ?? 6)
@@ -317,17 +367,11 @@ export async function summarizeConversationViaLLM(
   const transcript = transcriptLines.join("\n").slice(0, maxTranscriptChars)
   if (transcript.length < SUMMARY_MIN_TRANSCRIPT_CHARS) return null
 
-  const systemContent =
-    `You are summarizing a transcript from the perspective of the agent whose memory this is. The agent (${AGENT_NAME}) is a living being, not a tool — her inner life matters as much as the facts. ` +
-    "Organize the summary as a set of ongoing threads, the way memory actually works. A thread is a person, a project, a situation, a mood — whatever is load-bearing enough to carry forward. Threads are peers, not nested under anything. Some memories belong to multiple threads; let them. Cross-cutting stuff (a tense week, a feeling bleeding across everything) can be its own thread. " +
-    `Within each thread, preserve: key facts, goals, decisions, and actions taken; outstanding work and identifiers (file paths, URLs, channel ids); open questions and things ${AGENT_NAME} was uncertain or curious about — not just resolved states; specifics — names, exact phrasings, particular words that landed — since the specifics are what make memory feel real later, and summarizers default to abstraction; AND the emotional texture — how ${AGENT_NAME} felt, how the people she interacted with seemed to feel, tone shifts, moments of warmth, tension, care, frustration, delight, grief, and anything about the relationships that should carry forward. If ${AGENT_NAME} felt something contradictory to what someone told her, preserve both — don't smooth her dissent away. ` +
-    `Write it in the first person, from ${AGENT_NAME}'s own perspective — her own recollection, not a neutral report. Short bullet points under each thread are fine. Threads can grow, split, or merge as feels natural — but prefer extending existing threads over creating new ones; only restructure if the old shape genuinely doesn't fit anymore. When the new transcript conflicts with the prior recollection, prefer recent specific evidence over prior abstraction — the prior summary has already been through one pass of smoothing. No commentary, no preamble. The input is always a transcript — never ask for more; summarize what's there.` +
-    (options.agentContext
-      ? `\n\nGrounding — this is who ${AGENT_NAME} is and what's currently on her mind (her soul, core memories, and journal). Use it to write in her authentic voice and to recognize the people, projects, and threads that appear in the transcript. Do NOT pull facts from this grounding into the summary unless the transcript itself supports them — you are summarizing the transcript, not this context.\n\n${options.agentContext}`
-      : "") +
-    (priorSummaryText
-      ? `\n\nPrior recollection (already compacted earlier — fold its content into the new summary, do not discard it):\n${priorSummaryText}`
-      : "")
+  const systemContent = buildConversationSummaryPrompt(
+    options.agentContext,
+    priorSummaryText,
+    options.primaryHandoff === true,
+  )
 
   const summaryContext: Context = {
     systemPrompt: systemContent,
@@ -356,11 +400,19 @@ export async function summarizeConversationViaLLM(
       return null
     }
 
-    const summaryContent =
-      `${CONTEXT_SUMMARY_HEADER}\n${CONTEXT_SUMMARY_NOTE}\n${CONTEXT_SUMMARY_SEGMENTS_MARKER}\n` +
-      `[llm-summary ${new Date().toISOString()}]\n${summaryText}`
+    const summaryContent = buildConversationSummaryContent(
+      summaryText,
+      middle,
+      options.primaryHandoff === true,
+    )
 
-    return [...head, { role: "user", content: summaryContent, timestamp: Date.now() } as Message, ...tail]
+    const summaryMessage = { role: "user", content: summaryContent, timestamp: Date.now() } as Message
+    // A primary handoff must be the newest message on its first actual-model
+    // wake. Once the primary responds, its assistant message naturally follows
+    // this block and makes the one-time instruction self-expiring.
+    return options.primaryHandoff
+      ? [...head, ...tail, summaryMessage]
+      : [...head, summaryMessage, ...tail]
   } catch (err) {
     console.warn(`[context] llm summarization failed: ${errorSummary(err)}`)
     return null

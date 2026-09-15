@@ -78,6 +78,38 @@ test("runner persistence uses NANO_HOME when cwd is read-only", async (t) => {
   assert.equal(await fs.stat(path.join(readOnlyCwd, "metrics.db")).then(() => true).catch(() => false), false)
 })
 
+test("frontend and main runners persist independent sessions and rest snapshots", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-session-lanes-"))
+  const home = path.join(root, "home")
+  await fs.mkdir(home)
+  t.after(async () => fs.rm(root, { recursive: true, force: true }))
+
+  const sessionUrl = new URL("./session.ts", import.meta.url).href
+  await runChild(
+    `
+      import { createHash } from "node:crypto"
+      import { loadSession, saveSession, saveRestSnapshot } from ${JSON.stringify(sessionUrl)}
+      const catalog = [{ type: "function", function: { name: "wait", description: "wait", parameters: { type: "object" } } }]
+      const fingerprint = createHash("sha256").update(JSON.stringify(catalog)).digest("hex")
+      const snapshot = (content) => ({ version: 1, messages: [{ role: "user", content, timestamp: 1 }], toolCatalog: catalog, toolCatalogEpoch: 1, toolCatalogFingerprint: fingerprint })
+      await saveSession(snapshot("main lane"))
+      await saveSession(snapshot("frontend lane"), "frontend")
+      await saveRestSnapshot(snapshot("main rest").messages, "main")
+      await saveRestSnapshot(snapshot("frontend rest").messages, "frontend", "frontend")
+      const main = await loadSession()
+      const frontend = await loadSession("frontend")
+      console.log(JSON.stringify({ main: main.messages[0].content, frontend: frontend.messages[0].content }))
+    `,
+    root,
+    { ...process.env, NANO_CONFIG: testConfig, NANO_HOME: home, HOME: home },
+  )
+
+  assert.equal((JSON.parse(await fs.readFile(path.join(home, "session.json"), "utf8")) as SessionSnapshot).messages[0]?.content, "main lane")
+  assert.equal((JSON.parse(await fs.readFile(path.join(home, "frontend-session.json"), "utf8")) as SessionSnapshot).messages[0]?.content, "frontend lane")
+  assert.equal(await fs.stat(path.join(home, ".nano-rest-snapshot.json")).then(() => true), true)
+  assert.equal(await fs.stat(path.join(home, ".nano-frontend-rest-snapshot.json")).then(() => true), true)
+})
+
 test("invalid nested session state is quarantined and restored from the last-known-good backup", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-session-recovery-"))
   const home = path.join(root, "home")

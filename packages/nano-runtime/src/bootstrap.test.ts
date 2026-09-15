@@ -58,3 +58,32 @@ test("bootstrap restores a rest summary as its own provenance-bearing message", 
   assert.match(String(messages[2]?.content), /context_summary_restored: yes/)
   assert.doesNotMatch(String(messages[2]?.content), /older living summary/)
 })
+
+test("frontend bootstrap shares soul and memories without exposing skills or executor", async (t) => {
+  await fs.mkdir(NANO_HOME, { recursive: true })
+  const soulFile = path.join(NANO_HOME, "soul.md")
+  const skillFile = path.join(NANO_HOME, "memories", "skills", "zzz-frontend-hidden.md")
+  const priorSoul = await fs.readFile(soulFile, "utf8").catch(() => null)
+  await fs.mkdir(path.dirname(skillFile), { recursive: true })
+  await fs.writeFile(soulFile, "I am the shared test soul.\n", "utf8")
+  await fs.writeFile(skillFile, "---\ndescription: frontend must not see this marker\n---\nbody", "utf8")
+  t.after(async () => {
+    await fs.rm(skillFile, { force: true })
+    if (priorSoul === null) await fs.rm(soulFile, { force: true })
+    else await fs.writeFile(soulFile, priorSoul, "utf8")
+  })
+
+  const messages = await buildBootstrap({
+    source: "discord",
+    triggeredAt: new Date().toISOString(),
+    content: "hello",
+    raw: null,
+  }, null, { frontend: true, discord: true, agentChannel: true })
+  const system = String(messages[0]?.content)
+  assert.match(system, /shared test soul/)
+  assert.match(system, /virtual frontend agent/)
+  assert.match(system, /agent_send/)
+  assert.doesNotMatch(system, /zzz-frontend-hidden/)
+  assert.doesNotMatch(system, /- `skill`:/)
+  assert.match(system, /owner-DM Discord transcript and skill memories are excluded/)
+})

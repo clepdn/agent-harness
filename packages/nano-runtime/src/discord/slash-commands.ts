@@ -62,7 +62,19 @@ const commands = [
     .toJSON(),
   new SlashCommandBuilder()
     .setName("compact")
-    .setDescription("Force a compaction pass now, regardless of token count")
+    .setDescription("Compact context now, regardless of token count")
+    .addBooleanOption((opt) =>
+      opt
+        .setName("force")
+        .setDescription("Use the configured small [summary] model no matter what")
+        .setRequired(false),
+    )
+    .addBooleanOption((opt) =>
+      opt
+        .setName("snapcompact")
+        .setDescription("Also preserve the discarded span as a snapcompact frame")
+        .setRequired(false),
+    )
     .toJSON(),
   new SlashCommandBuilder()
     .setName("interrupt")
@@ -285,16 +297,27 @@ async function handleCompact(interaction: ChatInputCommandInteraction): Promise<
     await interaction.reply({ content: "not running - nothing to compact", ephemeral: true })
     return
   }
+  const forceSummaryModel = interaction.options.getBoolean("force") ?? false
+  const snapcompact = interaction.options.getBoolean("snapcompact") ?? false
+  if (forceSummaryModel && !modelState.summaryModel) {
+    await interaction.reply({
+      content: "no dedicated `[summary]` model is configured, so `force=true` cannot run",
+      ephemeral: true,
+    })
+    return
+  }
   const idle = isWaitingForEvent()
-  const ok = requestCompaction()
+  const ok = requestCompaction({ forceSummaryModel, snapcompact })
   if (!ok) {
     await interaction.reply({ content: "couldn't request compaction", ephemeral: true })
     return
   }
   await interaction.reply({
-    content: idle
+    content: (idle
       ? "compacting now (was idle)"
-      : "compaction queued - will run at the next idle wait",
+      : "compaction queued - will run at the next idle wait") +
+      (forceSummaryModel ? " with the configured summary model" : "") +
+      (snapcompact ? " + snapcompact" : ""),
     ephemeral: true,
   })
 }

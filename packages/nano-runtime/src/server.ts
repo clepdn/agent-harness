@@ -5,6 +5,7 @@ import { clientTools } from "./client"
 import { listWorkerEvents, publishWorkerEvent, subscribeWorkerEvents } from "./awp/outbox"
 import type { ControlCommand } from "./awp/types"
 import { wake, isRunning, isWaitingForEvent, enqueueEvent, getRunnerStatus, requestRest } from "./runner/index"
+import { enqueueFrontendEvent, isFrontendRunning, isFrontendWaitingForEvent } from "./runner/frontend"
 import { modelState, evaluateModelSwap, applyModelSwap } from "./runner/model-state"
 import { buildDiscordBatchDigest, scanDiscordChannels } from "./discord/state"
 import { handleDiscordIngress } from "./discord/pipeline"
@@ -72,32 +73,36 @@ export function createServer(options: {
     if (discordBatchInFlight) return
     discordBatchInFlight = true
     try {
-      if (!isRunning()) return
-      if (!isWaitingForEvent()) return
+      const runtimeKind = config.frontend.enable ? "frontend" as const : "main" as const
+      if (runtimeKind === "frontend") {
+        if (!isFrontendRunning() || !isFrontendWaitingForEvent()) return
+      } else {
+        if (!isRunning() || !isWaitingForEvent()) return
+      }
 
       if (DISCORD_BATCH_SCAN) {
-        await scanDiscordChannels({ limit: DISCORD_BATCH_MAX_MESSAGES })
+        await scanDiscordChannels({ limit: DISCORD_BATCH_MAX_MESSAGES, runtimeKind })
       }
 
       const digest = buildDiscordBatchDigest({
         maxMessages: DISCORD_BATCH_MAX_MESSAGES,
         intervalMs: DISCORD_BATCH_INTERVAL_MS,
+        runtimeKind,
       })
       if (!digest) return
 
-      enqueueEvent(
-        {
-          source: "discord",
-          triggeredAt: new Date().toISOString(),
-          content: digest.content,
-          raw: {
-            type: "discord_batch",
-            digest,
-            source: "gateway_cache",
-          },
+      const event: UserMessage = {
+        source: "discord",
+        triggeredAt: new Date().toISOString(),
+        content: digest.content,
+        raw: {
+          type: "discord_batch",
+          digest,
+          source: "gateway_cache",
         },
-        { onlyIfWaiting: true },
-      )
+      }
+      if (runtimeKind === "frontend") enqueueFrontendEvent(event, { onlyIfWaiting: true })
+      else enqueueEvent(event, { onlyIfWaiting: true })
     } catch (err) {
       console.warn("[discord batch] failed:", err instanceof Error ? err.message : String(err))
     } finally {

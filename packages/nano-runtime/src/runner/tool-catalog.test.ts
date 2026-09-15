@@ -103,3 +103,25 @@ test("web_search is gated on the webSearch option", () => {
   const on = createNiriToolCatalog({ webSearch: true }).map((tool) => tool.function.name)
   assert.equal(on.includes("web_search"), true)
 })
+
+test("frontend catalog keeps server tools and bridge while hard-gating executor and skills", () => {
+  const tools = createNiriToolCatalog({
+    clientCapabilities: ["shell", "read_file", "edit_file", "image_tool"],
+    workspace: { id: "client", root: "/client" },
+    memory: true,
+    discord: true,
+    webSearch: true,
+    subagents: true,
+    computer: true,
+    frontend: true,
+    agentChannel: true,
+  })
+  const names = tools.map((tool) => tool.function.name)
+  for (const denied of ["shell", "job_list", "job_status", "job_stdout", "job_cancel", "image_tool", "computer", "subagent", "skill", "discord_upload"]) {
+    assert.equal(names.includes(denied), false, `${denied} should be absent`)
+  }
+  for (const allowed of ["read_file", "edit_file", "memory_fs", "memory_search", "discord_send", "discord_search", "web_search", "agent_send", "agent_channel", "wait", "end_session"]) {
+    assert.equal(names.includes(allowed), true, `${allowed} should remain available`)
+  }
+  assert.match(tools.find((tool) => tool.function.name === "read_file")!.function.description, /Ordinary.*unavailable/)
+})

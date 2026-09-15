@@ -16,6 +16,19 @@ import type {
 } from "./loop-shared"
 import type { LoopHooks, LoopState } from "./types"
 
+const FRONTEND_HARD_DENY = new Set([
+  "shell",
+  "job_list",
+  "job_status",
+  "job_stdout",
+  "job_cancel",
+  "image_tool",
+  "computer",
+  "subagent",
+  "skill",
+  "discord_upload",
+])
+
 type StandardToolSpec<
   RunKeys extends readonly ToolArgKey[],
   LogKeys extends readonly ToolArgKey[] = RunKeys,
@@ -131,6 +144,17 @@ export async function executeToolCall(
   beginDiscordToolWait(state.discordTypingTurnId ?? "")
 
   try {
+    if (state.runtimeKind === "frontend" && FRONTEND_HARD_DENY.has(call.name)) {
+      const errorText = `error: tool ${call.name} is forbidden in the frontend runtime`
+      recordToolResult(convId, state, call, call.name, { _forbidden_tool: call.name }, errorText)
+      return {}
+    }
+    const advertised = state.toolCatalog.some((tool) => tool.function.name === call.name)
+    if (!advertised) {
+      const errorText = `error: tool ${call.name} is unavailable in this runtime's pinned tool catalog`
+      recordToolResult(convId, state, call, call.name, { _unavailable_tool: call.name }, errorText)
+      return {}
+    }
     const handler = handlers[call.name]
     if (!handler) {
       const errorText = `error: unknown tool ${call.name}`

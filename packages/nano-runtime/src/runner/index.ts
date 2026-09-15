@@ -12,7 +12,7 @@ import { runLoop } from "./loop"
 import { setRunnerPresence } from "./presence"
 import { createNiriToolCatalog } from "./tool-catalog"
 import { archiveContextMessages } from "./context-store"
-import type { RunnerStateInternal } from "./types"
+import type { ManualCompactionRequest, RunnerStateInternal } from "./types"
 import { archiveDiscardedSession, BOREDOM_WAKE_MS, clearSession, loadRestSnapshot, loadSession, quarantineSession, saveRestSnapshot, saveSession } from "./util"
 import type { UserMessage, Message } from "../types"
 import type { ToolDefinition } from "@nano/harness-core"
@@ -37,6 +37,7 @@ function buildCurrentCatalog(): ToolDefinition[] {
     subagents: config.subagents.length > 0,
     computer: config.computer_use.enabled,
     webSearch: isWebSearchAvailable(),
+    agentChannel: config.frontend.enable,
   })
 }
 
@@ -54,7 +55,32 @@ function refreshToolCatalog(reason: "new-session" | "post-compaction"): void {
   }
 }
 
+/** Add/remove the bridge when a persisted main session crosses the feature flag. */
+function reconcileAgentChannelCatalog(): void {
+  const bridgeNames = new Set(["agent_send", "agent_channel"])
+  const bridgeCount = state.toolCatalog.filter((tool) => bridgeNames.has(tool.function.name)).length
+  if ((config.frontend.enable && bridgeCount === bridgeNames.size) || (!config.frontend.enable && bridgeCount === 0)) return
+
+  if (config.frontend.enable) {
+    state.toolCatalog = state.toolCatalog.filter((tool) => !bridgeNames.has(tool.function.name))
+    const bridgeTools = buildCurrentCatalog().filter((tool) => bridgeNames.has(tool.function.name))
+    const insertAt = state.toolCatalog.findIndex((tool) => tool.function.name === "voice_reply")
+    if (insertAt < 0) state.toolCatalog.push(...bridgeTools)
+    else state.toolCatalog.splice(insertAt, 0, ...bridgeTools)
+  } else {
+    state.toolCatalog = state.toolCatalog.filter((tool) => !bridgeNames.has(tool.function.name))
+  }
+  state.toolCatalogFingerprint = catalogFingerprint(state.toolCatalog)
+  state.toolCatalogEpoch += 1
+  state.conversation.push({
+    role: "user",
+    content: `[tool environment epoch ${state.toolCatalogEpoch}] The durable main/frontend agent channel is now ${config.frontend.enable ? "available" : "unavailable"}.`,
+    timestamp: Date.now(),
+  } as Message)
+}
+
 const state: RunnerStateInternal = {
+  runtimeKind: "main",
   contextSize: 0,
   running: false,
   systemPrompt: "",
@@ -102,13 +128,19 @@ export function requestRest(reason: string): boolean {
 }
 
 /**
- * Requests a forced compaction pass at the next idle wait, regardless of the
- * token trigger. If the runner is idle (waiting for events), interrupts the
- * wait so the compaction runs immediately. Returns false if not running.
+ * Requests a compaction pass at the next idle wait, regardless of the token
+ * trigger. The request may require the configured small summary model and/or a
+ * snapcompact frame. If the runner is idle, interrupts the wait so compaction
+ * runs immediately. Returns false if not running.
  */
-export function requestCompaction(): boolean {
+export function requestCompaction(
+  options: Partial<ManualCompactionRequest> = {},
+): boolean {
   if (!state.running) return false
-  state.compactionRequested = true
+  state.compactionRequest = {
+    forceSummaryModel: options.forceSummaryModel === true,
+    snapcompact: options.snapcompact === true,
+  }
   interruptEventWaiters()
   return true
 }
@@ -290,7 +322,7 @@ function resolveShutdown(): void {
 }
 
 async function saveRuntimeSnapshot(): Promise<void> {
-  archiveContextMessages(state.conversation, "runtime-checkpoint")
+  archiveContextMessages(state.conversation, "runtime-checkpoint", state.runtimeKind)
   await saveSession({
     version: 1,
     messages: state.conversation,
@@ -425,6 +457,7 @@ export async function wake(event: UserMessage): Promise<void> {
     state.toolCatalog = saved.toolCatalog
     state.toolCatalogEpoch = saved.toolCatalogEpoch
     state.toolCatalogFingerprint = saved.toolCatalogFingerprint
+    reconcileAgentChannelCatalog()
     autoSeeDiscordEvent(event)
     state.conversation.push({
       role: "user",
@@ -440,6 +473,7 @@ export async function wake(event: UserMessage): Promise<void> {
       clientCapabilities: clientTools.getCapabilities(),
       workspace: clientTools.getWorkspace(),
       discord: areDiscordToolsAvailable(),
+      agentChannel: config.frontend.enable,
     })
     state.toolCatalogEpoch = 0
     refreshToolCatalog("new-session")
@@ -502,6 +536,7 @@ export async function wake(event: UserMessage): Promise<void> {
     state.discardRequested = false
     state.restRequested = false
     state.restReason = ""
+    state.compactionRequest = undefined
     if (!wasShutdownRequested && !discarded) flushDeferredEvents()
     state.deferredEvents = []
     eventResolvers = []

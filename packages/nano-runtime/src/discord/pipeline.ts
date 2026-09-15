@@ -1,5 +1,6 @@
 import { config } from "../config"
 import { enqueueEvent, isRunning, wake } from "../runner/index"
+import { enqueueFrontendEvent, isFrontendRunning, wakeFrontend } from "../runner/frontend"
 import { fromDiscord } from "../triggers/discord"
 import type { UserMessage } from "../types"
 import { isChannelActiveNow } from "./cooldown"
@@ -12,6 +13,11 @@ export type DiscordIngressOutcome = {
   woke: boolean
   reason: "ingest_only" | "wake_on_event" | "dm_priority" | "cooldown"
   note?: string
+}
+
+export function discordRuntimeFor(ingest: DiscordIngestResult): "main" | "frontend" {
+  const ownerDm = ingest.isDm === true && Boolean(config.discord.owner_id) && ingest.authorId === config.discord.owner_id
+  return config.frontend.enable && !ownerDm ? "frontend" : "main"
 }
 
 export function handleDiscordIngress(
@@ -47,7 +53,11 @@ export function handleDiscordIngress(
   }
 
   const event = preparedEvent ?? fromDiscord(payload)
-  if (isRunning()) enqueueEvent(event, { priority: wakeForDm })
+  const runtime = discordRuntimeFor(ingest)
+  if (runtime === "frontend") {
+    if (isFrontendRunning()) enqueueFrontendEvent(event, { priority: wakeForDm })
+    else void wakeFrontend(event)
+  } else if (isRunning()) enqueueEvent(event, { priority: wakeForDm })
   else void wake(event)
 
   return {

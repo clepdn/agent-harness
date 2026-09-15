@@ -45,6 +45,10 @@ tier. The setting is local to the agent runtime and resets to off on restart.
 `/interrupt` stops the active model generation or foreground blocking job while
 keeping the session. `/discard` stops all session work, archives the raw snapshot
 as `memories/discarded-{datetime}.json`, and removes it from the active runner.
+`/compact` runs an immediate context compaction. `/compact force:true` requires
+the dedicated `[summary]` model and hands its detailed play-by-play to the primary
+model to journal on the next turn. Add `snapcompact:true` to preserve the discarded
+span as a bitmap frame (with a text fallback if rendering is unavailable).
 Shell calls still running after two minutes detach automatically; the model can
 inspect their status and stdout or stop them with `job_list`, `job_status`,
 `job_stdout`, and `job_cancel`.
@@ -53,6 +57,13 @@ The owner also receives a DM when a terminal model API error occurs, or when a
 transient error repeats three times. Alerts are deduplicated for six hours and
 include a **Mute this error forever** button. Muting is stored in `nano.db` and
 applies only to that error fingerprint.
+
+Set `[frontend].enable = true` to run a second virtual nano for every model-eligible
+Discord event except DMs authored by `discord.owner_id`. It shares soul and
+memories with the main agent but has its own session and model loop, no executor
+or skill access, no owner-DM lookup access, and a durable `agent_send` /
+`agent_channel` bridge to the main agent. Omit `frontend.model` to follow the
+main agent's live model; set it to a preset or raw model id to pin a separate one.
 
 ## Agent memory
 

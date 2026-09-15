@@ -11,7 +11,8 @@
  */
 
 import type { Model } from "../llm"
-import { getModelPreset, type ToolChoice, type ThinkingEffort, type CompactionStrategy } from "../config"
+import { config, getModelPreset, type ToolChoice, type ThinkingEffort, type CompactionStrategy } from "../config"
+import type { RuntimeKind } from "./types"
 import {
   buildModel,
   primaryModel as initPrimaryModel,
@@ -89,6 +90,81 @@ export const modelState: RuntimeModelConfig = {
   compactTriggerTokens: initCompactTriggerTokens,
   deepArchive: initDeepArchive,
   useFallback: initUseFallback,
+}
+
+function frontendModelConfig(): RuntimeModelConfig | null {
+  const configured = config.frontend.model
+  if (configured === undefined) return null
+
+  const preset = getModelPreset(configured)
+  const source = preset ?? { model: configured }
+  const provider = typeof source.provider === "string" ? source.provider.trim() : config.model.provider
+  const modelId = typeof source.model === "string" ? source.model.trim() : ""
+  const baseUrl = typeof source.base_url === "string" ? source.base_url.trim() : config.model.base_url
+  const apiKey = typeof source.api_key === "string" && source.api_key.trim()
+    ? source.api_key.trim()
+    : config.model.api_key || undefined
+  const contextWindow = typeof source.context_window === "number" && source.context_window > 0
+    ? source.context_window
+    : undefined
+  const headers: Record<string, string> = {}
+  if (typeof source.referer === "string" && source.referer.trim()) headers["HTTP-Referer"] = source.referer.trim()
+  if (typeof source.title === "string" && source.title.trim()) headers["X-Title"] = source.title.trim()
+  const primaryModel = buildModel(
+    provider,
+    modelId,
+    baseUrl || undefined,
+    Object.keys(headers).length ? headers : undefined,
+    contextWindow,
+  )
+  if (!primaryModel) throw new Error(`[frontend].model ${JSON.stringify(configured)} could not be resolved`)
+
+  const toolChoice: ToolChoice =
+    typeof source.tool_choice === "string" && ["required", "auto", "none"].includes(source.tool_choice)
+      ? source.tool_choice as ToolChoice
+      : modelState.primaryToolChoice
+  const thinkingEffort: ThinkingEffort =
+    typeof source.thinking_effort === "string" && ["minimal", "low", "medium", "high", "xhigh"].includes(source.thinking_effort)
+      ? source.thinking_effort as ThinkingEffort
+      : modelState.thinkingEffort
+  const compactionStrategy: CompactionStrategy =
+    typeof source.compaction_strategy === "string" && ["companion", "context-full", "snapcompact", "remote", "off"].includes(source.compaction_strategy)
+      ? source.compaction_strategy as CompactionStrategy
+      : modelState.compactionStrategy
+
+  return {
+    ...modelState,
+    primaryModel,
+    primaryApiKey: apiKey,
+    primaryToolChoice: toolChoice,
+    primaryVision: typeof source.vision === "boolean" ? source.vision : modelState.primaryVision,
+    primaryNudgeOnNoTool: typeof source.nudge_on_no_tool === "boolean" ? source.nudge_on_no_tool : modelState.primaryNudgeOnNoTool,
+    enableThinking: typeof source.enable_thinking === "boolean" ? source.enable_thinking : modelState.enableThinking,
+    thinkingEffort,
+    idleCompactionMs: typeof source.idle_compaction_minutes === "number"
+      ? Math.max(0, Math.round(source.idle_compaction_minutes * 60_000))
+      : modelState.idleCompactionMs,
+    compactionStrategy,
+    compactTriggerTokens: typeof source.compact_trigger_tokens === "number" && source.compact_trigger_tokens > 0
+      ? Math.trunc(source.compact_trigger_tokens)
+      : modelState.compactTriggerTokens,
+    deepArchive: typeof source.deep_archive === "boolean" ? source.deep_archive : modelState.deepArchive,
+    respectPromptCache: typeof source.respect_prompt_cache === "boolean"
+      ? source.respect_prompt_cache
+      : typeof source.preserve_prompt_cache === "boolean"
+        ? source.preserve_prompt_cache
+        : modelState.respectPromptCache,
+    useFallback: false,
+  }
+}
+
+let fixedFrontendModelState: RuntimeModelConfig | null | undefined
+
+/** Resolve the model state for a virtual runner. Undefined frontend.model is live inheritance. */
+export function modelStateFor(kind: RuntimeKind | undefined): RuntimeModelConfig {
+  if (kind !== "frontend" || config.frontend.model === undefined) return modelState
+  if (fixedFrontendModelState === undefined) fixedFrontendModelState = frontendModelConfig()
+  return fixedFrontendModelState ?? modelState
 }
 
 // ── Swap logic ────────────────────────────────────────────────────────────────

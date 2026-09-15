@@ -8,6 +8,7 @@ import {
   resolveDeepArchiveBackend,
   initSnapcompactRenderer,
 } from "./compaction-companion"
+import { modelState } from "./model-state"
 
 function userMsg(content: string): Message {
   return { role: "user", content, timestamp: Date.now() } as Message
@@ -108,4 +109,15 @@ test("default deep-archive backends preserve source details", async () => {
     if (typeof content === "string") assert.match(content, /provider-specific-marker/)
     else assert.ok(Array.isArray(content) && content.some((block) => block && typeof block === "object" && (block as { type?: unknown }).type === "image"))
   }
+})
+
+test("forced snapcompact ignores the model's deep-archive toggle", async (t) => {
+  const prior = modelState.deepArchive
+  t.after(() => { modelState.deepArchive = prior })
+  modelState.deepArchive = false
+  const result = await resolveDeepArchiveBackend("anthropic", true).archive([
+    userMsg("forced-snapcompact-marker"),
+  ])
+  assert.ok(result)
+  assert.match(result!.note, /snapcompact|text-appendix/)
 })

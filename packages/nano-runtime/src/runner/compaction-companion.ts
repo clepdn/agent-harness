@@ -32,7 +32,7 @@ import {
   REMOTE_COMPACTION_ENDPOINT,
   REMOTE_COMPACTION_MODEL,
 } from "./config"
-import { modelState } from "./model-state"
+import { modelState, type RuntimeModelConfig } from "./model-state"
 import { messageStringContent } from "./messages"
 
 /** UTC date stamp for the journal path (journal/YYYY-MM-DD.md). */
@@ -329,15 +329,22 @@ export class FirstAvailableArchive implements DeepArchiveBackend {
 }
 
 /** Provider string → deep-archive backend. */
-export function resolveDeepArchiveBackend(provider: string | undefined): DeepArchiveBackend {
+export function resolveDeepArchiveBackend(
+  provider: string | undefined,
+  forceSnapcompact = false,
+  runtimeModelState: RuntimeModelConfig = modelState,
+): DeepArchiveBackend {
+  if (forceSnapcompact) {
+    return new FirstAvailableArchive([new SnapcompactFramesArchive(), new TextAppendixArchive()])
+  }
   // Read from modelState so deep_archive swaps with the model preset at runtime.
-  if (!modelState.deepArchive) return new NoopArchive()
+  if (!runtimeModelState.deepArchive) return new NoopArchive()
   const p = (provider ?? "").toLowerCase()
   if (p.includes("openai") && REMOTE_COMPACTION_ENDPOINT) return new OpenAiRemoteArchive()
   // On a vision-capable model, prefer bitmap snapcompact frames (a rendered
   // frame is denser than text and the model can read it back), falling back to
   // the text appendix when the native renderer is unavailable or declines.
-  if (modelState.primaryVision) {
+  if (runtimeModelState.primaryVision) {
     return new FirstAvailableArchive([new SnapcompactFramesArchive(), new TextAppendixArchive()])
   }
   return new TextAppendixArchive()

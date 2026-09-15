@@ -5,9 +5,11 @@ import { createServer } from "./server"
 import { initDb } from "./db"
 import { initMetricsDb } from "./metrics"
 import { initSnapcompactRenderer } from "./runner/compaction-companion"
-import { modelState } from "./runner/model-state"
+import { modelState, modelStateFor } from "./runner/model-state"
 import { REMOTE_COMPACTION_ENDPOINT } from "./runner/config"
 import { shutdown, activate, startBoredomTimer } from "./runner/index"
+import { activateFrontend, shutdownFrontend, startFrontendBoredomTimer } from "./runner/frontend"
+import { configureAgentChannelDelivery } from "./runner/agent-channel"
 import { initJobManager } from "./runner/jobs"
 import { startDiscordGateway } from "./discord/gateway"
 import { setGatewayCallbacks } from "./discord/slash-commands"
@@ -64,12 +66,16 @@ async function main() {
   // This mirrors resolveDeepArchiveBackend's branch that builds a frames backend:
   // deep_archive on, not the openai-remote path, primary model vision-capable.
   {
-    const activeModel = modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel
-    const provider = (activeModel?.provider ?? "").toLowerCase()
-    const framesIntended =
-      modelState.deepArchive &&
-      !(provider.includes("openai") && REMOTE_COMPACTION_ENDPOINT) &&
-      modelState.primaryVision
+    const runtimeModels = config.frontend.enable
+      ? [modelState, modelStateFor("frontend")]
+      : [modelState]
+    const framesIntended = runtimeModels.some((models) => {
+      const activeModel = models.useFallback ? models.fallbackModel : models.primaryModel
+      const provider = (activeModel?.provider ?? "").toLowerCase()
+      return models.deepArchive &&
+        !(provider.includes("openai") && REMOTE_COMPACTION_ENDPOINT) &&
+        models.primaryVision
+    })
     if (framesIntended) {
       await initSnapcompactRenderer()
     }
@@ -88,6 +94,17 @@ async function main() {
     console.warn("[discord gateway] startup failed:", err)
   }
   setDiscordToolsAvailable(Boolean(discordGateway))
+
+  // Replay durable virtual-agent mail only after client, jobs, compaction, and
+  // Discord availability are initialized. A replay may wake either loop and
+  // its first pinned catalog must reflect the fully started worker.
+  if (config.frontend.enable) {
+    configureAgentChannelDelivery((recipient, event) => {
+      if (recipient === "frontend") return activateFrontend(event)
+      activate(event)
+      return true
+    })
+  }
 
   let shuttingDown = false
   let restartRequested = false
@@ -115,6 +132,7 @@ async function main() {
   await server.listen({ port: PORT, host: WORKER_HOST })
   console.log(`[nano] listening on ${WORKER_HOST}:${PORT}`)
   startBoredomTimer()
+  startFrontendBoredomTimer()
 
   async function gracefulShutdown(sig: string) {
     if (shuttingDown) return  // ignore duplicate signals
@@ -126,10 +144,11 @@ async function main() {
       setTimeout(() => { console.log("[nano] shutdown timed out, forcing exit"); resolve() }, 300_000)
     )
 
-    await Promise.race([shutdown(), timeout])
+    await Promise.race([Promise.all([shutdown(), shutdownFrontend()]).then(() => {}), timeout])
 
     const cleanup = async () => {
       discordEmbeddingBackfill.stop()
+      configureAgentChannelDelivery(null)
       if (discordGateway) await discordGateway.stop()
       setDiscordToolsAvailable(false)
       await server.close()

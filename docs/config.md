@@ -49,6 +49,26 @@ Both are nullable; when set, they're appended to the service's `ExecStart`.
 
 ---
 
+## `[frontend]`
+
+Enables a second virtual nano inside the same worker. Owner-authored DMs route
+to the main runtime; all other Discord ingress that would normally wake nano
+routes to the frontend runtime. The two runtimes share soul, authored memories,
+and Discord storage, but keep independent conversation loops, resumable session
+files, rest snapshots, and context archives. They can exchange durable messages
+with `agent_send` and inspect that mailbox with `agent_channel`.
+
+The frontend has the normal server-side tools, except that executor-backed
+tools, executor job output, subagents, client uploads, and skills are unavailable.
+Its Discord reads/searches also exclude the owner's DM channel.
+
+| Key | Default | Description |
+|---|---|---|
+| `enable` | `false` | Start the virtual frontend runtime and enable Discord routing. |
+| `model` | *(undefined)* | Optional model preset or raw model id. When the key is omitted, the frontend follows the main runtime's currently active model, including live swaps. A defined empty string is invalid. |
+
+---
+
 ## `[model]` — primary
 
 Used for normal agent turns.
@@ -84,7 +104,14 @@ Defaults target a small, cheap model suitable for local LM Studio / Ollama.
 
 ## `[summary]`
 
-Optional dedicated summarizer model. Falls back to the primary if not configured.
+Optional dedicated summarizer model. Falls back to the primary if not configured
+for automatic uses. Discord `/compact force:true` requires this model, uses it
+even when prompt-cache preservation is enabled, and asks it for a detailed
+play-by-play (work, successful and failed techniques, people, highlights, and
+open loops). The result is dated through the newest summarized message and put
+at the end of the next primary-model prompt with a one-time instruction to
+journal it immediately. `/compact snapcompact:true` additionally requests a
+bitmap archive of the discarded span, falling back to a text appendix.
 
 | Key | Default | Description |
 |---|---|---|

@@ -6,14 +6,23 @@ import { NANO_HOME } from "../agent-config"
 import { atomicWriteFile, isMissingFileError, quarantineFile } from "../durable-file"
 import type { ToolDefinition } from "@nano/harness-core"
 import { findSummaryMessageIndex, messageStringContent } from "./messages"
+import type { RuntimeKind } from "./types"
 
 // Session state belongs to the agent's durable home, never the executable or
 // source directory (which may be an immutable Nix store path).
 const DATA_DIR = NANO_HOME
-const REST_SNAPSHOT_FILE = path.join(DATA_DIR, ".nano-rest-snapshot.json")
-const SESSION_FILE = path.join(DATA_DIR, "session.json")
-const SESSION_BACKUP_FILE = path.join(DATA_DIR, "session.json.bak")
 const MEMORY_DIR = path.join(DATA_DIR, "memories")
+
+function persistencePaths(kind: RuntimeKind = "main") {
+  const prefix = kind === "frontend" ? "frontend-" : ""
+  const sessionFile = path.join(DATA_DIR, `${prefix}session.json`)
+  return {
+    restSnapshotFile: path.join(DATA_DIR, `.nano-${prefix}rest-snapshot.json`),
+    sessionFile,
+    sessionBackupFile: `${sessionFile}.bak`,
+    discardedPrefix: kind === "frontend" ? "frontend-discarded" : "discarded",
+  }
+}
 
 async function ensureDataDir(): Promise<void> {
   await fs.mkdir(DATA_DIR, { recursive: true, mode: 0o700 })
@@ -32,14 +41,14 @@ export function restSummaryFromMessages(messages: Message[]): string {
   return summaryIndex >= 0 ? messageStringContent(messages[summaryIndex]!) : "(no llm context summary yet)"
 }
 
-export async function saveRestSnapshot(messages: Message[], note?: string): Promise<void> {
+export async function saveRestSnapshot(messages: Message[], note?: string, kind: RuntimeKind = "main"): Promise<void> {
   const trimmedNote = typeof note === "string" ? note.trim() : ""
   const snapshot: RestSnapshot = {
     restedAt: new Date().toISOString(),
     ...(trimmedNote ? { note: trimmedNote } : {}),
     summary: restSummaryFromMessages(messages),
   }
-  await atomicWriteFile(REST_SNAPSHOT_FILE, JSON.stringify(snapshot, null, 2))
+  await atomicWriteFile(persistencePaths(kind).restSnapshotFile, JSON.stringify(snapshot, null, 2))
 }
 
 function validRestSnapshot(value: unknown): value is RestSnapshot {
@@ -49,10 +58,11 @@ function validRestSnapshot(value: unknown): value is RestSnapshot {
     typeof candidate.summary === "string" && (candidate.note === undefined || typeof candidate.note === "string")
 }
 
-async function readRestSnapshot(consume: boolean): Promise<RestSnapshot | null> {
+async function readRestSnapshot(consume: boolean, kind: RuntimeKind): Promise<RestSnapshot | null> {
+  const { restSnapshotFile } = persistencePaths(kind)
   let raw: string
   try {
-    raw = await fs.readFile(REST_SNAPSHOT_FILE, "utf-8")
+    raw = await fs.readFile(restSnapshotFile, "utf-8")
   } catch (error) {
     if (isMissingFileError(error)) return null
     throw error
@@ -63,20 +73,20 @@ async function readRestSnapshot(consume: boolean): Promise<RestSnapshot | null> 
     parsed = JSON.parse(raw)
     if (!validRestSnapshot(parsed)) throw new Error("invalid rest snapshot shape")
   } catch (error) {
-    const quarantined = await quarantineFile(REST_SNAPSHOT_FILE)
+    const quarantined = await quarantineFile(restSnapshotFile)
     if (quarantined) console.warn(`[runner] quarantined invalid rest snapshot at ${quarantined}: ${error instanceof Error ? error.message : String(error)}`)
     return null
   }
-  if (consume) await fs.unlink(REST_SNAPSHOT_FILE)
+  if (consume) await fs.unlink(restSnapshotFile)
   return parsed as RestSnapshot
 }
 
-export async function consumeRestSnapshot(): Promise<RestSnapshot | null> {
-  return readRestSnapshot(true)
+export async function consumeRestSnapshot(kind: RuntimeKind = "main"): Promise<RestSnapshot | null> {
+  return readRestSnapshot(true, kind)
 }
 
-export async function loadRestSnapshot(): Promise<RestSnapshot | null> {
-  return readRestSnapshot(false)
+export async function loadRestSnapshot(kind: RuntimeKind = "main"): Promise<RestSnapshot | null> {
+  return readRestSnapshot(false, kind)
 }
 
 // ── Session persistence ───────────────────────────────────────────────────────
@@ -193,30 +203,33 @@ async function readSessionFile(filePath: string): Promise<{ raw: string; snapsho
 }
 
 /** Persist the active conversation together with its pinned tool catalog epoch. */
-export async function saveSession(snapshot: SessionSnapshot): Promise<void> {
+export async function saveSession(snapshot: SessionSnapshot, kind: RuntimeKind = "main"): Promise<void> {
+  const { sessionFile, sessionBackupFile } = persistencePaths(kind)
   const raw = JSON.stringify(snapshot)
   parseSession(raw)
   await ensureDataDir()
-  const current = await readSessionFile(SESSION_FILE)
-  if (current) await atomicWriteFile(SESSION_BACKUP_FILE, current.raw)
-  await atomicWriteFile(SESSION_FILE, raw)
+  const current = await readSessionFile(sessionFile)
+  if (current) await atomicWriteFile(sessionBackupFile, current.raw)
+  await atomicWriteFile(sessionFile, raw)
 }
 
 /** Load a valid pinned session; legacy message arrays intentionally do not resume. */
-export async function loadSession(): Promise<SessionSnapshot | null> {
-  const primary = await readSessionFile(SESSION_FILE)
+export async function loadSession(kind: RuntimeKind = "main"): Promise<SessionSnapshot | null> {
+  const { sessionFile, sessionBackupFile } = persistencePaths(kind)
+  const primary = await readSessionFile(sessionFile)
   if (primary) {
     console.log(`[runner] found saved session (${primary.snapshot.messages.length} messages, catalog epoch ${primary.snapshot.toolCatalogEpoch})`)
     return primary.snapshot
   }
-  const backup = await readSessionFile(SESSION_BACKUP_FILE)
+  const backup = await readSessionFile(sessionBackupFile)
   if (!backup) return null
-  await atomicWriteFile(SESSION_FILE, backup.raw)
+  await atomicWriteFile(sessionFile, backup.raw)
   console.warn(`[runner] restored session from last-known-good backup (${backup.snapshot.messages.length} messages)`)
   return backup.snapshot
 }
 
-export async function clearSession(): Promise<void> {
+export async function clearSession(kind: RuntimeKind = "main"): Promise<void> {
+  const { sessionFile, sessionBackupFile } = persistencePaths(kind)
   const unlinkIfPresent = async (filePath: string): Promise<void> => {
     try {
       await fs.unlink(filePath)
@@ -224,27 +237,28 @@ export async function clearSession(): Promise<void> {
       if (!isMissingFileError(error)) throw error
     }
   }
-  await Promise.all([unlinkIfPresent(SESSION_FILE), unlinkIfPresent(SESSION_BACKUP_FILE)])
+  await Promise.all([unlinkIfPresent(sessionFile), unlinkIfPresent(sessionBackupFile)])
 }
 
 /**
  * Archive the latest in-memory session where the model can inspect it, then
  * remove both resumable checkpoints so it cannot be resumed accidentally.
  */
-export async function archiveDiscardedSession(snapshot: SessionSnapshot): Promise<string> {
+export async function archiveDiscardedSession(snapshot: SessionSnapshot, kind: RuntimeKind = "main"): Promise<string> {
   const raw = JSON.stringify(snapshot, null, 2)
   parseSession(raw)
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-")
-  const filename = `discarded-${timestamp}.json`
+  const filename = `${persistencePaths(kind).discardedPrefix}-${timestamp}.json`
   await atomicWriteFile(path.join(MEMORY_DIR, filename), raw)
-  await clearSession()
+  await clearSession(kind)
   return `memory://${filename}`
 }
 
 /** Remove all resumable full-session checkpoints after an unrecoverable loop abort. */
-export async function quarantineSession(): Promise<string[]> {
+export async function quarantineSession(kind: RuntimeKind = "main"): Promise<string[]> {
+  const { sessionFile, sessionBackupFile } = persistencePaths(kind)
   const quarantined: string[] = []
-  for (const filePath of [SESSION_FILE, SESSION_BACKUP_FILE]) {
+  for (const filePath of [sessionFile, sessionBackupFile]) {
     const moved = await quarantineFile(filePath)
     if (moved) quarantined.push(moved)
   }

@@ -4,8 +4,10 @@ import type { AssistantMessage, Tool } from "../llm"
 import type { LoopState } from "./types"
 import { assistantContentText } from "./loop-content"
 import { messageStringContent } from "./messages"
-import { applyUsage } from "./loop-completion"
+import { applyUsage, configuredSummaryProvider } from "./loop-completion"
 import { buildContext } from "./tools"
+import { modelState } from "./model-state"
+import { fallbackModel } from "./config"
 
 // Pi AssistantMessage is the native format now — no conversion needed.
 // These tests verify helper functions that work on pi types directly.
@@ -77,6 +79,29 @@ test("applyUsage counts cacheWrite tokens toward contextSize (regression)", () =
   }
   applyUsage(state, usage)
   assert.equal(state.contextSize, 46000, "contextSize must be input + cacheRead + cacheWrite (not output)")
+})
+
+test("configured summary preference bypasses prompt-cache suppression without falling back", (t) => {
+  const priorModel = modelState.summaryModel
+  const priorKey = modelState.summaryApiKey
+  const priorRespect = modelState.respectPromptCache
+  t.after(() => {
+    modelState.summaryModel = priorModel
+    modelState.summaryApiKey = priorKey
+    modelState.respectPromptCache = priorRespect
+  })
+  modelState.summaryModel = fallbackModel
+  modelState.summaryApiKey = "summary-key"
+  modelState.respectPromptCache = true
+
+  assert.equal(configuredSummaryProvider().model, null)
+  assert.deepEqual(configuredSummaryProvider("configured"), {
+    model: fallbackModel,
+    apiKey: "summary-key",
+  })
+
+  modelState.summaryModel = null
+  assert.equal(configuredSummaryProvider("configured").model, null)
 })
 
 test("completion context includes dynamic server memory tools without dropping legacy tools", () => {

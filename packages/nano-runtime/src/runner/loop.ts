@@ -6,7 +6,7 @@ import { setContextSize, setWorking } from "../discord/status-updater"
 import { dispatchDiscordTyping, stopDiscordTyping } from "../discord/typing-lease"
 import { setPromWorking } from "../prometheus"
 import type { Message } from "../types"
-import { modelState } from "./model-state"
+import { modelStateFor } from "./model-state"
 import {
   TOOL_RESULT_COMPACTION_MIN_CHARS,
   TOOL_RESULT_COMPACTION_MIN_AGE_TURNS,
@@ -29,7 +29,7 @@ import { addAssistantMessage, applyUsage, configuredSummaryProvider, emitThinkin
 import { assistantContentText, isFunctionToolCall } from "./loop-content"
 import type { AssistantMessage, TextContent, ToolCall } from "../llm"
 import { buildTurnSignature, hasIncomingUserMessage } from "./loop-signatures"
-import type { CompactionResult, LoopHooks, LoopState } from "./types"
+import type { CompactionResult, LoopHooks, LoopState, ManualCompactionRequest } from "./types"
 import { processToolCalls } from "./loop-tools"
 
 const LLM_RECENT_MIN_KEEP = 6
@@ -41,6 +41,7 @@ const RUNNER_MAX_IDENTICAL_TOOL_TURNS = Math.max(1, config.runner.max_identical_
 enum CycleOutcome {
   NoTools = "no_tools",
   ToolsDone = "tools_done",
+  Wait = "wait",
   Rest = "rest",
 }
 
@@ -50,24 +51,22 @@ async function waitForNextEvent(
   convId: number,
   state: LoopState,
   hooks: LoopHooks,
-  compact: (state: LoopState) => Promise<CompactionResult> = (currentState) => applyCompaction(currentState, "idle"),
+  compact: (state: LoopState, request?: ManualCompactionRequest) => Promise<CompactionResult> =
+    (currentState, request) => request
+      ? applyManualCompaction(currentState, request)
+      : applyCompaction(currentState, "idle"),
 ): Promise<void> {
-  // When idle compaction is disabled, just block until the next event.
-  // Read from modelState so it swaps with the model preset at runtime.
-  const idleCompactionMs = modelState.idleCompactionMs
-  if (idleCompactionMs <= 0) {
-    const incoming = await hooks.waitForEvent()
-    if (!incoming) return
-    hooks.injectIncomingEvent(convId, incoming)
-    return
-  }
-
-  // Otherwise wait with the idle timeout. Each time the timeout fires with no
+  // Wait with the idle timeout when enabled. Each time the timeout fires with no
   // event, compact the idle conversation (summarize the middle so a long-lived
   // session doesn't sit at full context forever) and keep waiting. Any real
-  // event — or a rest/shutdown request — breaks out immediately.
+  // event — or a rest/shutdown request — breaks out immediately. Even when the
+  // timer is disabled, an interrupted plain wait can carry a manual /compact.
   while (true) {
-    const incoming = await hooks.waitForEventWithTimeout(idleCompactionMs)
+    // Resolve each time so inherited main-model swaps take effect in both lanes.
+    const idleCompactionMs = modelStateFor(state.runtimeKind).idleCompactionMs
+    const incoming = idleCompactionMs > 0
+      ? await hooks.waitForEventWithTimeout(idleCompactionMs)
+      : await hooks.waitForEvent()
     if (incoming) {
       hooks.injectIncomingEvent(convId, incoming)
       return
@@ -77,19 +76,22 @@ async function waitForNextEvent(
     // the loop can handle it.
     if (state.restRequested || hooks.shouldShutdown()) return
 
-    // A manual /compact request interrupts the wait; run a forced pass and
-    // clear the flag so we don't loop on it.
-    const manual = state.compactionRequested === true
-    if (manual) state.compactionRequested = false
+    // A manual /compact request interrupts either kind of wait; consume the
+    // full request so its provider/archive choices apply to exactly one burn.
+    const request = state.compactionRequest
+    if (request) state.compactionRequest = undefined
 
-    const compacted = await compact(state)
+    // A null from a plain wait without a request is a harmless spurious wake.
+    if (!request && idleCompactionMs <= 0) continue
+
+    const compacted = await compact(state, request)
     if (compacted === "rewritten") {
       hooks.refreshToolCatalog("post-compaction")
-      console.log(`[runner] idle compaction rewrote context while waiting for the next event${manual ? " (manual /compact)" : ""}`)
+      console.log(`[runner] idle compaction rewrote context while waiting for the next event${request ? " (manual /compact)" : ""}`)
       return
     }
     if (compacted === "suppressed") console.log("[runner] idle compaction suppressed after no tool result reduction")
-    if (manual) {
+    if (request) {
       console.log("[runner] manual /compact requested but nothing to compact (summary not smaller)")
     }
   }
@@ -108,6 +110,7 @@ async function applyLoopGuardNudge(state: LoopState, _hooks: LoopHooks, reason: 
 }
 
 async function processAssistantTurn(convId: number, state: LoopState, hooks: LoopHooks): Promise<CycleOutcome> {
+  const modelState = modelStateFor(state.runtimeKind)
   const serializedTools = JSON.stringify(state.toolCatalog)
   const fingerprint = createHash("sha256").update(serializedTools).digest("hex")
   if (state.toolCatalogFingerprint && fingerprint !== state.toolCatalogFingerprint) {
@@ -139,8 +142,10 @@ async function processAssistantTurn(convId: number, state: LoopState, hooks: Loo
   }
   if (toolCalls.length === 0) return CycleOutcome.NoTools
 
-  const shouldRest = await processToolCalls(convId, state, hooks, toolCalls)
-  return shouldRest ? CycleOutcome.Rest : CycleOutcome.ToolsDone
+  const toolOutcome = await processToolCalls(convId, state, hooks, toolCalls)
+  if (toolOutcome === "rest") return CycleOutcome.Rest
+  if (toolOutcome === "wait") return CycleOutcome.Wait
+  return CycleOutcome.ToolsDone
 }
 
 /**
@@ -245,6 +250,7 @@ function applyVoiceReplyNudge(state: LoopState, turnMessages: Message[], turnSta
  * model's context window is occupied.
  */
 async function applyProactiveCompaction(state: LoopState): Promise<CompactionResult> {
+  const modelState = modelStateFor(state.runtimeKind)
   if (modelState.respectPromptCache) return "none"
 
   const activeModel = modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel
@@ -259,7 +265,7 @@ async function applyProactiveCompaction(state: LoopState): Promise<CompactionRes
     return "none"
   }
 
-  const provider = configuredSummaryProvider()
+  const provider = configuredSummaryProvider("default", state)
   if (!provider.model) return "none"
 
   const { messages, compacted, attempted } = await proactiveCompaction(
@@ -322,6 +328,7 @@ function discardedMessages(before: Message[], after: Message[]): Message[] {
  */
 
 async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn" | "idle"): Promise<CompactionResult> {
+  const modelState = modelStateFor(state.runtimeKind)
   const strategy = modelState.compactionStrategy
   if (strategy === "off") return "none"
   if (phase === "idle") {
@@ -353,9 +360,15 @@ async function applyCompaction(state: LoopState, phase: "pre-turn" | "post-turn"
 async function applyLLMCompaction(
   state: LoopState,
   phase: "pre-turn" | "post-turn" | "idle" | "shutdown",
-  strategy: CompactionStrategy = modelState.compactionStrategy,
+  strategy?: CompactionStrategy,
   force = false,
+  options: {
+    forceSummaryModel?: boolean
+    forceSnapcompact?: boolean
+  } = {},
 ): Promise<CompactionResult> {
+  const modelState = modelStateFor(state.runtimeKind)
+  const resolvedStrategy = strategy ?? modelState.compactionStrategy
   // Gate strictly on the model-reported prompt_tokens (state.contextSize).
   // The char-based estimatePromptTokens inflates the tools schema ~3×, which
   // used to fire compaction at ~22-31k real tokens and produce nonsense summaries.
@@ -368,8 +381,11 @@ async function applyLLMCompaction(
   // the conversation (private-reasoning models hide their CoT otherwise), and
   // accept a one-time cache bust at the cliff. "remote" also summarizes locally
   // here when no provider endpoint is wired (the endpoint path is future work).
-  const preferActiveModel = strategy === "companion" || strategy === "context-full" || strategy === "remote"
-  const summaryProvider = configuredSummaryProvider(preferActiveModel)
+  const preferActiveModel = resolvedStrategy === "companion" || resolvedStrategy === "context-full" || resolvedStrategy === "remote"
+  const providerPreference = options.forceSummaryModel
+    ? "configured"
+    : preferActiveModel ? "active" : "default"
+  const summaryProvider = configuredSummaryProvider(providerPreference, state)
   if (!summaryProvider.model) {
     console.warn(`[context] ${phase}: no summary model available; skipping llm compaction`)
     return "none"
@@ -387,6 +403,7 @@ async function applyLLMCompaction(
       recentMaxKeep: LLM_RECENT_MAX_KEEP,
       tailCharBudget: LLM_TAIL_CHAR_BUDGET,
       agentContext,
+      primaryHandoff: options.forceSummaryModel === true,
     },
   )
   if (!summarized) {
@@ -401,16 +418,19 @@ async function applyLLMCompaction(
   }
 
   // Companion layers 1 + 3 wrap the summary that summarize.ts produced.
-  if (strategy === "companion") {
+  if (resolvedStrategy === "companion") {
     const summaryText = extractSummaryText(summarized)
     // Layer 1 — journal-first: mirror the summary into durable memory before
     // the raw middle is dropped. Best-effort; never blocks the burn.
-    if (summaryText) await journalCompactionSummary(summaryText)
+    // Same-model compaction can safely journal its own recollection. A small
+    // summarizer instead hands its play-by-play to the primary model and asks
+    // that model to journal it on the immediately following turn.
+    if (summaryText && !options.forceSummaryModel) await journalCompactionSummary(summaryText)
 
     // Layer 3 — deep archive: preserve the specifics the summary compressed.
     const discarded = discardedMessages(beforeMessages, summarized)
     const activeModel = modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel
-    const backend = resolveDeepArchiveBackend(activeModel?.provider)
+    const backend = resolveDeepArchiveBackend(activeModel?.provider, options.forceSnapcompact, modelState)
     const archived = await backend.archive(discarded).catch((err) => {
       console.warn(`[context] deep archive (${backend.name}) failed: ${(err as Error)?.message ?? err}`)
       return null
@@ -446,6 +466,22 @@ async function applyLLMCompaction(
   return "rewritten"
 }
 
+/** Run one operator-requested burn, independent of trigger and strategy=off. */
+async function applyManualCompaction(
+  state: LoopState,
+  request: ManualCompactionRequest,
+): Promise<CompactionResult> {
+  const modelState = modelStateFor(state.runtimeKind)
+  const configured = modelState.compactionStrategy
+  const strategy: CompactionStrategy = request.snapcompact || configured === "off" || configured === "snapcompact"
+    ? "companion"
+    : configured
+  return applyLLMCompaction(state, "idle", strategy, true, {
+    forceSummaryModel: request.forceSummaryModel,
+    forceSnapcompact: request.snapcompact,
+  })
+}
+
 /**
  * Force a compaction pass regardless of the token trigger, for a clean
  * end_session. Summarizes the middle so the goodbye leaves a real
@@ -455,6 +491,7 @@ async function applyLLMCompaction(
  * Returns true if a summary was produced.
  */
 export async function compactForShutdown(state: LoopState): Promise<CompactionResult> {
+  const modelState = modelStateFor(state.runtimeKind)
   const strategy = modelState.compactionStrategy === "off" ? "companion" : modelState.compactionStrategy
   if (strategy === "snapcompact") return applyLLMCompaction(state, "shutdown", "context-full", true)
   return applyLLMCompaction(state, "shutdown", strategy, true)
@@ -499,7 +536,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     // null, loop continues here) and during tool processing.
     if (state.restRequested) {
       console.log(`[runner] programmatic rest requested: ${state.restReason}`)
-      await saveRestSnapshot(state.conversation, state.restReason)
+      await saveRestSnapshot(state.conversation, state.restReason, state.runtimeKind)
       clearDiscordTypingScope(state)
       setWorking(false)
       setPromWorking(false)
@@ -610,7 +647,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     // Programmatic rest (e.g. model swap that requires fresh context)
     if (state.restRequested) {
       console.log(`[runner] programmatic rest requested: ${state.restReason}`)
-      await saveRestSnapshot(state.conversation, state.restReason)
+      await saveRestSnapshot(state.conversation, state.restReason, state.runtimeKind)
       clearDiscordTypingScope(state)
       setWorking(false)
       setPromWorking(false)
@@ -619,7 +656,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
 
     if (outcome === CycleOutcome.NoTools) {
       if (deliveryNudged) continue
-      if (modelState.primaryNudgeOnNoTool) {
+      if (modelStateFor(state.runtimeKind).primaryNudgeOnNoTool) {
         state.conversation.push({
           role: "user",
           content: "[system] Your turn would have ended here. If you really want to wait, call one of your wait tools. You'll stay in a tool loop otherwise.",
@@ -627,6 +664,15 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
         })
         continue
       }
+      clearDiscordTypingScope(state)
+      setWorking(false)
+      setPromWorking(false)
+      await waitForNextEvent(convId, state, hooks)
+      continue
+    }
+
+    if (outcome === CycleOutcome.Wait) {
+      if (deliveryNudged) continue
       clearDiscordTypingScope(state)
       setWorking(false)
       setPromWorking(false)
@@ -664,5 +710,6 @@ export const __loopTest = {
   hasDiscordInputForTurn,
   waitForNextEvent,
   applyCompaction,
+  applyManualCompaction,
   pendingDiscordChannel,
 }

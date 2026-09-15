@@ -16,6 +16,7 @@ import { recordMetric } from "../metrics"
 import { syncMemoryIndex } from "./sync"
 import { markdownExcerptImageReferences } from "../context-images"
 import { searchDiscordMemoryEntries } from "../discord/search"
+import type { RuntimeKind } from "../runner/types"
 import {
   MEMORY_RECALL_COOLDOWN_TURNS,
   MEMORY_RECALL_MAX_CHUNKS,
@@ -198,7 +199,7 @@ export function rememberRecalledMemoryChunks(
  * @param limit - Maximum results (default 5, max 10).
  * @returns Search results.
  */
-export async function searchMemories(rawQuery: string, limit = 5): Promise<MemorySearchResult[]> {
+export async function searchMemories(rawQuery: string, limit = 5, runtimeKind: RuntimeKind = "main"): Promise<MemorySearchResult[]> {
   await syncMemoryIndex()
 
   const profile = await buildSearchProfile({ sender: null, source: null, body: rawQuery })
@@ -222,7 +223,7 @@ export async function searchMemories(rawQuery: string, limit = 5): Promise<Memor
   )
   let discordResults: import("./shared").DiscordMemorySearchResult[] = []
   try {
-    discordResults = await searchDiscordMemoryEntries(rawQuery, boundedLimit, semanticSignal?.vector)
+    discordResults = await searchDiscordMemoryEntries(rawQuery, boundedLimit, semanticSignal?.vector, runtimeKind)
   } catch (err: any) {
     console.warn(`[memory] Discord vector search failed: ${err?.message ?? String(err)}`)
   }

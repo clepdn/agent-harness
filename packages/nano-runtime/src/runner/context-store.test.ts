@@ -176,3 +176,21 @@ test("rest snapshot creates a recoverable summary before the first compaction", 
     ["bootstrap", raw.content],
   )
 })
+
+test("frontend context archive cannot search or expand main context", () => {
+  const marker = `lane-private-${Date.now()}`
+  archiveContextMessages([{ role: "user", content: `${marker} main` } as Message], "checkpoint", "main")
+  archiveContextMessages([{ role: "user", content: `${marker} frontend` } as Message], "checkpoint", "frontend")
+
+  assert.deepEqual(grepContext(marker, 10, undefined, "main").map((row) => row.content), [`${marker} main`])
+  assert.deepEqual(grepContext(marker, 10, undefined, "frontend").map((row) => row.content), [`${marker} frontend`])
+
+  const mainSummary = recordContextCompaction({
+    summaryText: "main only",
+    compactedMessages: [{ role: "user", content: `${marker} hidden` } as Message],
+    method: "test-main-lane",
+    runtimeKind: "main",
+  })
+  assert.equal(describeContextSummary(mainSummary, undefined, "frontend"), null)
+  assert.equal(expandContextSummary(mainSummary, undefined, undefined, "frontend"), null)
+})

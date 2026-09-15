@@ -32,12 +32,20 @@ import { describeContextSummary, expandContextSummary, grepContext } from "./con
 import { clearSession, saveRestSnapshot } from "./util"
 import { compactForShutdown } from "./loop"
 import { sendVoiceReply } from "../discord/voice"
+import { listAgentChannelMessages, sendAgentChannelMessage } from "./agent-channel"
+import type { MemoryAccessOptions } from "../agent-state-tools"
 
 const DEFAULT_WAIT_THEN_CONTINUE_MS = 10_000
 // Screenshot capture alone allows 30s at the client; keep the invocation
 // deadline clear of it.
 const COMPUTER_TIMEOUT_MS = 60_000
 export const SHELL_DETACH_AFTER_MS = 120_000
+
+function memoryAccessFor(state: { runtimeKind?: string }): MemoryAccessOptions | undefined {
+  return state.runtimeKind === "frontend"
+    ? { excludeSkills: true, excludeMainSessionArchives: true, allowLocalCopy: false }
+    : undefined
+}
 
 function jobView(job: Job): Record<string, unknown> {
   const finishedAt = job.completedAt ?? Date.now()
@@ -100,6 +108,30 @@ async function runClientImageTool(path: string, timeoutMs?: number, signal?: Abo
  */
 export function buildToolHandlers(): Record<string, ToolHandler> {
   return {
+    agent_send: (ctx) =>
+      runStandardTool(ctx, {
+        name: "agent_send",
+        logArgKeys: ["reply_to"] as const,
+        runArgKeys: ["content", "reply_to"] as const,
+        run: async (content, replyTo) => JSON.stringify(
+          sendAgentChannelMessage(ctx.state.runtimeKind ?? "main", content, replyTo),
+          null,
+          2,
+        ),
+      }),
+
+    agent_channel: (ctx) =>
+      runStandardTool(ctx, {
+        name: "agent_channel",
+        logArgKeys: ["limit", "before_id"] as const,
+        runArgKeys: ["limit", "before_id"] as const,
+        run: async (limit, beforeId) => JSON.stringify(
+          listAgentChannelMessages({ limit, beforeId }),
+          null,
+          2,
+        ),
+      }),
+
     voice_reply: async ({ convId, state, call, args }) => {
       const delegationId = typeof args.delegation_id === "string" ? args.delegation_id : ""
       const inputText = typeof args.input_text === "string" ? args.input_text : ""
@@ -130,12 +162,12 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       return {}
     },
 
-    wait: async ({ convId, state, hooks, call, args }) => {
+    wait: async ({ convId, state, call, args }) => {
       recordToolResult(convId, state, call, "wait", args, "Waiting for next event.")
       console.log("[runner] nano is waiting for next event...")
-      const incoming = await hooks.waitForEvent(); if (!incoming) return {}
-      hooks.injectIncomingEvent(convId, incoming)
-      return { isWait: true }
+      // The outer runner wait owns idle-compaction timeouts. Yield to it instead
+      // of blocking on the raw event hook here.
+      return { shouldWaitForEvent: true }
     },
 
     end_session: async ({ convId, state, call, args }) => {
@@ -145,14 +177,14 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       // the rich summary compaction is slow or fails, next boot still rehydrates
       // from the raw conversation instead of waking clean with nothing.
       const note = args.note as string | undefined
-      await saveRestSnapshot(state.conversation, note)
+      await saveRestSnapshot(state.conversation, note, state.runtimeKind)
       // Then compact-and-resave so a clean goodbye leaves a real rich summary
       // behind. Best-effort: the raw snapshot above already guarantees continuity.
       try {
         const compacted = await compactForShutdown(state)
         if (compacted === "rewritten") {
           console.log("[runner] end_session compacted the conversation before resting")
-          await saveRestSnapshot(state.conversation, note)
+          await saveRestSnapshot(state.conversation, note, state.runtimeKind)
         }
       } catch (err) {
         console.warn(`[runner] end_session compaction failed: ${err instanceof Error ? err.message : String(err)}`)
@@ -163,7 +195,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       // snapshot persisted and the next event restored the entire prior
       // context. Clearing it makes the next wake bootstrap fresh from just the
       // rest-snapshot summary.
-      await clearSession()
+      await clearSession(state.runtimeKind)
       console.log("[runner] end_session cleared session.json — next wake starts fresh")
       return { shouldRest: true }
     },
@@ -262,7 +294,13 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
           name: "read_file",
           logArgKeys: ["path", "start_line", "end_line"] as const,
           runArgKeys: ["path", "start_line", "end_line"] as const,
-          run: (path, startLine, endLine) => readMemory(path, startLine, endLine),
+          run: (path, startLine, endLine) => readMemory(path, startLine, endLine, memoryAccessFor(ctx.state)),
+        })
+      }
+      if (ctx.state.runtimeKind === "frontend") {
+        return runStandardTool(ctx, {
+          name: "read_file", logArgKeys: ["path"] as const, runArgKeys: [] as const,
+          run: async () => { throw new Error("frontend read_file accepts only memory:// resources") }, emitArgKeys: ["path"] as const, previewChars: 0,
         })
       }
       if (!clientTools.getCapabilities().includes("read_file")) {
@@ -290,7 +328,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         name: "memory_fs",
         logArgKeys: ["file_name", "op", "target"] as const,
         runArgKeys: ["file_name", "op", "target"] as const,
-        run: (fileName, op, target) => memoryFs(fileName, op, target),
+        run: (fileName, op, target) => memoryFs(fileName, op, target, memoryAccessFor(ctx.state)),
         emitArgKeys: ["file_name"] as const,
         previewChars: 0,
       }),
@@ -328,8 +366,14 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         return runStandardTool(ctx, {
           name: "edit_file", logArgKeys: ["path"] as const,
           runArgKeys: ["path", "old_text", "new_text", "expected_hash"] as const,
-          run: (uri, oldText, newText, expectedHash) => editMemoryResource(uri, oldText, newText, expectedHash),
+          run: (uri, oldText, newText, expectedHash) => editMemoryResource(uri, oldText, newText, expectedHash, memoryAccessFor(ctx.state)),
           emitArgKeys: ["path"] as const, previewChars: 0,
+        })
+      }
+      if (ctx.state.runtimeKind === "frontend") {
+        return runStandardTool(ctx, {
+          name: "edit_file", logArgKeys: ["path"] as const, runArgKeys: [] as const,
+          run: async () => { throw new Error("frontend edit_file accepts only memory:// resources") }, emitArgKeys: ["path"] as const, previewChars: 0,
         })
       }
       if (!clientTools.getCapabilities().includes("edit_file")) {
@@ -360,7 +404,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
           JSON.stringify(
             {
               query,
-              results: await searchMemories(query as string, limit as number | undefined),
+            results: await searchMemories(query as string, limit as number | undefined, ctx.state.runtimeKind),
             },
             null,
             2,
@@ -374,7 +418,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         logArgKeys: ["id", "reason", "note"] as const,
         runArgKeys: ["id", "reason", "note"] as const,
         run: async (id, reason, note) => JSON.stringify(
-          pruneDiscordMemory(String(id ?? ""), String(reason ?? "") as MemoryPruneReason, note as string | undefined),
+          pruneDiscordMemory(String(id ?? ""), String(reason ?? "") as MemoryPruneReason, note as string | undefined, ctx.state.runtimeKind),
           null,
           2,
         ),
@@ -432,7 +476,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         name: "memory_read",
         logArgKeys: ["path", "start_line", "end_line"] as const,
         runArgKeys: ["path", "start_line", "end_line"] as const,
-        run: (path, startLine, endLine) => readMemory(path, startLine, endLine),
+        run: (path, startLine, endLine) => readMemory(path, startLine, endLine, memoryAccessFor(ctx.state)),
       }),
 
     memory_ls: (ctx) =>
@@ -440,7 +484,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         name: "memory_ls",
         logArgKeys: [] as const,
         runArgKeys: [] as const,
-        run: () => listMemory(),
+        run: () => listMemory(memoryAccessFor(ctx.state)),
       }),
 
     memory_grep: (ctx) =>
@@ -448,7 +492,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         name: "memory_grep",
         logArgKeys: ["query", "case_insensitive"] as const,
         runArgKeys: ["query", "case_insensitive"] as const,
-        run: (query, caseInsensitive) => grepMemory(query, caseInsensitive),
+        run: (query, caseInsensitive) => grepMemory(query, caseInsensitive, memoryAccessFor(ctx.state)),
       }),
 
     skill: (ctx) =>
@@ -466,7 +510,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         runArgKeys: ["id", "tokenCap"] as const,
         run: async (id, tokenCap) => {
           const summaryId = String(id ?? "").trim()
-          return JSON.stringify(describeContextSummary(summaryId, tokenCap as number | undefined) ?? {
+          return JSON.stringify(describeContextSummary(summaryId, tokenCap as number | undefined, ctx.state.runtimeKind) ?? {
             error: `unknown context summary: ${summaryId}`,
             hint: "Use context_grep to find archived evidence, or check the summary id from the active context marker.",
           }, null, 2)
@@ -482,7 +526,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
           JSON.stringify({
             query,
             summaryId: summaryId ?? null,
-            results: grepContext(String(query ?? ""), limit as number | undefined, summaryId as string | undefined),
+            results: grepContext(String(query ?? ""), limit as number | undefined, summaryId as string | undefined, ctx.state.runtimeKind),
           }, null, 2),
       }),
 
@@ -493,7 +537,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         runArgKeys: ["summary_id", "offset", "limit"] as const,
         run: async (summaryId, offset, limit) =>
           JSON.stringify(
-            expandContextSummary(String(summaryId ?? ""), offset as number | undefined, limit as number | undefined) ?? {
+            expandContextSummary(String(summaryId ?? ""), offset as number | undefined, limit as number | undefined, ctx.state.runtimeKind) ?? {
               error: `unknown context summary: ${String(summaryId ?? "")}`,
             },
             null,
@@ -550,6 +594,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
               limit: limit as number | undefined,
               channelIds: channel_ids as string[] | string | undefined,
               beforeMessageId: before_message_id as string | undefined,
+              runtimeKind: ctx.state.runtimeKind,
             }),
             null,
             2,
@@ -563,7 +608,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         runArgKeys: ["limit", "status"] as const,
         run: async (limit, status) =>
           JSON.stringify(
-            listDiscordInbox(limit as number | undefined, status as string | string[] | undefined),
+            listDiscordInbox(limit as number | undefined, status as string | string[] | undefined, ctx.state.runtimeKind),
             null,
             2,
           ),
@@ -580,6 +625,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
               channel_id as string,
               limit as number | undefined,
               before_message_id as string | undefined,
+              ctx.state.runtimeKind,
             ),
             null,
             2,
@@ -597,6 +643,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
             status as "pending" | "seen" | "acted" | "ignored",
             (note as string | undefined) ?? "",
             (action as "none" | "replied" | "messaged" | "dismissed" | "noted" | undefined) ?? "none",
+            ctx.state.runtimeKind,
           )
           return JSON.stringify(
             {
@@ -624,6 +671,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
               ...(query ? { query: String(query) } : {}),
               ...(messageId ? { messageId: String(messageId) } : {}),
               ...(typeof limit === "number" ? { limit } : {}),
+              runtimeKind: ctx.state.runtimeKind,
             }),
             null,
             2,
@@ -644,6 +692,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
                 sourceItemId: source_item_id as string | undefined,
                 replyMode: reply_mode as string | undefined,
                 referenceMessage: reference_message as string | undefined,
+                runtimeKind: ctx.state.runtimeKind,
               }),
               null,
               2,
@@ -670,6 +719,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
               sourceItemId: source_item_id as string | undefined,
               replyMode: reply_mode as string | undefined,
               referenceMessage: reference_message as string | undefined,
+              runtimeKind: ctx.state.runtimeKind,
             }),
             null,
             2,
@@ -681,7 +731,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         name: "discord_channels",
         logArgKeys: [] as const,
         runArgKeys: [] as const,
-        run: async () => JSON.stringify(listDiscordChannels(), null, 2),
+        run: async () => JSON.stringify(listDiscordChannels(ctx.state.runtimeKind), null, 2),
       }),
 
     discord_channel_note: (ctx) =>
@@ -690,7 +740,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         logArgKeys: ["channel_id"] as const,
         runArgKeys: ["channel_id", "note"] as const,
         run: async (channel_id, note) =>
-          JSON.stringify(setDiscordChannelNote(channel_id as string, (note as string | undefined) ?? ""), null, 2),
+          JSON.stringify(setDiscordChannelNote(channel_id as string, (note as string | undefined) ?? "", ctx.state.runtimeKind), null, 2),
       }),
 
     set_status: (ctx) =>

@@ -218,6 +218,16 @@ const toolsT = table(merged.tools)
 const computerUseT = table(merged.computer_use)
 const prometheusT = table(merged.prometheus)
 const webSearchT = table(merged.web_search)
+const frontendT = table(merged.frontend)
+
+const frontendModel = (() => {
+  if (!("model" in frontendT)) return undefined
+  const value = frontendT.model
+  if (typeof value !== "string" || !value.trim()) {
+    throw new Error("[frontend].model must be a non-empty model preset or model id when defined")
+  }
+  return value.trim()
+})()
 
 // ── Subagent configs (array of tables) ────────────────────────────────────────
 
@@ -319,6 +329,12 @@ export const config = {
     env: str(agentT.env, "default").trim().toLowerCase(),
     boredom_wake_min: num(agentT.boredom_wake_min, 0),
     git_upstream_nag: bool(agentT.git_upstream_nag, false),
+  },
+  frontend: {
+    enable: bool(frontendT.enable, false),
+    // Undefined means live inheritance from the main runtime model. An empty
+    // string is deliberately invalid rather than acting as a sentinel.
+    model: frontendModel,
   },
   container: {
     name: str(containerT.name, "").trim(),
@@ -476,8 +492,10 @@ const MIN_SECRET_LENGTH = 8
 type SecretEntry = { label: string; value: string }
 
 function collectSecrets(): SecretEntry[] {
+  const frontendPreset = config.frontend.model ? getModelPreset(config.frontend.model) : null
   const entries: SecretEntry[] = [
     { label: "model.api_key",      value: config.model.api_key },
+    { label: "frontend.model.api_key", value: typeof frontendPreset?.api_key === "string" ? frontendPreset.api_key : "" },
     { label: "fallback.api_key",   value: config.fallback.api_key },
     { label: "summary.api_key",    value: config.summary.api_key },
     { label: "embeddings.api_key", value: config.embeddings.api_key },

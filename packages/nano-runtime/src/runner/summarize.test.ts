@@ -2,8 +2,42 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import { fallbackModel } from "./config"
 import { messageStringContent } from "./messages"
-import { proactiveCompaction } from "./summarize"
-import { makeAssistantMessage, makeToolResultMessage } from "./test-helpers"
+import {
+  buildConversationSummaryContent,
+  buildConversationSummaryPrompt,
+  proactiveCompaction,
+} from "./summarize"
+import { makeAssistantMessage, makeToolResultMessage, makeUserMessage } from "./test-helpers"
+
+test("dedicated summarizer prompt requests a detailed operational play-by-play", () => {
+  const prompt = buildConversationSummaryPrompt("grounding", "prior", true)
+  assert.match(prompt, /detailed chronological play-by-play/i)
+  assert.match(prompt, /Techniques that worked/)
+  assert.match(prompt, /Techniques that failed/)
+  assert.match(prompt, /People spoken to/)
+  assert.match(prompt, /Highlights/)
+  assert.match(prompt, /distinguish plans, attempts, verification, and completed outcomes/i)
+  assert.match(prompt, /grounding/)
+  assert.match(prompt, /prior/)
+})
+
+test("dedicated summary handoff includes the last summarized date and one-shot journal instruction", () => {
+  const older = makeUserMessage("older")
+  older.timestamp = Date.parse("2026-08-01T12:00:00.000Z")
+  const latest = makeUserMessage("latest")
+  latest.timestamp = Date.parse("2026-08-03T04:05:06.000Z")
+  const content = buildConversationSummaryContent(
+    "## Timeline\n- did the work",
+    [older, latest],
+    true,
+    new Date("2026-08-04T00:00:00.000Z"),
+  )
+  assert.match(content, /\[summarized-through 2026-08-03T04:05:06\.000Z\]/)
+  assert.match(content, /primary-model journal handoff/)
+  assert.match(content, /journal this immediately/i)
+  assert.match(content, /do not journal it again/i)
+  assert.match(content, /## Timeline/)
+})
 
 test("proactive compaction attempts only one tool result per primary turn", async () => {
   const messages = [

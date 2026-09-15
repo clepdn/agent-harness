@@ -63,6 +63,8 @@ import {
 } from "./rest"
 import { maybeFetchAndCachePronouns } from "./pronouns"
 import { readClientFile } from "../client"
+import type { RuntimeKind } from "../runner/types"
+import { assertDiscordChannelAccess, assertDiscordItemAccess, filterDiscordRowsForRuntime, isOwnerDmChannel, ownerDmChannelIds } from "./access"
 
 // ── result types ───────────────────────────────────────────────────────
 
@@ -75,6 +77,9 @@ export type DiscordIngestResult = {
   bucket?: "dm" | "mention"
   isFromBot?: boolean
   isFromSelf?: boolean
+  authorId?: string | null
+  isDm?: boolean
+  guildId?: string | null
   reason?: string
 }
 
@@ -190,6 +195,9 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
       return {
         stored: false,
         isNew: false,
+        authorId: record.authorId,
+        isDm: record.isDm,
+        guildId: record.guildId,
         reason: "ignored DM: sender is not in [discord].dm_whitelist",
       }
     }
@@ -223,6 +231,9 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
       bucket,
       isFromBot: record.isFromBot,
       isFromSelf: record.isFromSelf,
+      authorId: record.authorId,
+      isDm: record.isDm,
+      guildId: record.guildId,
     }
   }
 
@@ -233,6 +244,9 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
     channelId: record.channelId,
     isFromBot: record.isFromBot,
     isFromSelf: record.isFromSelf,
+    authorId: record.authorId,
+    isDm: record.isDm,
+    guildId: record.guildId,
     ...(!record.isDm && record.mentionsBot && !isConfiguredDiscordChannel(record.channelId)
       ? { reason: "ignored mention from unconfigured channel" }
       : {}),
@@ -248,10 +262,10 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
  * @param statuses - Status filter string or array.
  * @returns Raw inbox rows.
  */
-export function listDiscordInbox(limit = 20, statuses?: string[] | string): unknown[] {
+export function listDiscordInbox(limit = 20, statuses?: string[] | string, kind: RuntimeKind = "main"): unknown[] {
   const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit) || 20))
   const statusList = normalizeStatuses(statuses)
-  return queryInboxItems(statusList, safeLimit)
+  return filterDiscordRowsForRuntime(queryInboxItems(statusList, safeLimit), kind)
 }
 
 // ── backread ───────────────────────────────────────────────────────────
@@ -264,9 +278,10 @@ export function listDiscordInbox(limit = 20, statuses?: string[] | string): unkn
  * @param beforeMessageId - Optional cursor for pagination.
  * @returns Message rows with resolved reply context.
  */
-export function listDiscordBackread(channelId: string, limit = 40, beforeMessageId?: string): unknown[] {
+export function listDiscordBackread(channelId: string, limit = 40, beforeMessageId?: string, kind: RuntimeKind = "main"): unknown[] {
   const safeChannelId = String(channelId ?? "").trim()
   if (!safeChannelId) throw new Error("channel_id is required")
+  assertDiscordChannelAccess(safeChannelId, kind)
 
   const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit) || 40))
   const before = String(beforeMessageId ?? "").trim()
@@ -291,9 +306,10 @@ export function listDiscordBackread(channelId: string, limit = 40, beforeMessage
  * @param note - Optional decision note.
  * @param action - Action taken.
  */
-export function markDiscordItem(itemId: string, status: InboxStatus, note = "", action: InboxAction = "none"): void {
+export function markDiscordItem(itemId: string, status: InboxStatus, note = "", action: InboxAction = "none", kind: RuntimeKind = "main"): void {
   const safeItemId = String(itemId ?? "").trim()
   if (!safeItemId) throw new Error("item_id is required")
+  assertDiscordItemAccess(safeItemId, kind)
   if (!["pending", "seen", "acted", "ignored"].includes(status)) throw new Error(`invalid status: ${status}`)
   if (!VALID_ACTION.has(action)) throw new Error(`invalid action: ${action}`)
   updateInboxItem(safeItemId, status, action, note || null)
@@ -306,10 +322,10 @@ export function markDiscordItem(itemId: string, status: InboxStatus, note = "", 
  *
  * @returns Channel rows.
  */
-export function listDiscordChannels(): unknown[] {
+export function listDiscordChannels(kind: RuntimeKind = "main"): unknown[] {
   ensureConfiguredChannelsMaterialized()
   const configuredIds = parseChannelIds()
-  return queryChannels(configuredIds)
+  return filterDiscordRowsForRuntime(queryChannels(configuredIds), kind)
 }
 
 /**
@@ -319,9 +335,10 @@ export function listDiscordChannels(): unknown[] {
  * @param note - Note text (empty string clears it).
  * @returns Updated channel row.
  */
-export function setDiscordChannelNote(channelId: string, note: string): Record<string, unknown> {
+export function setDiscordChannelNote(channelId: string, note: string, kind: RuntimeKind = "main"): Record<string, unknown> {
   const safeChannelId = String(channelId ?? "").trim()
   if (!safeChannelId) throw new Error("channel_id is required")
+  assertDiscordChannelAccess(safeChannelId, kind)
 
   ensureConfiguredChannelsMaterialized([safeChannelId])
   const trimmed = note.trim()
@@ -349,6 +366,7 @@ export function buildDiscordBatchDigest(params?: {
   maxMessages?: number
   pendingPreviewLimit?: number
   intervalMs?: number
+  runtimeKind?: RuntimeKind
 }): DiscordBatchDigest | null {
   const now = new Date()
   const nowIso = now.toISOString()
@@ -362,24 +380,34 @@ export function buildDiscordBatchDigest(params?: {
   // Cooldown channels outside their active window: spare their pending items
   // from both the stale-demote and this digest, so they resurface when active.
   const inactiveChannelIds = inactiveCooldownChannelIds()
+  repairDiscordMessageChannelFlags()
+  const privateChannelIds = params?.runtimeKind === "frontend" ? ownerDmChannelIds() : []
   const activeConfiguredIds =
     inactiveChannelIds.length > 0 ? configuredIds.filter((id) => !inactiveChannelIds.includes(id)) : configuredIds
   const configuredPlaceholders = activeConfiguredIds.map(() => "?").join(", ")
-  const channelScopeClause = batchOnlyConfigured
+  const configuredScopeClause = batchOnlyConfigured
     ? activeConfiguredIds.length > 0
       ? `and (m.is_dm = 1 or m.channel_id in (${configuredPlaceholders}))`
       : "and m.is_dm = 1"
     : ""
+  const privateScopeClause = privateChannelIds.length > 0
+    ? `and m.channel_id not in (${privateChannelIds.map(() => "?").join(", ")})`
+    : ""
+  const channelScopeClause = `${configuredScopeClause} ${privateScopeClause}`
   const botUserId = config.discord.bot_user_id
 
-  autoDemoteStalePendingItems(autoSeenMinutes, inactiveChannelIds)
-  repairDiscordMessageChannelFlags()
+  autoDemoteStalePendingItems(autoSeenMinutes, [...new Set([...inactiveChannelIds, ...privateChannelIds])])
 
   const from =
     getDiscordMeta("discord_batch_last_dispatched_at") ??
     new Date(now.getTime() - intervalMs).toISOString()
 
-  const queryOpts = { botUserId, from, configuredIds: activeConfiguredIds, channelScopeClause }
+  const queryOpts = {
+    botUserId,
+    from,
+    configuredIds: [...activeConfiguredIds, ...privateChannelIds],
+    channelScopeClause,
+  }
 
   const messageRows = queryBatchMessages({ ...queryOpts, limit: maxMessages + 1 })
 
@@ -395,12 +423,14 @@ export function buildDiscordBatchDigest(params?: {
   // Cooldown channels outside their active window are dropped from this digest
   // and left as `pending` so they resurface once the window opens. The inactive
   // set was computed above (before the stale-demote) and reused here.
-  const visibleRecentMessages = inactiveChannelIds.length
+  const activeRecentMessages = inactiveChannelIds.length
     ? recentMessages.filter((row) => !inactiveChannelIds.includes(row.channel_id))
     : recentMessages
-  const visiblePendingPreview = inactiveChannelIds.length
+  const activePendingPreview = inactiveChannelIds.length
     ? pendingPreview.filter((row) => !inactiveChannelIds.includes(row.channel_id))
     : pendingPreview
+  const visibleRecentMessages = filterDiscordRowsForRuntime(activeRecentMessages, params?.runtimeKind)
+  const visiblePendingPreview = filterDiscordRowsForRuntime(activePendingPreview, params?.runtimeKind)
 
   // If cooldown filtering removed everything, skip this batch (leave items
   // pending) rather than waking the agent with an empty digest.
@@ -418,12 +448,16 @@ export function buildDiscordBatchDigest(params?: {
     `[discord batch] ${formatBatchTimestamp(from)} -> ${formatBatchTimestamp(nowIso)}`,
     "channel messages are context, not direct requests. replying is optional; use judgment.",
     ...(hasImages
-      ? config.model.vision
+      ? params?.runtimeKind === "frontend"
+        ? ["image attachments appear as [images: <discord cdn urls>]; this runtime has no download or image-inspection tool, so ask the main agent via agent_send if inspection matters."]
+        : config.model.vision
         ? ["image attachments appear as [images: <discord cdn urls>]; download with shell, then inspect with image_tool if useful."]
         : ["image attachments appear as [images: <discord cdn urls>]; download with shell if needed."]
       : []),
     ...(hasFiles
-      ? ["file attachments appear as [files: <filename>=<discord cdn url>]; download with shell if useful."]
+      ? params?.runtimeKind === "frontend"
+        ? ["file attachments appear as [files: <filename>=<discord cdn url>]; this runtime cannot download them, so ask the main agent via agent_send if the file matters."]
+        : ["file attachments appear as [files: <filename>=<discord cdn url>]; download with shell if useful."]
       : []),
     "",
     "recent messages:",
@@ -476,7 +510,7 @@ export function buildDiscordBatchDigest(params?: {
 
   return {
     content: lines.join("\n"),
-    messageCount: recentMessages.length,
+    messageCount: visibleRecentMessages.length,
     pendingCount,
     from,
     to: nowIso,
@@ -572,12 +606,14 @@ export async function sendDiscordMessage(params: {
   sourceItemId?: string
   replyMode?: string
   referenceMessage?: string
+  runtimeKind?: RuntimeKind
 }): Promise<Record<string, unknown>> {
   let channelId = String(params.channelId ?? "").trim()
   if (!channelId && params.sourceItemId?.trim()) {
     channelId = getItemChannelId(params.sourceItemId.trim()) ?? resolveSourceChannelId(params.sourceItemId) ?? ""
   }
   if (!channelId) throw new Error("channel_id is required (or provide source_item_id that maps to one)")
+  assertDiscordChannelAccess(channelId, params.runtimeKind)
 
   const content = String(params.content ?? "").trim()
   if (!content) throw new Error("content is required")
@@ -669,12 +705,14 @@ export async function uploadDiscordFile(params: {
   sourceItemId?: string
   replyMode?: string
   referenceMessage?: string
+  runtimeKind?: RuntimeKind
 }): Promise<Record<string, unknown>> {
   let channelId = String(params.channelId ?? "").trim()
   if (!channelId && params.sourceItemId?.trim()) {
     channelId = getItemChannelId(params.sourceItemId.trim()) ?? ""
   }
   if (!channelId) throw new Error("channel_id is required (or provide source_item_id that maps to one)")
+  assertDiscordChannelAccess(channelId, params.runtimeKind)
 
   const filePath = String(params.filePath ?? "").trim()
   if (!filePath) throw new Error("file_path is required")
@@ -790,11 +828,15 @@ export async function scanDiscordChannels(params?: {
   limit?: number
   channelIds?: string[] | string
   beforeMessageId?: string
+  runtimeKind?: RuntimeKind
 }): Promise<Record<string, unknown>> {
   const rest = makeRestClient()
   const botUserId = await getBotUserId(rest)
 
-  const channelIds = parseChannelIds(params?.channelIds)
+  const requestedChannelIds = parseChannelIds(params?.channelIds)
+  const channelIds = params?.runtimeKind === "frontend"
+    ? requestedChannelIds.filter((channelId) => !isOwnerDmChannel(channelId))
+    : requestedChannelIds
   ensureConfiguredChannelsMaterialized(channelIds)
   if (channelIds.length === 0) {
     return {

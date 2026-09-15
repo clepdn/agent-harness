@@ -8,6 +8,34 @@ import { syncMemoryIndex } from "./memory"
 const MAX_STATE_WRITE_BYTES = 256_000
 const MEMORY_ROOT = path.join(NANO_HOME, "memories")
 
+export type MemoryAccessOptions = {
+  excludeSkills?: boolean
+  excludeMainSessionArchives?: boolean
+  allowLocalCopy?: boolean
+}
+
+function isSkillMemoryPath(filePath: string): boolean {
+  const relative = path.relative(MEMORY_ROOT, filePath)
+  const first = relative.split(path.sep)[0]?.toLowerCase()
+  return first === "skills"
+}
+
+function assertMemoryAccess(filePath: string, options?: MemoryAccessOptions): void {
+  if (options?.excludeSkills && isSkillMemoryPath(filePath)) {
+    throw new Error("skill memories are unavailable to the frontend agent")
+  }
+  const relative = path.relative(MEMORY_ROOT, filePath)
+  if (options?.excludeMainSessionArchives && !relative.includes(path.sep) && /^discarded-.*\.json$/i.test(relative)) {
+    throw new Error("main session archives are unavailable to the frontend agent")
+  }
+}
+
+function memoryVisible(filePath: string, options?: MemoryAccessOptions): boolean {
+  if (options?.excludeSkills && isSkillMemoryPath(filePath)) return false
+  const relative = path.relative(MEMORY_ROOT, filePath)
+  return !(options?.excludeMainSessionArchives && !relative.includes(path.sep) && /^discarded-.*\.json$/i.test(relative))
+}
+
 function validateMarkdown(content: string): void {
   const headerMatch = /^#{1,6}[^\s#\r\n]/m.test(content)
   if (headerMatch) {
@@ -235,15 +263,17 @@ async function requireMissingMemoryFsTarget(filePath: string): Promise<void> {
 }
 
 /** Create, delete, move, or copy a server-owned memory filesystem resource. */
-export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarget?: unknown): Promise<string> {
+export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarget?: unknown, options?: MemoryAccessOptions): Promise<string> {
   const operation = parseMemoryFsOperation(rawOperation)
   const sourceIsLocal = typeof fileName === "string" && fileName.trim().startsWith("local://")
+  if (sourceIsLocal && options?.allowLocalCopy === false) throw new Error("local:// copies are unavailable to the frontend agent")
   const targetProvided = rawTarget !== undefined
 
   if (operation === "create") {
     if (sourceIsLocal) throw new Error("create requires a memory-relative file_name")
     if (targetProvided) throw new Error("create does not accept target")
     const target = memoryFsPath(fileName)
+    assertMemoryAccess(target.filePath, options)
     await prepareMemoryFile(target.filePath)
     await requireMissingMemoryFsTarget(target.filePath)
     if (typeof fileName === "string" && fileName.trim().endsWith("/")) {
@@ -259,6 +289,7 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
     if (sourceIsLocal) throw new Error("delete requires a memory-relative file_name")
     if (targetProvided) throw new Error("delete does not accept target")
     const target = memoryFsPath(fileName)
+    assertMemoryAccess(target.filePath, options)
     const stat = await existingMemoryFsTarget(target.filePath)
     if (target.filePath === path.join(MEMORY_ROOT, "core.md")) await backupFile(target.filePath)
     if (stat.isDirectory()) {
@@ -275,8 +306,10 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
   if (operation === "move") {
     if (sourceIsLocal) throw new Error("move requires a memory-relative file_name")
     const source = memoryFsPath(fileName)
+    assertMemoryAccess(source.filePath, options)
     await existingMemoryFsTarget(source.filePath)
     const destination = memoryFsPath(rawTarget)
+    assertMemoryAccess(destination.filePath, options)
     await prepareMemoryFile(destination.filePath)
     await requireMissingMemoryFsTarget(destination.filePath)
     if (source.filePath === path.join(MEMORY_ROOT, "core.md")) await backupFile(source.filePath)
@@ -297,12 +330,14 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
     })
   } else {
     const source = memoryFsPath(fileName)
+    assertMemoryAccess(source.filePath, options)
     sourceLabel = source.uri
     sourcePath = source.filePath
     sourceStat = await existingMemoryFsTarget(sourcePath)
   }
   if (!sourceStat.isFile()) throw new Error("copy source must be a regular file")
   const destination = memoryFsPath(rawTarget)
+  assertMemoryAccess(destination.filePath, options)
   await prepareMemoryFile(destination.filePath)
   await requireMissingMemoryFsTarget(destination.filePath)
   await fs.copyFile(sourcePath, destination.filePath, constants.COPYFILE_EXCL)
@@ -380,8 +415,10 @@ export async function editMemoryResource(
   oldText: unknown,
   newText: unknown,
   expectedHash?: unknown,
+  options?: MemoryAccessOptions,
 ): Promise<string> {
   const resource = memoryResourcePath(uri)
+  assertMemoryAccess(resource.filePath, options)
   if (typeof oldText !== "string" || !oldText) throw new Error("old_text is required")
   if (typeof newText !== "string") throw new Error("new_text is required")
   if (expectedHash !== undefined && (typeof expectedHash !== "string" || !/^[a-f0-9]{40}$/i.test(expectedHash))) {
@@ -568,12 +605,17 @@ async function getFilesRecursively(dir: string): Promise<string[]> {
   return files.flat()
 }
 
-export async function readMemory(relativePath: unknown, startLine?: unknown, endLine?: unknown): Promise<string> {
+export async function readMemory(relativePath: unknown, startLine?: unknown, endLine?: unknown, options?: MemoryAccessOptions): Promise<string> {
   const { filePath, displayPath, root } = memoryReadTarget(relativePath)
+  assertMemoryAccess(filePath, options)
   if (filePath === MEMORY_ROOT) await fs.mkdir(MEMORY_ROOT, { recursive: true, mode: 0o700 })
   const stat = await verifyMemoryReadTarget(filePath, root)
   if (stat.isDirectory()) {
-    const entries = (await fs.readdir(filePath)).filter((entry) => !entry.startsWith(".")).sort()
+    const entries = (await fs.readdir(filePath))
+      .filter((entry) => !entry.startsWith("."))
+      .filter((entry) => !(options?.excludeSkills && filePath === MEMORY_ROOT && entry.toLowerCase() === "skills"))
+      .filter((entry) => memoryVisible(path.join(filePath, entry), options))
+      .sort()
     return `${displayPath} is a dir\n${entries.join("\n")}`
   }
   const extension = path.extname(filePath).toLowerCase()
@@ -630,10 +672,12 @@ export async function readMemory(relativePath: unknown, startLine?: unknown, end
   return `[${displayPath}  ${rangeStr}${totalStr}]\n${selected}`
 }
 
-export async function listMemory(): Promise<string> {
+export async function listMemory(options?: MemoryAccessOptions): Promise<string> {
   await fs.mkdir(MEMORY_ROOT, { recursive: true, mode: 0o700 })
   const absoluteFiles = await getFilesRecursively(MEMORY_ROOT)
-  const relativeFiles = absoluteFiles.map((file) => path.relative(MEMORY_ROOT, file))
+  const relativeFiles = absoluteFiles
+    .filter((file) => memoryVisible(file, options))
+    .map((file) => path.relative(MEMORY_ROOT, file))
   
   if (relativeFiles.length === 0) {
     return "(no memories found)"
@@ -641,14 +685,15 @@ export async function listMemory(): Promise<string> {
   return relativeFiles.sort().join("\n")
 }
 
-export async function grepMemory(query: unknown, caseInsensitive?: unknown): Promise<string> {
+export async function grepMemory(query: unknown, caseInsensitive?: unknown, options?: MemoryAccessOptions): Promise<string> {
   if (typeof query !== "string" || !query) {
     throw new Error("query is required")
   }
   const isCaseInsensitive = caseInsensitive === true
 
   await fs.mkdir(MEMORY_ROOT, { recursive: true, mode: 0o700 })
-  const absoluteFiles = await getFilesRecursively(MEMORY_ROOT)
+  const absoluteFiles = (await getFilesRecursively(MEMORY_ROOT))
+    .filter((file) => memoryVisible(file, options))
 
   const matches: string[] = []
   const searchQuery = isCaseInsensitive ? query.toLowerCase() : query
