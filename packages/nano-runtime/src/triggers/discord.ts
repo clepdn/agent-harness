@@ -8,6 +8,7 @@ import {
   renderDiscordUserMentions,
 } from "../discord/parse"
 import { getCachedPronouns } from "../discord/pronouns"
+import { getOrCreateDiscordFriendlyId } from "../discord/friendly-id"
 import { modelState } from "../runner/model-state"
 
 function asIsoTimestamp(value: unknown, fallback: string): string {
@@ -166,25 +167,27 @@ export function fromDiscord(body: unknown): UserMessage {
 
   const channelId = String(message.channel_id ?? b.channel_id ?? channel?.id ?? "unknown")
   const messageId = String(message.id ?? b.message_id ?? "unknown")
+  const friendlyId = channelId !== "unknown" && messageId !== "unknown"
+    ? getOrCreateDiscordFriendlyId(messageId, channelId)
+    : null
   const location = isDm
     ? "DM"
     : `${guildName || "Discord"}/#${channelName || "channel"}`
   const header = isDm ? "[discord/dm]" : "[discord/channel]"
-  const action = isDm
-    ? "This is a direct message. Reply if it needs a response."
-    : "This is a server channel message, not a DM. You may choose not to reply; only respond if useful."
   const replyLine = replyContextLine(message, b)
   const imageBlock = formatImageBlock(extractImageAttachments(body))
   const fileBlock = formatFileBlock(extractFileAttachments(body))
+  const userBlock = `<user>\n${content}\n</user>`
 
   return {
     source: "discord",
     triggeredAt,
-    content: `${header} @${authorName}${pronounsSuffix}\ntarget: 1\ncontext: ${location}\ntimestamp: ${timestamp}${replyLine ? `\n${replyLine}` : ""}\naction: ${action}\n\n${content}${imageBlock}${fileBlock}`,
+    content: `${header} @${authorName}${pronounsSuffix}\ntarget: 1${friendlyId ? `\nid: ${friendlyId}` : ""}\ncontext: ${location}\ntimestamp: ${timestamp}${replyLine ? `\n${replyLine}` : ""}\n${userBlock}${imageBlock}${fileBlock}`,
     ...(channelId !== "unknown" && messageId !== "unknown"
       ? {
           discordTargets: [{
             position: 1,
+            ...(friendlyId ? { friendlyId } : {}),
             channelId,
             messageId,
             itemId: messageId,

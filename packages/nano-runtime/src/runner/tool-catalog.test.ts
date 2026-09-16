@@ -83,7 +83,9 @@ test("Discord and client tools are independently gated", () => {
   assert.equal(names.includes("discord_send"), true)
   const sendProperties = tools.find((tool) => tool.function.name === "discord_send")!
     .function.parameters.properties as Record<string, unknown>
-  assert.deepEqual(Object.keys(sendProperties).sort(), ["channel_id", "content", "reply_mode", "target"])
+  assert.deepEqual(Object.keys(sendProperties).sort(), ["channel_id", "content", "reference_message", "reply_mode", "target"])
+  assert.match(String((sendProperties.channel_id as { description?: string }).description), /plant-object-object/)
+  assert.match(String((sendProperties.reference_message as { description?: string }).description), /plant-object-object/)
 })
 
 test("server memory keeps read_file available without an attached client", () => {

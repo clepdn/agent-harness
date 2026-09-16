@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { config } from "../config"
-import { debounceDmWake, noteDmTyping, _resetDmDebounce } from "./dm-debounce"
+import { debounceChannelWake, debounceDmWake, noteDmTyping, _resetDmDebounce } from "./dm-debounce"
 
 type DiscordCfg = { dm_wake_debounce_ms: number; dm_wake_debounce_cap_ms: number }
 
@@ -56,6 +56,20 @@ test("follow-up messages are delivered together in arrival order", (t) => {
     t.mock.timers.tick(3000)
     debounceDmWake("chanC", "userC", "second", (items) => { delivered = items })
     t.mock.timers.tick(5001)
+    assert.deepEqual(delivered, ["first", "second"])
+  })
+})
+
+test("configured channel messages share the DM debounce window per channel", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] })
+  withCfg(5000, 60000, () => {
+    let delivered: readonly string[] = []
+    debounceChannelWake("server-channel", "first", (items) => { delivered = items })
+    t.mock.timers.tick(3000)
+    debounceChannelWake("server-channel", "second", (items) => { delivered = items })
+    t.mock.timers.tick(4999)
+    assert.deepEqual(delivered, [])
+    t.mock.timers.tick(2)
     assert.deepEqual(delivered, ["first", "second"])
   })
 })

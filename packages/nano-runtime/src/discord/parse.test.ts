@@ -33,7 +33,11 @@ test("discord user mentions render names instead of ids", () => {
 
   const event = fromDiscord(mentionPayload)
   assert.match(event.content, /hey @dawn and @nova/)
+  assert.match(event.content, /<user>\nhey @dawn and @nova\n<\/user>/)
+  assert.doesNotMatch(event.content, /timestamp:[^\n]+\n\n<user>/)
   assert.match(event.content, /^target: 1$/m)
+  assert.match(event.content, /^id: [a-z]+-[a-z]+-[a-z]+$/m)
+  assert.match(event.discordTargets?.[0]?.friendlyId ?? "", /^[a-z]+-[a-z]+-[a-z]+$/)
   assert.doesNotMatch(event.content, /1513348392011694264|1497733589545123981|source_item_id|message_id/)
   assert.doesNotMatch(event.content, /<@!?/)
 })
@@ -69,6 +73,7 @@ test("discord server nicknames are preferred and rendered correctly", () => {
   const event = fromDiscord(nicknamePayload)
   assert.match(event.content, /@Ana Server Nick/)
   assert.match(event.content, /hey @Dawn Server Nick and @Nova Server Nick/)
+  assert.match(event.content, /<user>\nhey @Dawn Server Nick and @Nova Server Nick\n<\/user>/)
 })
 
 test("a debounced DM burst delivers every message in arrival order", () => {
@@ -93,6 +98,9 @@ test("a debounced DM burst delivers every message in arrival order", () => {
   assert.ok(event.content.indexOf("first thought") < event.content.indexOf("second thought"))
   assert.match(event.content, /^target: 1$/m)
   assert.match(event.content, /^target: 2$/m)
+  assert.equal([...event.content.matchAll(/^id: [a-z]+-[a-z]+-[a-z]+$/gm)].length, 2)
+  assert.equal([...event.content.matchAll(/^<user>$/gm)].length, 2)
+  assert.equal([...event.content.matchAll(/^<\/user>$/gm)].length, 2)
   assert.doesNotMatch(event.content, /message-[12]|source_item_id|message_id/)
   assert.deepEqual(event.discordTargets?.map(({ position, channelId, messageId, content }) => ({ position, channelId, messageId, content })), [
     { position: 1, channelId: "dm-123", messageId: "message-1", content: "first thought" },

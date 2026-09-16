@@ -8,6 +8,7 @@ import { createHash } from "crypto"
 import { getDb, isVecAvailable, MEMORY_EMBEDDING_DIMENSIONS } from "../db"
 import type { RuntimeKind } from "../runner/types"
 import { assertDiscordChannelAccess, filterDiscordRowsForRuntime } from "./access"
+import { getOrCreateDiscordFriendlyId, resolveDiscordChannelId } from "./friendly-id"
 import { EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, embeddingsConfigured, embedTexts } from "../embeddings"
 import { MEMORY_SEMANTIC_MIN_SIMILARITY, normalizeText, type DiscordMemorySearchResult } from "../memory/shared"
 
@@ -103,6 +104,7 @@ function formatHumanTimestamp(value: string | null | undefined): string {
 
 function publicRow(row: DiscordSearchRow, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
+    id: getOrCreateDiscordFriendlyId(row.message_id, row.channel_id),
     message_id: row.message_id,
     source_item_id: row.message_id,
     channel_id: row.channel_id,
@@ -601,7 +603,7 @@ export async function searchDiscordMessages(params: {
   limit?: number
   runtimeKind?: RuntimeKind
 }): Promise<Record<string, unknown>> {
-  const channelId = String(params.channelId ?? "").trim()
+  const channelId = resolveDiscordChannelId(params.channelId)
   if (!channelId) throw new Error("channel_id is required")
   assertDiscordChannelAccess(channelId, params.runtimeKind)
 

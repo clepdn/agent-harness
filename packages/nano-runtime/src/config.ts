@@ -442,6 +442,7 @@ export const config = {
     wake_on_dm: bool(discordT.wake_on_dm, true),
     dm_wake_debounce_ms: Math.max(0, int(discordT.dm_wake_debounce_ms, 5000)),
     dm_wake_debounce_cap_ms: Math.max(0, int(discordT.dm_wake_debounce_cap_ms, 60000)),
+    channel_poll: bool(discordT.channel_poll, true),
     batch_interval_ms: Math.max(1000, int(discordT.batch_interval_ms, 60000)),
     batch_only_configured: bool(discordT.batch_only_configured, true),
     pending_auto_seen_minutes: int(discordT.pending_auto_seen_minutes, 10),

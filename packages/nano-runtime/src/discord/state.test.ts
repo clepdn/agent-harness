@@ -12,9 +12,10 @@ test("discord dm whitelist tests", () => {
   const testDbPath = path.join(tempDir, "nano.db")
 
   // The whitelist and bot identity are [discord] config, not environment.
-  const discord = config.discord as { dm_whitelist: string[]; bot_user_id: string }
+  const discord = config.discord as { dm_whitelist: string[]; bot_user_id: string; scan_channel_ids: string[] }
   const originalWhitelist = discord.dm_whitelist
   const originalBotId = discord.bot_user_id
+  const originalScanChannelIds = discord.scan_channel_ids
 
   try {
     initDb(testDbPath)
@@ -96,6 +97,7 @@ test("discord dm whitelist tests", () => {
     assert.equal(res4.isFromSelf, true)
 
     // 5. Channel message (non-DM) from non-whitelisted user should still be stored/ingested normally
+    discord.scan_channel_ids = ["910000000000000003"]
     const channelMsgFromUserC = {
       message: {
         id: "900000000000000005",
@@ -113,10 +115,12 @@ test("discord dm whitelist tests", () => {
     }
     const res5 = ingestDiscordEvent(channelMsgFromUserC)
     assert.equal(res5.stored, true, "Should store non-DM channel messages even if sender is not whitelisted")
+    assert.equal(res5.configured, true, "Should classify configured channel messages for event-driven wakes")
 
   } finally {
     discord.dm_whitelist = originalWhitelist
     discord.bot_user_id = originalBotId
+    discord.scan_channel_ids = originalScanChannelIds
     try {
       fs.rmSync(tempDir, { recursive: true, force: true })
     } catch {

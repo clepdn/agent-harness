@@ -28,6 +28,8 @@ export function selectDiscordTarget(
   }
 
   const prefix = normalized(selector)
+  const byFriendlyId = targets.find((target) => normalized(target.friendlyId) === prefix)
+  if (byFriendlyId) return byFriendlyId
   const matches = targets.filter((target) => normalized(target.content).startsWith(prefix))
   return latest(matches)
 }

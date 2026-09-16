@@ -26,6 +26,7 @@ import {
   countInterveningMessages,
   countPendingInbox,
   ensureConfiguredChannelsMaterialized,
+  extractReferencedMessageId,
   findMessageByContentPrefix,
   findMessageByUsername,
   findPendingDmItemId,
@@ -34,6 +35,7 @@ import {
   getItemChannelId,
   getItemMessageId,
   getMessageForReference,
+  markDiscordMessagesDispatched,
   isConfiguredDiscordChannel,
   messageExists,
   messageExistsById,
@@ -62,6 +64,11 @@ import {
   withDiscordRestRetry,
 } from "./rest"
 import { maybeFetchAndCachePronouns } from "./pronouns"
+import {
+  getOrCreateDiscordFriendlyId,
+  resolveDiscordChannelId,
+  resolveDiscordFriendlyId,
+} from "./friendly-id"
 import { readClientFile } from "../client"
 import type { RuntimeKind } from "../runner/types"
 import type { DiscordMessageTarget } from "../types"
@@ -81,6 +88,7 @@ export type DiscordIngestResult = {
   isFromSelf?: boolean
   authorId?: string | null
   isDm?: boolean
+  configured?: boolean
   guildId?: string | null
   reason?: string
 }
@@ -107,6 +115,12 @@ function fullMessageText(value: unknown): string {
   const text = String(value ?? "").replace(/\r\n/g, "\n").trim()
   if (!text) return "(no text)"
   return text.replace(/\n/g, "\n  ")
+}
+
+function formatBatchUserBlock(value: unknown, maxChars?: number): string {
+  const text = maxChars === undefined ? fullMessageText(value) : compactText(value, maxChars)
+  const indented = text.split("\n").map((line) => `  ${line}`).join("\n")
+  return `\n  <user>\n${indented}\n  </user>`
 }
 
 function formatHumanTimestamp(value: string | null | undefined): string {
@@ -207,6 +221,7 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
   }
 
   const isNew = !messageExists(record.messageId)
+  const configured = !record.isDm && isConfiguredDiscordChannel(record.channelId)
 
   const channelRecord = parseChannelRecord(payload, {
     channelId: record.channelId,
@@ -236,6 +251,7 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
       isFromSelf: record.isFromSelf,
       authorId: record.authorId,
       isDm: record.isDm,
+      configured,
       guildId: record.guildId,
     }
   }
@@ -249,8 +265,9 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
     isFromSelf: record.isFromSelf,
     authorId: record.authorId,
     isDm: record.isDm,
+    configured,
     guildId: record.guildId,
-    ...(!record.isDm && record.mentionsBot && !isConfiguredDiscordChannel(record.channelId)
+    ...(!record.isDm && record.mentionsBot && !configured
       ? { reason: "ignored mention from unconfigured channel" }
       : {}),
   }
@@ -268,7 +285,11 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
 export function listDiscordInbox(limit = 20, statuses?: string[] | string, kind: RuntimeKind = "main"): unknown[] {
   const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit) || 20))
   const statusList = normalizeStatuses(statuses)
-  return filterDiscordRowsForRuntime(queryInboxItems(statusList, safeLimit), kind)
+  const rows = filterDiscordRowsForRuntime(queryInboxItems(statusList, safeLimit), kind) as Array<Record<string, unknown>>
+  return rows.map((row) => ({
+    ...row,
+    id: getOrCreateDiscordFriendlyId(String(row.message_id), String(row.channel_id)),
+  }))
 }
 
 // ── backread ───────────────────────────────────────────────────────────
@@ -282,7 +303,7 @@ export function listDiscordInbox(limit = 20, statuses?: string[] | string, kind:
  * @returns Message rows with resolved reply context.
  */
 export function listDiscordBackread(channelId: string, limit = 40, beforeMessageId?: string, kind: RuntimeKind = "main"): unknown[] {
-  const safeChannelId = String(channelId ?? "").trim()
+  const safeChannelId = resolveDiscordChannelId(channelId)
   if (!safeChannelId) throw new Error("channel_id is required")
   assertDiscordChannelAccess(safeChannelId, kind)
 
@@ -293,6 +314,7 @@ export function listDiscordBackread(channelId: string, limit = 40, beforeMessage
   const replyByMessageId = buildReplyTargetContextMap(rows)
   return rows.map(({ raw_json: _rawJson, ...row }) => ({
     ...row,
+    id: getOrCreateDiscordFriendlyId(row.message_id, row.channel_id),
     source_item_id: row.message_id,
     created_at: formatHumanTimestamp(row.created_at),
     ...(replyByMessageId.has(row.message_id) ? { reply_to: replyByMessageId.get(row.message_id) } : {}),
@@ -339,7 +361,7 @@ export function listDiscordChannels(kind: RuntimeKind = "main"): unknown[] {
  * @returns Updated channel row.
  */
 export function setDiscordChannelNote(channelId: string, note: string, kind: RuntimeKind = "main"): Record<string, unknown> {
-  const safeChannelId = String(channelId ?? "").trim()
+  const safeChannelId = resolveDiscordChannelId(channelId)
   if (!safeChannelId) throw new Error("channel_id is required")
   assertDiscordChannelAccess(safeChannelId, kind)
 
@@ -377,6 +399,7 @@ export function buildDiscordBatchDigest(params?: {
   const intervalMs = Math.max(1_000, Math.trunc(params?.intervalMs ?? defaultIntervalMs))
   const maxMessages = Math.max(1, Math.min(200, Math.trunc(params?.maxMessages ?? 40) || 40))
   const previewLimit = Math.max(1, Math.min(50, Math.trunc(params?.pendingPreviewLimit ?? 6) || 6))
+  const channelPoll = config.discord.channel_poll
   const batchOnlyConfigured = config.discord.batch_only_configured
   const autoSeenMinutes = Math.max(0, config.discord.pending_auto_seen_minutes)
   const configuredIds = parseChannelIds()
@@ -387,12 +410,15 @@ export function buildDiscordBatchDigest(params?: {
   const privateChannelIds = params?.runtimeKind === "frontend" ? ownerDmChannelIds() : []
   const activeConfiguredIds =
     inactiveChannelIds.length > 0 ? configuredIds.filter((id) => !inactiveChannelIds.includes(id)) : configuredIds
-  const configuredPlaceholders = activeConfiguredIds.map(() => "?").join(", ")
-  const configuredScopeClause = batchOnlyConfigured
-    ? activeConfiguredIds.length > 0
-      ? `and (m.is_dm = 1 or m.channel_id in (${configuredPlaceholders}))`
-      : "and m.is_dm = 1"
-    : ""
+  const polledChannelIds = channelPoll ? activeConfiguredIds : []
+  const configuredPlaceholders = polledChannelIds.map(() => "?").join(", ")
+  let configuredScopeClause = "and m.is_dm = 1"
+  if (channelPoll) {
+    if (!batchOnlyConfigured) configuredScopeClause = ""
+    else if (polledChannelIds.length > 0) {
+      configuredScopeClause = `and (m.is_dm = 1 or m.channel_id in (${configuredPlaceholders}))`
+    }
+  }
   const privateScopeClause = privateChannelIds.length > 0
     ? `and m.channel_id not in (${privateChannelIds.map(() => "?").join(", ")})`
     : ""
@@ -408,7 +434,7 @@ export function buildDiscordBatchDigest(params?: {
   const queryOpts = {
     botUserId,
     from,
-    configuredIds: [...activeConfiguredIds, ...privateChannelIds],
+    configuredIds: [...polledChannelIds, ...privateChannelIds],
     channelScopeClause,
   }
 
@@ -451,8 +477,10 @@ export function buildDiscordBatchDigest(params?: {
   }): string => {
     let target = targetByMessageId.get(row.message_id)
     if (!target) {
+      const friendlyId = getOrCreateDiscordFriendlyId(row.message_id, row.channel_id)
       target = {
         position: targets.length + 1,
+        friendlyId,
         channelId: row.channel_id,
         messageId: row.message_id,
         ...(row.item_id ? { itemId: row.item_id } : {}),
@@ -464,7 +492,7 @@ export function buildDiscordBatchDigest(params?: {
     } else if (!target.itemId && row.item_id) {
       target.itemId = row.item_id
     }
-    return `target: ${target.position}`
+    return `target: ${target.position} id: ${target.friendlyId}`
   }
   const hasImages = [...visibleRecentMessages, ...visiblePendingPreview].some(
     (row) => extractImageAttachmentsFromRawJson(row.raw_json).length > 0,
@@ -498,7 +526,7 @@ export function buildDiscordBatchDigest(params?: {
     const author = row.author_username ? `@${row.author_username}${pronounsSuffix}` : "@unknown"
     const ts = formatBatchTimestamp(row.created_at)
     const replyTo = replyContextByMessageId.get(row.message_id)
-    lines.push(`- ${targetLabel(row)} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${fullMessageText(row.content)}${formatBatchAttachments(row.raw_json)}`)
+    lines.push(`- ${targetLabel(row)} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}:${formatBatchUserBlock(row.content)}${formatBatchAttachments(row.raw_json)}`)
   }
 
   if (truncated) {
@@ -516,7 +544,7 @@ export function buildDiscordBatchDigest(params?: {
       const author = row.author_username ? `@${row.author_username}${pronounsSuffix}` : "@unknown"
       const ts = formatBatchTimestamp(row.created_at)
       const replyTo = replyContextByMessageId.get(row.message_id)
-      lines.push(`- ${targetLabel(row)} bucket=${row.bucket} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}: ${compactText(row.content, 120)}${formatBatchAttachments(row.raw_json)}`)
+      lines.push(`- ${targetLabel(row)} bucket=${row.bucket} [${label}] [${ts}] ${author}${formatReplyContext(replyTo)}:${formatBatchUserBlock(row.content, 120)}${formatBatchAttachments(row.raw_json)}`)
     }
   }
 
@@ -533,6 +561,10 @@ export function buildDiscordBatchDigest(params?: {
   for (const row of visiblePendingPreview) {
     updateInboxItem(row.item_id, "seen", "noted", "auto-seen after inclusion in Discord batch context")
   }
+  markDiscordMessagesDispatched([
+    ...visibleRecentMessages.map((row) => row.message_id),
+    ...visiblePendingPreview.map((row) => row.message_id),
+  ])
 
   const lastVisibleRecent = visibleRecentMessages.at(-1)
   setDiscordMeta("discord_batch_last_dispatched_at", truncated && lastVisibleRecent ? lastVisibleRecent.first_seen_at : nowIso)
@@ -554,6 +586,9 @@ type ReplyMode = "auto" | "plain" | "explicit"
 function resolveReferenceMessage(channelId: string, sourceItemId?: string, referenceMessage?: string): string | null {
   const ref = referenceMessage?.trim()
   if (ref) {
+    const friendly = resolveDiscordFriendlyId(ref)
+    if (friendly) return friendly.channelId === channelId ? friendly.messageId : null
+
     if (/^\d+$/.test(ref) && messageExistsById(ref)) return ref
 
     const byContent = findMessageByContentPrefix(channelId, ref)
@@ -581,12 +616,44 @@ function resolveSourceChannelId(sourceItemId?: string): string | null {
 }
 
 const AUTO_REPLY_STALE_MINUTES = 10
+const AUTO_REPLY_GROUP_SCAN_LIMIT = 40
+
+function responseGroupAlreadyReferencesSource(
+  recent: ReturnType<typeof queryChannelMessages>,
+  sourceMessageId: string,
+): boolean {
+  for (const row of recent) {
+    if (row.message_id === sourceMessageId) return false
+    if (row.is_from_bot !== 1) return false
+    if (extractReferencedMessageId(row.raw_json) === sourceMessageId) return true
+  }
+  return false
+}
+
+function shouldKeepAutoReplyPlain(channelId: string, sourceMessageId: string): boolean {
+  const recent = queryChannelMessages(channelId, "", AUTO_REPLY_GROUP_SCAN_LIMIT)
+  if (recent[0]?.message_id === sourceMessageId) return true
+  return responseGroupAlreadyReferencesSource(recent, sourceMessageId)
+}
+
+function shouldSuppressRepeatedExplicitReference(channelId: string, sourceMessageId: string): boolean {
+  return responseGroupAlreadyReferencesSource(
+    queryChannelMessages(channelId, "", AUTO_REPLY_GROUP_SCAN_LIMIT),
+    sourceMessageId,
+  )
+}
 
 function shouldUseExplicitReference(channelId: string, sourceMessageId: string): boolean {
   const source = getMessageForReference(sourceMessageId)
 
   if (!source?.message_id || !source.channel_id) return false
   if (source.channel_id !== channelId) return false
+
+  // The next message after the source should read as normal conversation. A
+  // single model response may also be delivered as several consecutive
+  // messages; once that group references the source, keep the rest plain until
+  // another person speaks.
+  if (shouldKeepAutoReplyPlain(channelId, sourceMessageId)) return false
 
   const createdMs = Date.parse(source.created_at ?? "")
   if (Number.isFinite(createdMs)) {
@@ -626,18 +693,19 @@ export async function resolveDiscordDeliveryTarget(params: DeliveryTargetParams)
 }> {
   const turnTargets = params.turnTargets ?? []
   const selectorSupplied = hasDiscordTargetSelector(params.target)
-  const requestedChannelId = String(params.channelId ?? "").trim()
-  const selected = selectorSupplied || !requestedChannelId
+  const requestedChannelId = resolveDiscordChannelId(params.channelId)
+  const referenceRoute = selectorSupplied ? null : resolveDiscordFriendlyId(params.referenceMessage)
+  const selected = selectorSupplied || (!requestedChannelId && !referenceRoute)
     ? selectDiscordTarget(turnTargets, params.target)
     : null
-  const latest = requestedChannelId ? null : selectDiscordTarget(turnTargets)
+  const latest = requestedChannelId || referenceRoute ? null : selectDiscordTarget(turnTargets)
 
   if (selectorSupplied && !selected && typeof params.target === "number") {
     throw new Error(`target ${String(params.target)} is not present in the active Discord event`)
   }
 
   let channelId = requestedChannelId
-  const contextualChannelId = selected?.channelId ?? latest?.channelId
+  const contextualChannelId = selected?.channelId ?? referenceRoute?.channelId ?? latest?.channelId
   if (channelId && selected && channelId !== selected.channelId) {
     throw new Error("target belongs to a different Discord channel")
   }
@@ -666,13 +734,16 @@ export async function resolveDiscordDeliveryTarget(params: DeliveryTargetParams)
   if (selectorSupplied && !resolvedSourceItemId && requestedReferenceId) resolvedSourceItemId = requestedReferenceId
 
   const replyMode = normalizeReplyMode(params.replyMode)
-  const effectiveReplyMode = selectorSupplied && replyMode === "auto" ? "explicit" : replyMode
   const referenceMessageId = requestedReferenceId
-    ? effectiveReplyMode === "plain"
+    ? replyMode === "plain"
       ? null
-      : effectiveReplyMode === "explicit" || shouldUseExplicitReference(channelId, requestedReferenceId)
-        ? requestedReferenceId
-        : null
+      : replyMode === "explicit"
+        ? shouldSuppressRepeatedExplicitReference(channelId, requestedReferenceId)
+          ? null
+          : requestedReferenceId
+        : shouldUseExplicitReference(channelId, requestedReferenceId)
+          ? requestedReferenceId
+          : null
     : null
 
   return {
@@ -902,7 +973,7 @@ export async function scanDiscordChannels(params?: {
   const rest = makeRestClient()
   const botUserId = await getBotUserId(rest)
 
-  const requestedChannelIds = parseChannelIds(params?.channelIds)
+  const requestedChannelIds = parseChannelIds(params?.channelIds).map(resolveDiscordChannelId)
   const channelIds = params?.runtimeKind === "frontend"
     ? requestedChannelIds.filter((channelId) => !isOwnerDmChannel(channelId))
     : requestedChannelIds

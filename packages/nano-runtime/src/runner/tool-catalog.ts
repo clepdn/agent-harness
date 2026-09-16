@@ -254,7 +254,7 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
           additionalProperties: false,
           properties: {
             limit: { type: "integer", minimum: 1 },
-            channel_ids: { type: "array", items: { type: "string" } },
+            channel_ids: { type: "array", items: { type: "string", description: "Discord channel id or a plant-object-object message id from that channel." } },
             before_message_id: { type: "string" },
           },
         },
@@ -278,7 +278,7 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
           type: "object",
           additionalProperties: false,
           properties: {
-            channel_id: { type: "string" },
+            channel_id: { type: "string", description: "Discord channel id or a plant-object-object id shown on a message in that channel." },
             limit: { type: "integer", minimum: 1 },
             before_message_id: { type: "string" },
           },
@@ -292,7 +292,7 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
           type: "object",
           additionalProperties: false,
           properties: {
-            channel_id: { type: "string" },
+            channel_id: { type: "string", description: "Discord channel id or a plant-object-object id shown on a message in that channel." },
             query: { type: "string" },
             message_id: { type: "string" },
             limit: { type: "integer", minimum: 1 },
@@ -302,15 +302,16 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
       ),
       functionTool(
         "discord_send",
-        "Send a Discord message. Omit target to answer the latest message in the active Discord event. Use its shown target number or a prefix of its text to select a specific message.",
+        "Send a Discord message. Omit target to answer the latest message in the active Discord event. Use its shown target number, plant-object-object id, or a prefix of its text to select a specific message. A shown plant-object-object id is also valid as channel_id and reference_message.",
         {
           type: "object",
           additionalProperties: false,
           properties: {
-            channel_id: { type: "string" },
+            channel_id: { type: "string", description: "Discord channel id or a plant-object-object id shown on a message in that channel." },
             content: { type: "string" },
-            target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }] },
+            target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }], description: "Shown target number, plant-object-object id, or message-text prefix." },
             reply_mode: { type: "string", enum: ["auto", "plain", "explicit"] },
+            reference_message: { type: "string", description: "Discord message id, plant-object-object id shown on a message, message-text prefix, or author name. A plant-object-object id supplies its channel automatically, so channel_id may be omitted. Use reply_mode=explicit to force a Discord reply." },
           },
           required: ["content"],
         },
@@ -323,7 +324,7 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
           type: "object",
           additionalProperties: false,
           properties: {
-            channel_id: { type: "string" },
+            channel_id: { type: "string", description: "Discord channel id or a plant-object-object id shown on a message in that channel." },
             note: { type: "string" },
           },
           required: ["channel_id", "note"],
@@ -346,16 +347,17 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
       ),
       functionTool(
         "discord_upload",
-        "Upload a file to a Discord channel.",
+        "Upload a file to a Discord channel. A shown plant-object-object id is valid as channel_id and reference_message.",
         {
           type: "object",
           additionalProperties: false,
           properties: {
-            channel_id: { type: "string" },
+            channel_id: { type: "string", description: "Discord channel id or a plant-object-object id shown on a message in that channel." },
             file_path: { type: "string" },
             content: { type: "string" },
-            target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }] },
+            target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }], description: "Shown target number, plant-object-object id, or message-text prefix." },
             reply_mode: { type: "string", enum: ["auto", "plain", "explicit"] },
+            reference_message: { type: "string", description: "Discord message id, plant-object-object id shown on a message, message-text prefix, or author name. A plant-object-object id supplies its channel automatically, so channel_id may be omitted. Use reply_mode=explicit to force a Discord reply." },
           },
           required: ["file_path"],
         },

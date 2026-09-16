@@ -30,6 +30,13 @@ export function stripWakeEnvelope(raw: string): string {
   return raw.replace(WAKE_ENVELOPE_PATTERN, "").trim()
 }
 
+function unwrapUserContent(raw: string): string {
+  return raw
+    .replace(/^<user>\s*\n?/i, "")
+    .replace(/\n?\s*<\/user>/i, "")
+    .trim()
+}
+
 // ── discord channel label ──────────────────────────────────────────────
 
 /**
@@ -89,12 +96,20 @@ export function conciseDiscordMemoryQuery(raw: string): MemoryQueryParts | null 
   const withoutWakeEnvelope = stripWakeEnvelope(raw)
   if (!/\[discord\/(?:dm|channel)\]/i.test(withoutWakeEnvelope)) return null
 
-  const blocks = withoutWakeEnvelope
-    .split(/\n\s*\n/g)
-    .map((block) => block.trim())
-    .filter(Boolean)
-  const headerBlock = blocks[0] ?? withoutWakeEnvelope
-  const message = blocks.length > 1 ? blocks.slice(1).join("\n\n").trim() : ""
+  const taggedBoundary = withoutWakeEnvelope.search(/\n<user>\s*\n/i)
+  const blocks = taggedBoundary < 0
+    ? withoutWakeEnvelope
+        .split(/\n\s*\n/g)
+        .map((block) => block.trim())
+        .filter(Boolean)
+    : []
+  const headerBlock = taggedBoundary >= 0
+    ? withoutWakeEnvelope.slice(0, taggedBoundary).trim()
+    : blocks[0] ?? withoutWakeEnvelope
+  const taggedMessage = taggedBoundary >= 0
+    ? withoutWakeEnvelope.slice(taggedBoundary + 1).trim()
+    : blocks.length > 1 ? blocks.slice(1).join("\n\n").trim() : ""
+  const message = unwrapUserContent(taggedMessage)
 
   const lines = headerBlock.split("\n").map((line) => line.trim()).filter(Boolean)
   const discordLine = lines.find((line) => /^\[discord\/(?:dm|channel)\]/i.test(line)) ?? ""
@@ -122,12 +137,19 @@ function extractBulletSection(raw: string, label: string): string[] {
   const match = raw.match(new RegExp(`(?:^|\\n)${escapedLabel}:\\n([\\s\\S]*?)(?:\\n\\n[^\\n:]+:|$)`, "i"))
   if (!match) return []
 
-  return match[1]
-    .split("\n")
-    .map((line) => line.trim())
-    .filter((line) => line.startsWith("- "))
-    .map((line) => line.slice(2).trim())
-    .filter((line) => line && line !== "(none)")
+  const entries: string[] = []
+  let current = ""
+  for (const rawLine of match[1].split("\n")) {
+    const line = rawLine.trim()
+    if (line.startsWith("- ")) {
+      if (current) entries.push(current)
+      current = line.slice(2).trim()
+    } else if (current && line) {
+      current += `\n${line}`
+    }
+  }
+  if (current) entries.push(current)
+  return entries.filter((entry) => entry && entry !== "(none)")
 }
 
 /**
@@ -151,7 +173,7 @@ export function conciseDiscordBatchMemoryQuery(raw: string): MemoryQueryParts | 
   const senders: string[] = []
   const sources: string[] = []
   const bodies: string[] = []
-  const entryPattern = /(?:^|\s)(?:target:\s*\d+\s+)?\[([^\]]+)\]\s+\[[^\]]+\]\s+@([^:]+):\s*(.*)$/i
+  const entryPattern = /(?:^|\s)(?:target:\s*\d+\s+)?\[([^\]]+)\]\s+\[[^\]]+\]\s+@([^:]+):\s*([\s\S]*)$/i
   for (const entry of selected) {
     const match = entry.match(entryPattern)
     if (!match) {
@@ -161,7 +183,7 @@ export function conciseDiscordBatchMemoryQuery(raw: string): MemoryQueryParts | 
     const [, location, author, body] = match
     if (author) senders.push(normalizeHandle(author))
     if (location) sources.push(location.trim())
-    if (body) bodies.push(body.trim())
+    if (body) bodies.push(unwrapUserContent(body))
   }
 
   const lastSender = senders.length > 0 ? senders[senders.length - 1]! : null

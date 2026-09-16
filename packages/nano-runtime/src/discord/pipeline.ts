@@ -4,6 +4,7 @@ import { enqueueFrontendEvent, isFrontendRunning, wakeFrontend } from "../runner
 import { fromDiscord } from "../triggers/discord"
 import type { UserMessage } from "../types"
 import { isChannelActiveNow } from "./cooldown"
+import { markDiscordMessagesDispatched } from "./db"
 import { ingestDiscordEvent, type DiscordIngestResult } from "./state"
 
 const DISCORD_WAKE_ON_EVENT = config.discord.wake_on_event
@@ -26,8 +27,9 @@ export function handleDiscordIngress(
   preparedEvent?: UserMessage,
 ): DiscordIngressOutcome {
   const ingest = preparedIngest ?? ingestDiscordEvent(payload)
-  const isWakeEligible = ingest.isNew && !ingest.isFromSelf && Boolean(ingest.bucket)
   const wakeForDm = ingest.bucket === "dm"
+  const wakeForChannel = !ingest.isDm && ingest.configured === true && DISCORD_WAKE_ON_EVENT
+  const isWakeEligible = ingest.isNew && !ingest.isFromSelf && (wakeForDm || wakeForChannel)
 
   // Cooldown channels: keep ingesting for memory, but never wake outside the
   // configured active hours (even for @mentions; DMs bypass cooldowns).
@@ -41,7 +43,7 @@ export function handleDiscordIngress(
     }
   }
 
-  const shouldWake = isWakeEligible && (DISCORD_WAKE_ON_EVENT || wakeForDm)
+  const shouldWake = isWakeEligible && (wakeForDm || wakeForChannel)
 
   if (!shouldWake) {
     return {
@@ -59,6 +61,8 @@ export function handleDiscordIngress(
     else void wakeFrontend(event)
   } else if (isRunning()) enqueueEvent(event, { priority: wakeForDm })
   else void wake(event)
+
+  if (ingest.messageId) markDiscordMessagesDispatched([ingest.messageId])
 
   return {
     ingested: ingest.stored,

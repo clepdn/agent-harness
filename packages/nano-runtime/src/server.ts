@@ -24,7 +24,7 @@ import type { ToolCapability, WorkspaceDescriptor } from "@nano/harness-protocol
 
 const DISCORD_BATCH_INTERVAL_MS = Math.max(1_000, config.discord.batch_interval_ms)
 const DISCORD_BATCH_MAX_MESSAGES = Math.max(5, Math.min(200, config.discord.batch_max_messages))
-const DISCORD_BATCH_SCAN = config.discord.batch_scan
+const DISCORD_BATCH_SCAN = config.discord.channel_poll && config.discord.batch_scan
 const METRIC_LIST_TYPES = new Set<MetricListType>(["response", "summarization", "memory", "usage", "discord"])
 const METRIC_TYPE_ALIASES: Record<string, MetricListType> = {
   compaction: "summarization",

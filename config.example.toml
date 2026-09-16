@@ -196,8 +196,13 @@ voice_model = "gpt-live-1-codex"
 voice = "juniper"
 # Channel ids scanned by discord_scan when no channel_ids arg is passed.
 scan_channel_ids = []
+# Wake on configured-channel gateway traffic using the same trailing debounce
+# window as DMs.
 wake_on_event = false
 wake_on_dm = true
+# Include configured server channels in periodic REST scans and batch digests.
+# Disable when gateway event wakes are the only desired channel delivery path.
+channel_poll = true
 batch_interval_ms = 60000
 batch_only_configured = true
 pending_auto_seen_minutes = 10

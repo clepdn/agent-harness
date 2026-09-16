@@ -82,14 +82,33 @@ pending preview:
   })
 })
 
+test("memoryQueryForUserMessage unwraps user tags in a discord batch", () => {
+  const batch = `[discord batch] Sep 16, 2026, 1:00 PM EDT -> Sep 16, 2026, 1:01 PM EDT
+
+recent messages:
+- target: 1 id: bamboo-bell-basket [channel/home/#general] [Sep 16, 2026, 1:00 PM EDT] @rose:
+  <user>
+  hello from the batch
+  </user>
+
+pending preview:
+- (none)`
+
+  assert.deepEqual(memoryQueryForUserMessage(batch), {
+    sender: "rose",
+    source: "channel/home/#general",
+    body: "hello from the batch",
+  })
+})
+
 test("memoryQueryForUserMessage parses discord DM envelope into parts", () => {
   const dm = `[discord/dm] @meowskullz
 context: DM 1234567890
 message_id: 9999
 timestamp: 2026-05-01T00:00:00Z
-action: This is a direct message. Reply if it needs a response.
-
-thanks`
+<user>
+thanks
+</user>`
 
   const parts = memoryQueryForUserMessage(dm)
   assert.equal(parts.sender, "meowskullz")

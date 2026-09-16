@@ -106,6 +106,29 @@ export function upsertDiscordMessage(record: DiscordMessageRecord): void {
   )
 }
 
+/** Marks messages as submitted to a runner, regardless of delivery path. */
+export function markDiscordMessagesDispatched(messageIds: readonly string[]): void {
+  const uniqueIds = [...new Set(messageIds.map((id) => id.trim()).filter(Boolean))]
+  if (uniqueIds.length === 0) return
+  const now = new Date().toISOString()
+  const update = getDb().prepare(
+    "update discord_messages set dispatched_at = coalesce(dispatched_at, ?) where message_id = ?",
+  )
+  getDb().transaction((ids: readonly string[]) => {
+    for (const id of ids) update.run(now, id)
+  })(uniqueIds)
+}
+
+/** Returns whether a message has already been submitted through any delivery path. */
+export function isDiscordMessageDispatched(messageId: string | undefined): boolean {
+  const id = messageId?.trim()
+  if (!id) return false
+  const row = getDb()
+    .prepare("select dispatched_at from discord_messages where message_id = ?")
+    .get(id) as { dispatched_at?: string | null } | undefined
+  return Boolean(row?.dispatched_at)
+}
+
 /**
  * Creates or updates an inbox item for a given message.
  *
@@ -757,6 +780,7 @@ export function queryBatchMessages(opts: {
        left join discord_user_pronouns p on p.user_id = m.author_id
        where (? = '' or coalesce(m.author_id, '') != ?)
          and m.first_seen_at > ?
+         and m.dispatched_at is null
          and (i.message_id is null or i.status = 'pending')
          ${opts.channelScopeClause}
        order by m.first_seen_at asc
@@ -785,6 +809,7 @@ export function countPendingInbox(opts: {
        left join discord_channels c on c.channel_id = m.channel_id
        where i.status = 'pending'
        and (? = '' or coalesce(m.author_id, '') != ?)
+       and m.dispatched_at is null
        ${opts.channelScopeClause}`,
     )
     .get(opts.botUserId, opts.botUserId, ...opts.configuredIds) as { count?: number } | undefined
@@ -826,6 +851,7 @@ export function queryBatchPendingPreview(opts: {
        left join discord_user_pronouns p on p.user_id = m.author_id
        where i.status = 'pending'
          and (? = '' or coalesce(m.author_id, '') != ?)
+         and m.dispatched_at is null
          ${opts.channelScopeClause}
        order by i.last_seen_at desc
        limit ?`,

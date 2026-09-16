@@ -10,7 +10,8 @@ import {
 import { config, setDiscordBotUserId } from "../config"
 import { activate } from "../runner/index"
 import { handleDiscordIngress } from "./pipeline"
-import { debounceDmWake, noteDmTyping } from "./dm-debounce"
+import { debounceChannelWake, debounceDmWake, noteDmTyping } from "./dm-debounce"
+import { isDiscordMessageDispatched, markDiscordMessagesDispatched } from "./db"
 import { ingestDiscordEvent, type DiscordIngestResult } from "./state"
 import { fromDiscordMessages } from "../triggers/discord"
 import { configureDiscordTyping } from "./typing-lease"
@@ -121,17 +122,33 @@ function payloadAuthorId(payload: unknown): string {
 function handleGatewayMessage(payload: unknown) {
   const ingest: DiscordIngestResult = ingestDiscordEvent(payload)
   const channelId = ingest.channelId
+  const fireQueued = (queued: readonly { payload: unknown; ingest: DiscordIngestResult }[]) => {
+    const undispatched = queued.filter((item) => !isDiscordMessageDispatched(item.ingest.messageId))
+    const latest = undispatched.at(-1)
+    if (!latest) return
+    const outcome = handleDiscordIngress(
+      latest.payload,
+      latest.ingest,
+      fromDiscordMessages(undispatched.map((item) => item.payload)),
+    )
+    if (outcome.woke) {
+      markDiscordMessagesDispatched(undispatched.flatMap((item) => item.ingest.messageId ?? []))
+    }
+  }
   if (ingest.isNew && ingest.bucket === "dm" && channelId) {
-    const deferred = debounceDmWake(channelId, payloadAuthorId(payload), { payload, ingest }, (queued) => {
-      const latest = queued.at(-1)
-      if (!latest) return
-      handleDiscordIngress(
-        latest.payload,
-        latest.ingest,
-        fromDiscordMessages(queued.map((item) => item.payload)),
-      )
-    })
+    const deferred = debounceDmWake(channelId, payloadAuthorId(payload), { payload, ingest }, fireQueued)
     if (deferred) return { ingested: ingest.stored, woke: false, reason: "dm_priority" as const, note: "debounced" }
+  }
+  if (
+    ingest.isNew &&
+    !ingest.isDm &&
+    ingest.configured === true &&
+    !ingest.isFromSelf &&
+    config.discord.wake_on_event &&
+    channelId
+  ) {
+    const deferred = debounceChannelWake(channelId, { payload, ingest }, fireQueued)
+    if (deferred) return { ingested: ingest.stored, woke: false, reason: "wake_on_event" as const, note: "debounced" }
   }
   return handleDiscordIngress(payload, ingest)
 }

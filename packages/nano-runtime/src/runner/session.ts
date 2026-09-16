@@ -132,6 +132,7 @@ function finiteNumber(value: unknown): value is number {
 function validDiscordTarget(value: unknown): value is DiscordMessageTarget {
   const target = record(value)
   return Boolean(target) && Number.isSafeInteger(target!.position) && (target!.position as number) >= 1 &&
+    (target!.friendlyId === undefined || typeof target!.friendlyId === "string") &&
     typeof target!.channelId === "string" && target!.channelId.length > 0 &&
     typeof target!.messageId === "string" && target!.messageId.length > 0 &&
     (target!.itemId === undefined || typeof target!.itemId === "string") &&

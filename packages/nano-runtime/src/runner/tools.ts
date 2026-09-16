@@ -176,7 +176,7 @@ export const TOOLS: Tool[] = [
       type: "object",
       properties: {
         limit: { type: "integer", description: "Per-channel message fetch limit (default 50, max 100)." },
-        channel_ids: { type: "array", items: { type: "string" }, description: "Optional channel id list to scan instead of [discord].scan_channel_ids." },
+        channel_ids: { type: "array", items: { type: "string" }, description: "Optional channel id list to scan instead of [discord].scan_channel_ids. Each value may be a Discord channel id or a plant-object-object id shown on a message in that channel." },
         before_message_id: { type: "string", description: "Optional message id cursor for older backfill scans." },
       },
     }),
@@ -198,7 +198,7 @@ export const TOOLS: Tool[] = [
     parameters: s({
       type: "object",
       properties: {
-        channel_id: { type: "string", description: "Discord channel id." },
+        channel_id: { type: "string", description: "Discord channel id or a plant-object-object id shown on a message in that channel." },
         limit: { type: "integer", description: "Maximum rows to return (default 40, max 200)." },
         before_message_id: { type: "string", description: "Optional cursor message id to fetch older rows." },
       },
@@ -222,14 +222,15 @@ export const TOOLS: Tool[] = [
   {
     name: "discord_send",
     description:
-      "Send a Discord message. Omit target to answer the latest active message; use its shown target number or a prefix of its text to select a specific message.",
+      "Send a Discord message. Omit target to answer the latest active message; use its shown target number, plant-object-object id, or a prefix of its text to select a specific message. A shown plant-object-object id is also valid as channel_id and reference_message.",
     parameters: s({
       type: "object",
       properties: {
-        channel_id: { type: "string", description: "Target channel id." },
+        channel_id: { type: "string", description: "Target Discord channel id or a plant-object-object id shown on a message in that channel." },
         content: { type: "string", description: "Message content to send." },
-        target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }], description: "Shown target number or message-text prefix." },
+        target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }], description: "Shown target number, plant-object-object id, or message-text prefix." },
         reply_mode: { type: "string", enum: ["auto", "plain", "explicit"], description: "Reply behavior policy (default auto)." },
+        reference_message: { type: "string", description: "Optional message reference: a Discord message id, a plant-object-object id shown on a message, a message-text prefix, or an author name. A plant-object-object id supplies its channel automatically, so channel_id may be omitted. Use reply_mode=explicit to force a Discord reply." },
       },
       required: ["content"],
     }),
@@ -237,15 +238,16 @@ export const TOOLS: Tool[] = [
   {
     name: "discord_upload",
     description:
-      "Upload a file to a Discord channel, optionally with a text caption. Reads the file from your local filesystem. Max 25 MB.",
+      "Upload a file to a Discord channel, optionally with a text caption. A shown plant-object-object id is valid as channel_id and reference_message. Reads the file from your local filesystem. Max 25 MB.",
     parameters: s({
       type: "object",
       properties: {
-        channel_id: { type: "string", description: "Target channel id." },
+        channel_id: { type: "string", description: "Target Discord channel id or a plant-object-object id shown on a message in that channel." },
         file_path: { type: "string", description: "Absolute or relative path to the file on your filesystem." },
         content: { type: "string", description: "Optional text caption to send with the file." },
-        target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }], description: "Shown target number or message-text prefix." },
+        target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }], description: "Shown target number, plant-object-object id, or message-text prefix." },
         reply_mode: { type: "string", enum: ["auto", "plain", "explicit"], description: "Reply behavior policy (default auto)." },
+        reference_message: { type: "string", description: "Optional message reference: a Discord message id, a plant-object-object id shown on a message, a message-text prefix, or an author name. A plant-object-object id supplies its channel automatically, so channel_id may be omitted. Use reply_mode=explicit to force a Discord reply." },
       },
       required: ["file_path"],
     }),
@@ -261,7 +263,7 @@ export const TOOLS: Tool[] = [
     parameters: s({
       type: "object",
       properties: {
-        channel_id: { type: "string", description: "Discord channel id to annotate." },
+        channel_id: { type: "string", description: "Discord channel id to annotate, or a plant-object-object id shown on a message in that channel." },
         note: { type: "string", description: "Channel-specific note text. Empty string clears it." },
       },
       required: ["channel_id", "note"],

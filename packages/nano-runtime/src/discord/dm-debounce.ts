@@ -1,20 +1,21 @@
 import { config } from "../config"
 
-// DM wake debounce.
+// Discord wake debounce.
 //
 // When a DM arrives we don't wake the runner immediately. Instead we hold the
 // wake for a short base delay so that:
 //   1. the TYPING_START event (which usually lands a beat *after* the message)
-//      can arrive and tell us the user is still composing, and
+//      can arrive and tell us the user is still composing a DM, and
 //   2. rapid-fire follow-up messages get batched into a single wake instead of
 //      spawning one activation per line.
 //
 // Each typing signal or follow-up message extends the hold by `baseMs`, up to a
 // hard `capMs` ceiling measured from the first message in the burst. When the
-// timer finally elapses we fire the wake once. DMs only — channel/mention
-// activations are untouched (they never call in here).
+// timer finally elapses we fire the wake once. Configured channel messages use
+// the same timer but do not extend it from typing events.
 
 type Pending = {
+  key: string
   channelId: string
   userId: string
   queuedItems: unknown[]
@@ -25,8 +26,8 @@ type Pending = {
 
 const pending = new Map<string, Pending>()
 
-function pendingKey(channelId: string, userId: string): string {
-  return `${channelId}\u0000${userId}`
+function pendingKey(scope: "dm" | "channel", channelId: string, userId = ""): string {
+  return `${scope}\u0000${channelId}\u0000${userId}`
 }
 
 function baseMs(): number {
@@ -52,11 +53,11 @@ function scheduleTimer(entry: Pending): void {
   const nextFireAt = Math.min(now + baseMs(), capDeadline)
   const delay = Math.max(0, nextFireAt - now)
   entry.timer = setTimeout(() => {
-    pending.delete(pendingKey(entry.channelId, entry.userId))
+    pending.delete(entry.key)
     try {
       entry.fire(entry.queuedItems)
     } catch (err) {
-      console.warn("[dm-debounce] wake fire failed:", err)
+      console.warn("[discord-debounce] wake fire failed:", err)
     }
   }, delay)
   // Let the process exit cleanly if this is the only thing pending.
@@ -69,7 +70,8 @@ function scheduleTimer(entry: Pending): void {
 //
 // Every message in the burst is retained and delivered together when the hold
 // expires. Returns true if the wake was deferred (caller should NOT wake now).
-export function debounceDmWake<T>(
+function debounceWake<T>(
+  key: string,
   channelId: string,
   userId: string,
   item: T,
@@ -77,7 +79,6 @@ export function debounceDmWake<T>(
 ): boolean {
   if (baseMs() <= 0) return false // debounce disabled
 
-  const key = pendingKey(channelId, userId.trim())
   const existing = pending.get(key)
   if (existing) {
     existing.queuedItems.push(item)
@@ -87,6 +88,7 @@ export function debounceDmWake<T>(
   }
 
   const entry: Pending = {
+    key,
     channelId,
     userId: userId.trim(),
     queuedItems: [item],
@@ -99,13 +101,34 @@ export function debounceDmWake<T>(
   return true
 }
 
+export function debounceDmWake<T>(
+  channelId: string,
+  userId: string,
+  item: T,
+  fire: (queuedItems: readonly T[]) => void,
+): boolean {
+  const normalizedUserId = userId.trim()
+  return debounceWake(pendingKey("dm", channelId, normalizedUserId), channelId, normalizedUserId, item, fire)
+}
+
+// Configured channel traffic uses the same trailing debounce window as DMs.
+// The key is the channel rather than the author so a rapid conversation wakes
+// the agent once with every message in arrival order.
+export function debounceChannelWake<T>(
+  channelId: string,
+  item: T,
+  fire: (queuedItems: readonly T[]) => void,
+): boolean {
+  return debounceWake(pendingKey("channel", channelId), channelId, "", item, fire)
+}
+
 // Called on a TYPING_START for a DM channel. Only the matching initiating
 // user/channel entry extends the hold; a typing event without a user id cannot
 // be associated safely and never creates or changes a pending wake.
 export function noteDmTyping(channelId: string, userId?: string): void {
   const normalizedUserId = userId?.trim()
   if (!normalizedUserId) return
-  const entry = pending.get(pendingKey(channelId, normalizedUserId))
+  const entry = pending.get(pendingKey("dm", channelId, normalizedUserId))
   if (entry) scheduleTimer(entry)
 }
 

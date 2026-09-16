@@ -139,8 +139,19 @@ export function initDb(dbPathOverride?: string): void {
       is_from_bot   integer not null default 0,
       first_seen_at text not null,
       last_seen_at  text not null,
+      dispatched_at text,
       raw_json      text not null
     );
+
+    create table if not exists discord_message_friendly_ids (
+      friendly_id text primary key,
+      message_id  text not null unique,
+      channel_id  text not null,
+      created_at  text not null
+    );
+
+    create index if not exists idx_discord_message_friendly_ids_channel
+      on discord_message_friendly_ids(channel_id);
 
     create index if not exists idx_discord_messages_channel
       on discord_messages(channel_id, message_id desc);
@@ -327,6 +338,7 @@ export function initDb(dbPathOverride?: string): void {
   }
   ensureColumn("context_messages", "runtime_kind", "text not null default 'main'")
   ensureColumn("context_summaries", "runtime_kind", "text not null default 'main'")
+  ensureColumn("discord_messages", "dispatched_at", "text")
 
   if (vecAvailable) {
     db.exec(`

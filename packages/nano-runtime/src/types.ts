@@ -11,6 +11,7 @@ export type TriggerSource = "discord" | "voice" | "bsky" | "webhook" | "cron" | 
 /** Exact Discord routing metadata kept outside model-visible message text. */
 export interface DiscordMessageTarget {
   position: number
+  friendlyId?: string
   channelId: string
   messageId: string
   itemId?: string
