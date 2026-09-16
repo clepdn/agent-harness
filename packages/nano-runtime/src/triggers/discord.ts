@@ -10,6 +10,7 @@ import {
 import { getCachedPronouns } from "../discord/pronouns"
 import { getOrCreateDiscordFriendlyId } from "../discord/friendly-id"
 import { modelState } from "../runner/model-state"
+import { discordEmojiMarkup } from "../discord/context-emojis"
 
 function asIsoTimestamp(value: unknown, fallback: string): string {
   if (typeof value !== "string" && typeof value !== "number") return fallback
@@ -174,6 +175,9 @@ export function fromDiscord(body: unknown): UserMessage {
     ? "DM"
     : `${guildName || "Discord"}/#${channelName || "channel"}`
   const header = isDm ? "[discord/dm]" : "[discord/channel]"
+  const action = isDm
+    ? "This is a direct message. Reply if it needs a response."
+    : "This message was shared with everyone in the channel. Reply if you have something useful to add or the conversation seems directed at you; otherwise, no reply is needed."
   const replyLine = replyContextLine(message, b)
   const imageBlock = formatImageBlock(extractImageAttachments(body))
   const fileBlock = formatFileBlock(extractFileAttachments(body))
@@ -182,7 +186,7 @@ export function fromDiscord(body: unknown): UserMessage {
   return {
     source: "discord",
     triggeredAt,
-    content: `${header} @${authorName}${pronounsSuffix}\ntarget: 1${friendlyId ? `\nid: ${friendlyId}` : ""}\ncontext: ${location}\ntimestamp: ${timestamp}${replyLine ? `\n${replyLine}` : ""}\n${userBlock}${imageBlock}${fileBlock}`,
+    content: `${header} @${authorName}${pronounsSuffix}\ntarget: 1${friendlyId ? `\nid: ${friendlyId}` : ""}\ncontext: ${location}\ntimestamp: ${timestamp}${replyLine ? `\n${replyLine}` : ""}\naction: ${action}\n${userBlock}${imageBlock}${fileBlock}`,
     ...(channelId !== "unknown" && messageId !== "unknown"
       ? {
           discordTargets: [{
@@ -198,6 +202,47 @@ export function fromDiscord(body: unknown): UserMessage {
       : {}),
     raw: body,
   }
+}
+
+/** Formats a reaction add as a Discord wake event targeting the reacted-to message. */
+export function fromDiscordReaction(body: unknown): UserMessage {
+  const root = asRecord(body) ?? {}
+  const original = asRecord(root.message) ?? {}
+  const reactor = asRecord(root.reactor) ?? {}
+  const emoji = asRecord(root.emoji) ?? {}
+  const originalAuthor = asRecord(original.author)
+  const originalMember = asRecord(original.member)
+  const originalAuthorName = String(
+    originalMember?.display_name ??
+      originalMember?.displayName ??
+      originalMember?.nickname ??
+      originalMember?.nick ??
+      originalAuthor?.global_name ??
+      originalAuthor?.globalName ??
+      originalAuthor?.username ??
+      "unknown",
+  )
+  const originalContent = renderDiscordUserMentions(body, String(original.content ?? "")).trim() || "(no text content)"
+  const reaction = discordEmojiMarkup({
+    id: asString(emoji.id),
+    name: asString(emoji.name),
+    animated: Boolean(emoji.animated),
+  })
+  const content = `reacted with ${reaction} to @${originalAuthorName}'s message:\n${originalContent}`
+  const payload = {
+    ...root,
+    message: {
+      ...original,
+      content,
+      timestamp: String(root.reacted_at ?? new Date().toISOString()),
+      author: reactor,
+      member: asRecord(root.reactor_member) ?? undefined,
+      referenced_message: original,
+    },
+  }
+  const event = fromDiscord(payload)
+  for (const target of event.discordTargets ?? []) target.content = originalContent
+  return event
 }
 
 /** Formats a debounced DM burst as one runner event without dropping earlier messages. */

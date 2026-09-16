@@ -7,6 +7,18 @@ type EmojiReference = Extract<ContextImageReference, { kind: "discord-emoji" }>
 const cdn = new CDN()
 const CUSTOM_EMOJI_RE = /<(a?):([A-Za-z0-9_]{2,32}):(\d{1,22})>/g
 
+/** Render a gateway emoji as Discord markup so the normal bitmap path can discover it. */
+export function discordEmojiMarkup(emoji: {
+  id?: string | null
+  name?: string | null
+  animated?: boolean | null
+}): string {
+  const id = String(emoji.id ?? "").trim()
+  const name = String(emoji.name ?? "").trim()
+  if (!/^\d{1,22}$/.test(id) || !/^[A-Za-z0-9_]{2,32}$/.test(name)) return name || "unknown emoji"
+  return `<${emoji.animated ? "a" : ""}:${name}:${id}>`
+}
+
 /** Extract custom Discord emoji markup from message text. */
 export function discordEmojiReferences(text: string): EmojiReference[] {
   if (!config.discord.attach_emoji_bitmap || !text) return []

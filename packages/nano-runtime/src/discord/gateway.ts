@@ -6,14 +6,16 @@ import {
   GatewayIntentBits,
   Partials,
   type Message,
+  type User,
 } from "discord.js"
 import { config, setDiscordBotUserId } from "../config"
 import { activate } from "../runner/index"
-import { handleDiscordIngress } from "./pipeline"
+import { activateFrontend } from "../runner/frontend"
+import { handleDiscordIngress, discordRuntimeFor } from "./pipeline"
 import { debounceChannelWake, debounceDmWake, noteDmTyping } from "./dm-debounce"
-import { isDiscordMessageDispatched, markDiscordMessagesDispatched } from "./db"
+import { isConfiguredDiscordChannel, isDiscordMessageDispatched, markDiscordMessagesDispatched } from "./db"
 import { ingestDiscordEvent, type DiscordIngestResult } from "./state"
-import { fromDiscordMessages } from "../triggers/discord"
+import { fromDiscordMessages, fromDiscordReaction } from "../triggers/discord"
 import { configureDiscordTyping } from "./typing-lease"
 import { registerSlashCommands, handleInteraction, handleAutocomplete } from "./slash-commands"
 import { subscribeRunnerPresence, type RunnerPresence } from "../runner/presence"
@@ -25,6 +27,7 @@ import {
   handleOwnerAlertButton,
   isOwnerAlertButton,
 } from "./owner-alerts"
+import { isChannelActiveNow } from "./cooldown"
 
 function asString(value: unknown): string {
   return typeof value === "string" ? value.trim() : ""
@@ -110,6 +113,40 @@ function buildIngressPayload(message: Message): Record<string, unknown> {
     guild_name: message.guild?.name ?? null,
     is_dm: message.guildId == null,
   }
+}
+
+function buildReactionPayload(
+  message: Message,
+  reactor: User,
+  emoji: { id: string | null; name: string | null; animated: boolean | null },
+): Record<string, unknown> {
+  const payload = buildIngressPayload(message)
+  const member = message.guild?.members.cache.get(reactor.id)
+  return {
+    ...payload,
+    reactor: {
+      id: reactor.id,
+      username: reactor.username,
+      global_name: reactor.globalName ?? null,
+      avatar: reactor.avatar,
+      discriminator: reactor.discriminator,
+      bot: reactor.bot,
+    },
+    reactor_member: member
+      ? { nickname: member.nickname ?? null, display_name: member.displayName ?? null }
+      : null,
+    emoji,
+    reacted_at: new Date().toISOString(),
+  }
+}
+
+function reactionIsEligible(message: Message, reactor: User): boolean {
+  if (!config.discord.wake_on_reaction || reactor.bot || reactor.id === config.discord.bot_user_id) return false
+  if (message.guildId == null) {
+    const allow = config.discord.dm_whitelist
+    return allow.length === 0 || allow.includes(reactor.id)
+  }
+  return isConfiguredDiscordChannel(message.channelId) && isChannelActiveNow(message.channelId)
 }
 
 function payloadAuthorId(payload: unknown): string {
@@ -203,12 +240,14 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
     intents: [
       GatewayIntentBits.Guilds,
       GatewayIntentBits.GuildMessages,
+      GatewayIntentBits.GuildMessageReactions,
       GatewayIntentBits.GuildVoiceStates,
       GatewayIntentBits.DirectMessages,
+      GatewayIntentBits.DirectMessageReactions,
       GatewayIntentBits.DirectMessageTyping,
       GatewayIntentBits.MessageContent,
     ],
-    partials: [Partials.Channel],
+    partials: [Partials.Channel, Partials.Message, Partials.Reaction, Partials.User],
   })
 
   setVoiceDelegationCallback((event) => activate(event))
@@ -327,6 +366,43 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
       }
     } catch (err) {
       console.warn("[discord gateway] failed to ingest message:", err)
+    }
+  })
+
+  client.on(Events.MessageReactionAdd, async (reaction, user) => {
+    try {
+      if (!config.discord.wake_on_reaction || (!user.partial && user.bot)) return
+      const resolvedUser = user.partial ? await user.fetch() : user
+      const resolvedReaction = reaction.partial ? await reaction.fetch() : reaction
+      const message = resolvedReaction.message.partial
+        ? await resolvedReaction.message.fetch()
+        : resolvedReaction.message
+      if (!reactionIsEligible(message, resolvedUser)) return
+
+      // Keep the original message available to backread/reply tooling without
+      // storing the reaction itself as a fake Discord message.
+      ingestDiscordEvent(buildIngressPayload(message))
+      const event = fromDiscordReaction(buildReactionPayload(message, resolvedUser, {
+        id: resolvedReaction.emoji.id,
+        name: resolvedReaction.emoji.name,
+        animated: resolvedReaction.emoji.animated,
+      }))
+      const runtime = discordRuntimeFor({
+        stored: false,
+        isNew: true,
+        authorId: resolvedUser.id,
+        isDm: message.guildId == null,
+      })
+      if (runtime === "frontend") activateFrontend(event)
+      else activate(event)
+
+      if (trace) {
+        console.log(
+          `[discord gateway] messageReactionAdd message=${message.id} channel=${message.channelId} guild=${message.guildId ?? "dm"} user=${resolvedUser.id} emoji=${resolvedReaction.emoji.identifier} runtime=${runtime}`,
+        )
+      }
+    } catch (err) {
+      console.warn("[discord gateway] failed to handle message reaction:", err)
     }
   })
 

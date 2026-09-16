@@ -424,6 +424,7 @@ export const config = {
   },
   discord: {
     attach_emoji_bitmap: bool(discordT.attach_emoji_bitmap, true),
+    wake_on_reaction: bool(discordT.wake_on_reaction, true),
     include_user_avatars: bool(discordT.include_user_avatars, false),
     include_bot_avatar: bool(discordT.include_bot_avatar, false),
     bot_token: str(discordT.bot_token, "").trim(),

@@ -244,6 +244,7 @@ The harness explains this capability when it assembles each fresh context. It do
 | `gateway_trace` | `false` | Verbose per-message trace logging (noisy; for debugging). |
 | `gateway_raw_fallback` | `true` | Use the raw `MESSAGE_CREATE` packet handler as a DM fallback for messages discord.js doesn't surface. |
 | `gateway_raw_fallback_all` | `false` | Extend the raw fallback to all channel types, not just DMs. |
+| `wake_on_reaction` | `true` | Wake the bot when a non-bot user adds a reaction in a DM or configured guild channel. The event targets the reacted-to message; custom reaction emoji use the normal bitmap attachment path. Guild-channel cooldowns still apply. |
 | `wake_on_event` | `false` | Wake the runner on every ingested guild channel message (not just DMs). DMs always wake. |
 | `wake_on_dm` | `true` | Wake immediately on DMs even when `wake_on_event` is false. |
 | `dm_wake_debounce_ms` | `5000` | Trailing-edge hold (ms) for a new DM wake; each matching author/channel message or typing event resets the hold. Messages accumulated during the hold are delivered together in order. `0` disables it. Successful manual/idle compaction immediately reactivates the runner for the next model turn; shutdown compaction does not. |

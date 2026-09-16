@@ -177,6 +177,8 @@ max_per_message = 8
 # Attach custom emoji as bitmap images in model context. Animated emoji use
 # only their first frame.
 attach_emoji_bitmap = true
+# Wake the bot when a person reacts in a DM or configured guild channel.
+wake_on_reaction = true
 # Include each author's avatar once while their image remains in context.
 include_user_avatars = false
 # Include the bot's own avatar whenever a fresh context starts.

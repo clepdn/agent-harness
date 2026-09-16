@@ -1,7 +1,9 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { parseMessageRecord, renderDiscordUserMentions } from "./parse"
-import { fromDiscord, fromDiscordMessages } from "../triggers/discord"
+import { fromDiscord, fromDiscordMessages, fromDiscordReaction } from "../triggers/discord"
+import { discordEventImageReferences } from "./context-avatars"
+import { config } from "../config"
 
 const mentionPayload = {
   message: {
@@ -34,6 +36,7 @@ test("discord user mentions render names instead of ids", () => {
   const event = fromDiscord(mentionPayload)
   assert.match(event.content, /hey @dawn and @nova/)
   assert.match(event.content, /<user>\nhey @dawn and @nova\n<\/user>/)
+  assert.match(event.content, /action: This message was shared with everyone in the channel\. Reply if you have something useful to add or the conversation seems directed at you; otherwise, no reply is needed\.\n<user>/)
   assert.doesNotMatch(event.content, /timestamp:[^\n]+\n\n<user>/)
   assert.match(event.content, /^target: 1$/m)
   assert.match(event.content, /^id: [a-z]+-[a-z]+-[a-z]+$/m)
@@ -101,6 +104,7 @@ test("a debounced DM burst delivers every message in arrival order", () => {
   assert.equal([...event.content.matchAll(/^id: [a-z]+-[a-z]+-[a-z]+$/gm)].length, 2)
   assert.equal([...event.content.matchAll(/^<user>$/gm)].length, 2)
   assert.equal([...event.content.matchAll(/^<\/user>$/gm)].length, 2)
+  assert.equal([...event.content.matchAll(/^action: This is a direct message\. Reply if it needs a response\.$/gm)].length, 2)
   assert.doesNotMatch(event.content, /message-[12]|source_item_id|message_id/)
   assert.deepEqual(event.discordTargets?.map(({ position, channelId, messageId, content }) => ({ position, channelId, messageId, content })), [
     { position: 1, channelId: "dm-123", messageId: "message-1", content: "first thought" },
@@ -110,4 +114,38 @@ test("a debounced DM burst delivers every message in arrival order", () => {
     dm("message-1", "first thought", "2026-06-15T12:00:00.000Z"),
     dm("message-2", "second thought", "2026-06-15T12:00:03.000Z"),
   ])
+})
+
+test("reaction notifications target the original message and attach custom emoji through the shared bitmap path", () => {
+  assert.equal(config.discord.wake_on_reaction, true)
+  const event = fromDiscordReaction({
+    message: {
+      id: "1513348392011694999",
+      channel_id: "1497733589545123981",
+      guild_id: "1497733589545123980",
+      content: "ship it",
+      timestamp: "2026-06-15T12:00:00.000Z",
+      author: { id: "789", username: "ana", global_name: "Ana" },
+    },
+    channel: {
+      id: "1497733589545123981",
+      type: 0,
+      name: "mira",
+      guild_id: "1497733589545123980",
+    },
+    guild_name: "home",
+    reactor: { id: "456", username: "nova", global_name: "Nova", bot: false },
+    emoji: { id: "523456789012345678", name: "party", animated: true },
+    reacted_at: "2026-06-15T12:01:00.000Z",
+  })
+
+  assert.match(event.content, /@Nova/)
+  assert.match(event.content, /reacted with <a:party:523456789012345678> to @Ana's message:/)
+  assert.match(event.content, /ship it/)
+  assert.equal(event.discordTargets?.[0]?.messageId, "1513348392011694999")
+  assert.equal(event.discordTargets?.[0]?.content, "ship it")
+  assert.deepEqual(
+    discordEventImageReferences(event).map((ref) => ref.kind === "discord-emoji" && [ref.emojiId, ref.animated]),
+    [["523456789012345678", true]],
+  )
 })

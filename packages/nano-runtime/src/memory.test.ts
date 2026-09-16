@@ -106,6 +106,7 @@ test("memoryQueryForUserMessage parses discord DM envelope into parts", () => {
 context: DM 1234567890
 message_id: 9999
 timestamp: 2026-05-01T00:00:00Z
+action: This is a direct message. Reply if it needs a response.
 <user>
 thanks
 </user>`
