@@ -202,8 +202,10 @@ directory, which should be bind-mounted into the container.
 
 | Key | Default | Description |
 |---|---|---|
-| `max_bytes` | `150000` | Max image size in bytes accepted by `image_tool`. |
-| `root` | `home/images` (local/SSH) or `/home/<user>/images` (Docker) | Absolute path bounding all `image_tool` operations. Must start with `/`. |
+| `max_bytes` | `150000` | Max image size in bytes accepted by `image_tool`, including downloaded URL images. |
+| `root` | `home/images` (local/SSH) or `/home/<user>/images` (Docker) | Absolute path bounding local-file `image_tool` operations. Must start with `/`. |
+
+`image_tool.path` accepts either a local client image path or a public HTTP(S) image URL. URL images are fetched by the worker with the same byte limit; redirects are revalidated, and loopback, private-network, link-local, and nonstandard-port destinations are rejected. The frontend runtime exposes the URL form when its selected model supports vision, without requiring an attached client executor.
 
 ---
 

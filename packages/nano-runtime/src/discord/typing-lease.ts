@@ -17,6 +17,12 @@ const FALLBACK_MS = 750
 const REFRESH_MS = 8_000
 const LONG_TOOL_WAIT_MS = 20_000
 
+/** Temporary policy: expose outbound typing only in DM and group-DM channels. */
+export function shouldSendDiscordTyping(channel: { type?: unknown } | null | undefined): boolean {
+  // Discord channel types: DM = 1, GroupDM = 3.
+  return channel?.type === 1 || channel?.type === 3
+}
+
 let sender: DiscordTypingSender | null = null
 let activeLease: DiscordTypingLease | null = null
 

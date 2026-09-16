@@ -16,7 +16,7 @@ import { debounceChannelWake, debounceDmWake, noteDmTyping } from "./dm-debounce
 import { isConfiguredDiscordChannel, isDiscordMessageDispatched, markDiscordMessagesDispatched } from "./db"
 import { ingestDiscordEvent, type DiscordIngestResult } from "./state"
 import { fromDiscordMessages, fromDiscordReaction } from "../triggers/discord"
-import { configureDiscordTyping } from "./typing-lease"
+import { configureDiscordTyping, shouldSendDiscordTyping } from "./typing-lease"
 import { registerSlashCommands, handleInteraction, handleAutocomplete } from "./slash-commands"
 import { subscribeRunnerPresence, type RunnerPresence } from "../runner/presence"
 import { startStatusUpdater, stopStatusUpdater } from "./status-updater"
@@ -254,6 +254,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
 
   configureDiscordTyping((channelId) => {
     const channel = client.channels.cache.get(channelId)
+    if (!shouldSendDiscordTyping(channel)) return Promise.resolve()
     if (!channel || !("sendTyping" in channel) || typeof channel.sendTyping !== "function") return Promise.resolve()
     return channel.sendTyping()
   })

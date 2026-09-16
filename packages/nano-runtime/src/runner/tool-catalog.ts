@@ -14,6 +14,8 @@ export type NiriToolCatalogOptions = {
   subagents?: boolean
   computer?: boolean
   webSearch?: boolean
+  /** Whether this runtime's active model can receive image inputs. */
+  vision?: boolean
   /** Build the lower-trust virtual frontend lane (no executor or skills). */
   frontend?: boolean
   /** Expose the durable main/frontend mailbox. */
@@ -26,6 +28,26 @@ const functionTool = (name: string, description: string, parameters: JsonSchema)
 })
 
 const emptyParameters: JsonSchema = { type: "object", additionalProperties: false, properties: {} }
+
+function imageToolDefinition(localPaths: boolean, imageRoot: string): ToolDefinition {
+  return functionTool(
+    "image_tool",
+    localPaths
+      ? `Attach an image from a public HTTP(S) URL or a bounded client file under ${imageRoot}.`
+      : "Fetch an image from a public HTTP(S) URL and attach it for the next vision turn.",
+    {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        path: { type: "string", description: localPaths ? "Public HTTP(S) image URL or client image path." : "Public HTTP(S) image URL." },
+        note: { type: "string", description: "Optional text instruction to accompany the image for the next turn." },
+        detail: { type: "string", enum: ["auto", "low", "high"] },
+        timeout_ms: { type: "integer", minimum: 1000, maximum: 600000 },
+      },
+      required: ["path"],
+    },
+  )
+}
 
 export const MEMORY_FS_TOOL_DEFINITION = functionTool(
   "memory_fs",
@@ -46,11 +68,19 @@ export const MEMORY_FS_TOOL_DEFINITION = functionTool(
 )
 
 export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): ToolDefinition[] {
+  const clientCapabilities = new Set(options.clientCapabilities ?? [])
   // File reads and edits are server-owned for memory:// resources and therefore
-  // always advertised. Remove capability-gated client definitions to avoid duplicates.
+  // always advertised. image_tool also has a server-owned URL path, so replace
+  // the client-only definition with a combined one.
   const tools = createClientToolCatalog(options).filter(
-    (tool) => tool.function.name !== "read_file" && tool.function.name !== "edit_file",
+    (tool) => !["read_file", "edit_file", "image_tool"].includes(tool.function.name),
   )
+  if (options.vision ?? clientCapabilities.has("image_tool")) {
+    tools.push(imageToolDefinition(
+      clientCapabilities.has("image_tool") && !options.frontend,
+      options.workspace?.imageRoot ?? options.workspace?.root ?? "the attached client workspace",
+    ))
+  }
   tools.push(
     createReadFileToolDefinition({
       hashline: options.workspace?.hashline === true,
@@ -513,7 +543,6 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
     "job_status",
     "job_stdout",
     "job_cancel",
-    "image_tool",
     "computer",
     "subagent",
     "skill",
@@ -541,4 +570,20 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
       }
       return tool
     })
+}
+
+/** Replace only image_tool in a restored pinned catalog when URL support or vision availability changed. */
+export function reconcileImageToolDefinition(
+  saved: readonly ToolDefinition[],
+  current: readonly ToolDefinition[],
+): { catalog: ToolDefinition[]; changed: boolean } {
+  const desired = current.find((tool) => tool.function.name === "image_tool")
+  const existing = saved.find((tool) => tool.function.name === "image_tool")
+  if (JSON.stringify(existing) === JSON.stringify(desired)) return { catalog: [...saved], changed: false }
+  const catalog = saved.filter((tool) => tool.function.name !== "image_tool")
+  if (desired) {
+    const readIndex = catalog.findIndex((tool) => tool.function.name === "read_file")
+    catalog.splice(readIndex < 0 ? catalog.length : readIndex, 0, desired)
+  }
+  return { catalog, changed: true }
 }

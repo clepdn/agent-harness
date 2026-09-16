@@ -34,6 +34,7 @@ import { compactForShutdown } from "./loop"
 import { sendVoiceReply } from "../discord/voice"
 import { listAgentChannelMessages, sendAgentChannelMessage } from "./agent-channel"
 import type { MemoryAccessOptions } from "../agent-state-tools"
+import { fetchRemoteImage, isRemoteImageUrl } from "../remote-image"
 
 const DEFAULT_WAIT_THEN_CONTINUE_MS = 10_000
 // Screenshot capture alone allows 30s at the client; keep the invocation
@@ -561,7 +562,24 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       let result: string
 
       try {
-        const image = await runClientImageTool(args.path as string, args.timeout_ms as number | undefined, state.operationSignal)
+        const imageInput = String(args.path ?? "").trim()
+        if (!imageInput) throw new Error("image_tool requires a path or HTTP(S) URL")
+        if (/^[a-z][a-z\d+.-]*:\/\//i.test(imageInput) && !isRemoteImageUrl(imageInput)) {
+          throw new Error("image_tool URLs must use HTTP or HTTPS")
+        }
+        const timeoutMs = normalizeTimeoutMs(args.timeout_ms as number | undefined, 120_000)
+        let image: ClientImageArtifact
+        if (isRemoteImageUrl(imageInput)) {
+          image = await fetchRemoteImage(
+            imageInput,
+            state.operationSignal
+              ? AbortSignal.any([state.operationSignal, AbortSignal.timeout(timeoutMs)])
+              : AbortSignal.timeout(timeoutMs),
+          )
+        } else {
+          if (state.runtimeKind === "frontend") throw new Error("frontend image_tool accepts HTTP(S) image URLs only")
+          image = await runClientImageTool(imageInput, timeoutMs, state.operationSignal)
+        }
         const note =
           typeof args.note === "string" && args.note.trim()
             ? args.note.trim()

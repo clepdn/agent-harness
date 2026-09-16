@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { createNiriToolCatalog } from "./tool-catalog"
+import { createNiriToolCatalog, reconcileImageToolDefinition } from "./tool-catalog"
 import { buildToolHandlers } from "./loop-tool-registry"
 
 test("Niri catalog keeps server tools separate from client capabilities", () => {
@@ -93,6 +93,26 @@ test("server memory keeps read_file available without an attached client", () =>
   assert.equal(names.includes("read_file"), true)
 })
 
+test("vision runtimes get server-side URL image_tool without a client", () => {
+  const tool = createNiriToolCatalog({ vision: true }).find((entry) => entry.function.name === "image_tool")
+  assert.ok(tool)
+  assert.match(tool.function.description, /public HTTP\(S\) URL/)
+  assert.match(String((tool.function.parameters.properties as Record<string, { description?: string }>).path?.description), /HTTP\(S\)/)
+})
+
+test("restored catalogs adopt URL image_tool without replacing other pinned tools", () => {
+  const saved = createNiriToolCatalog({ vision: false })
+  const current = createNiriToolCatalog({ vision: true, frontend: true })
+  const reconciled = reconcileImageToolDefinition(saved, current)
+  assert.equal(reconciled.changed, true)
+  assert.ok(reconciled.catalog.find((tool) => tool.function.name === "image_tool"))
+  assert.deepEqual(
+    reconciled.catalog.filter((tool) => tool.function.name !== "image_tool"),
+    saved,
+  )
+  assert.equal(reconcileImageToolDefinition(reconciled.catalog, current).changed, false)
+})
+
 test("shell catalog exposes explicit per-command PTY allocation", () => {
   const shell = createNiriToolCatalog({
     clientCapabilities: ["shell"],
@@ -119,15 +139,18 @@ test("frontend catalog keeps server tools and bridge while hard-gating executor 
     webSearch: true,
     subagents: true,
     computer: true,
+    vision: true,
     frontend: true,
     agentChannel: true,
   })
   const names = tools.map((tool) => tool.function.name)
-  for (const denied of ["shell", "job_list", "job_status", "job_stdout", "job_cancel", "image_tool", "computer", "subagent", "skill", "discord_upload"]) {
+  for (const denied of ["shell", "job_list", "job_status", "job_stdout", "job_cancel", "computer", "subagent", "skill", "discord_upload"]) {
     assert.equal(names.includes(denied), false, `${denied} should be absent`)
   }
-  for (const allowed of ["read_file", "edit_file", "memory_fs", "memory_search", "discord_send", "discord_search", "web_search", "agent_send", "agent_channel", "wait", "end_session"]) {
+  for (const allowed of ["read_file", "edit_file", "memory_fs", "memory_search", "discord_send", "discord_search", "web_search", "image_tool", "agent_send", "agent_channel", "wait", "end_session"]) {
     assert.equal(names.includes(allowed), true, `${allowed} should remain available`)
   }
   assert.match(tools.find((tool) => tool.function.name === "read_file")!.function.description, /Ordinary.*unavailable/)
+  assert.match(tools.find((tool) => tool.function.name === "image_tool")!.function.description, /public HTTP\(S\) URL/)
+  assert.doesNotMatch(tools.find((tool) => tool.function.name === "image_tool")!.function.description, /client file/)
 })

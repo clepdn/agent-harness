@@ -24,6 +24,7 @@ export type BootstrapCapabilities = {
   discord?: boolean
   frontend?: boolean
   agentChannel?: boolean
+  vision?: boolean
 }
 
 async function readFile(filePath: string): Promise<string | null> {
@@ -66,15 +67,19 @@ function buildEnvironmentSection(options: BootstrapCapabilities = {}): string {
     capabilities.has("shell") ? "- `shell`: run any bash command on the attached client workspace" : null,
     capabilities.has("read_file") ? "- `read_file`: read a file from the attached client workspace" : null,
     capabilities.has("edit_file") ? "- `edit_file`: edit a file on the attached client workspace by replacing exact text" : null,
-    capabilities.has("image_tool") && config.model.vision ? `- \`image_tool\`: attach an image from \`${workspace?.imageRoot ?? workspace?.root ?? "the attached client workspace"}\` for the next server-side vision turn` : null,
+    options.vision
+      ? capabilities.has("image_tool") && !options.frontend
+        ? `- \`image_tool\`: attach an image from a public HTTP(S) URL or from \`${workspace?.imageRoot ?? workspace?.root ?? "the attached client workspace"}\` for the next vision turn`
+        : "- `image_tool`: fetch an image from a public HTTP(S) URL and attach it for the next vision turn"
+      : null,
   ]
     .filter((line): line is string => Boolean(line))
     .join("\n")
   const clientDescription = options.frontend
-    ? "You are the virtual frontend agent. You have no executor access: client-local shell, ordinary file reads/edits, images, computer control, client uploads, executor jobs, and subagents are unavailable."
+    ? "You are the virtual frontend agent. You have no executor access: client-local shell, ordinary file reads/edits, local image paths, computer control, client uploads, executor jobs, and subagents are unavailable."
     : workspace
       ? `You have an attached ${workspace.platform ?? "local"} client workspace (${workspace.root}). Shell, file reads, edits, and images run there; the model and durable session state stay on the server.${workspace.persistentShell ? " Its shell keeps its working directory and environment between calls." : ""}`
-      : "No client workspace is attached right now. Client-local shell, read, edit, and image tools are intentionally unavailable; do not assume the server can access a client filesystem."
+      : "No client workspace is attached right now. Client-local shell, read, edit, and image paths are unavailable; do not assume the server can access a client filesystem."
   const discordToolLines = options.discord
     ? `\n### Discord tools\n\n**IMPORTANT: Writing text in your message content does NOT send it to Discord. You must call \`discord_send\` to actually deliver a message.**\n\n- \`discord_send\`: reply with \`content\`; omit \`target\` for the latest active message, or use a shown target number or message-text prefix. Provide \`channel_id\` only for a proactive message outside an active Discord event.\n- \`discord_inbox\`, \`discord_backread\`, \`discord_search\`, \`discord_scan\`, \`discord_channels\`, \`discord_channel_note\`: use the server-side Discord inbox and history`
     : "\nDiscord tools are not currently available on this server. Do not promise a Discord reply unless the tool is present."
@@ -134,7 +139,7 @@ Examples:
 - Saying something then keeping going: write your reply in content and call a currently available tool in the same message.
 - Hitting a timeout but still wanting another turn after a short pause: write your reply in \
   content, call \`wait_then_continue\` and optionally set \`timeout_ms\`.
-- Inspecting an image: when \`image_tool\` is available, use the client workspace to save it then call \`image_tool\`
+- Inspecting an image: when \`image_tool\` is available, call it with a public HTTP(S) image URL or an available client image path
 - Saying something then waiting for a reply: write your reply in content, call \`wait\`.
 - Done for now: write your goodbye in content, call \`end_session\`.
 

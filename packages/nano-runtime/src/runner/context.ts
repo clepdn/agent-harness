@@ -30,7 +30,7 @@ export function createRuntimeContext(
   const options = {
     model,
     apiKey: usingFallback ? state.fallbackApiKey : state.primaryApiKey,
-    tools: getCompletionTools(toolCatalog),
+    tools: getCompletionTools(toolCatalog, runtimeKind),
     toolChoice: usingFallback ? state.fallbackToolChoice : state.primaryToolChoice,
     thinkingLevel: state.enableThinking ? state.thinkingEffort : undefined,
     includeContextImages: state.primaryVision,

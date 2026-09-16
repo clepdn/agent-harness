@@ -7,8 +7,17 @@ import {
   beginDiscordToolWait,
   endDiscordToolWait,
   stopDiscordTyping,
+  shouldSendDiscordTyping,
   __discordTypingLeaseTest,
 } from "./typing-lease"
+
+test("outbound typing is limited to Discord DMs", () => {
+  assert.equal(shouldSendDiscordTyping({ type: 1 }), true)
+  assert.equal(shouldSendDiscordTyping({ type: 3 }), true)
+  assert.equal(shouldSendDiscordTyping({ type: 0 }), false)
+  assert.equal(shouldSendDiscordTyping({ type: 11 }), false)
+  assert.equal(shouldSendDiscordTyping(null), false)
+})
 
 test("typing lease starts on model activity and refreshes", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })

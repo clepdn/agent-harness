@@ -14,7 +14,7 @@ import { isWebSearchAvailable } from "../web-search"
 import { createBoredomTimer } from "./boredom-timer"
 import { archiveContextMessages } from "./context-store"
 import { runLoop } from "./loop"
-import { createNiriToolCatalog } from "./tool-catalog"
+import { createNiriToolCatalog, reconcileImageToolDefinition } from "./tool-catalog"
 import type { RunnerStateInternal } from "./types"
 import {
   archiveDiscardedSession,
@@ -28,6 +28,7 @@ import {
 } from "./util"
 import { createRuntimeContext } from "./context"
 import { getCompletionTools } from "./tools"
+import { modelStateFor } from "./model-state"
 
 type EnqueueOptions = { onlyIfWaiting?: boolean; priority?: boolean }
 
@@ -68,6 +69,7 @@ function buildCurrentCatalog(): ToolDefinition[] {
     subagents: false,
     computer: false,
     webSearch: isWebSearchAvailable(),
+    vision: modelStateFor("frontend").primaryVision,
     frontend: true,
     agentChannel: true,
   })
@@ -79,13 +81,27 @@ function refreshToolCatalog(reason: "new-session" | "post-compaction"): void {
   state.toolCatalogFingerprint = catalogFingerprint(catalog)
   state.toolCatalogEpoch += 1
   if (reason === "post-compaction") {
-    state.context = state.context.fork({ tools: getCompletionTools(catalog), reason: "tools-change" })
+    state.context = state.context.fork({ tools: getCompletionTools(catalog, "frontend"), reason: "tools-change" })
     state.context.append({
       role: "user",
       content: `[tool environment epoch ${state.toolCatalogEpoch}] Frontend server tools refreshed after context rewrite. Executor and skill capabilities remain unavailable.`,
       timestamp: Date.now(),
     } as Message)
   }
+}
+
+function reconcileImageToolCatalog(): void {
+  const reconciled = reconcileImageToolDefinition(state.toolCatalog, buildCurrentCatalog())
+  if (!reconciled.changed) return
+  state.toolCatalog = reconciled.catalog
+  state.toolCatalogFingerprint = catalogFingerprint(state.toolCatalog)
+  state.toolCatalogEpoch += 1
+  state.context = state.context.fork({ tools: getCompletionTools(state.toolCatalog, "frontend"), reason: "tools-change" })
+  state.context.append({
+    role: "user",
+    content: `[tool environment epoch ${state.toolCatalogEpoch}] image_tool capability refreshed; it accepts public HTTP(S) image URLs.`,
+    timestamp: Date.now(),
+  } as Message)
 }
 
 export function isFrontendRunning(): boolean {
@@ -296,6 +312,7 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
     state.toolCatalogEpoch = saved.toolCatalogEpoch
     state.toolCatalogFingerprint = saved.toolCatalogFingerprint
     state.discordTargets = saved.discordTargets ?? []
+    reconcileImageToolCatalog()
     applyDiscordTargets(event)
     autoSeeDiscordEvent(event)
     state.context.append({
@@ -317,6 +334,7 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
       workspace: null,
       discord: areDiscordToolsAvailable(),
       frontend: true,
+      vision: modelStateFor("frontend").primaryVision,
       agentChannel: true,
     })
     state.toolCatalogEpoch = 0

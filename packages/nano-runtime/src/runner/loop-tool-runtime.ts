@@ -22,7 +22,6 @@ const FRONTEND_HARD_DENY = new Set([
   "job_status",
   "job_stdout",
   "job_cancel",
-  "image_tool",
   "computer",
   "subagent",
   "skill",

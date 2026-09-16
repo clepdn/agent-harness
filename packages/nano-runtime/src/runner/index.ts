@@ -10,7 +10,7 @@ import { emit } from "../stream"
 import { clearDiscordTypingScope } from "../discord/typing-lease"
 import { runLoop } from "./loop"
 import { setRunnerPresence } from "./presence"
-import { createNiriToolCatalog } from "./tool-catalog"
+import { createNiriToolCatalog, reconcileImageToolDefinition } from "./tool-catalog"
 import { archiveContextMessages } from "./context-store"
 import type { ManualCompactionRequest, RunnerStateInternal } from "./types"
 import { archiveDiscardedSession, BOREDOM_WAKE_MS, clearSession, loadRestSnapshot, loadSession, quarantineSession, saveRestSnapshot, saveSession } from "./util"
@@ -22,6 +22,7 @@ import { discordEventImageReferences } from "../discord/context-avatars"
 import { cancelRunningJobs } from "./jobs"
 import { createRuntimeContext } from "./context"
 import { getCompletionTools } from "./tools"
+import { modelStateFor } from "./model-state"
 
 let shutdownResolvers: Array<() => void> = []
 const PROCESS_STARTED_AT = new Date().toISOString()
@@ -39,6 +40,7 @@ function buildCurrentCatalog(): ToolDefinition[] {
     subagents: config.subagents.length > 0,
     computer: config.computer_use.enabled,
     webSearch: isWebSearchAvailable(),
+    vision: modelStateFor("main").primaryVision,
     agentChannel: config.frontend.enable,
   })
 }
@@ -49,13 +51,27 @@ function refreshToolCatalog(reason: "new-session" | "post-compaction"): void {
   state.toolCatalogFingerprint = catalogFingerprint(catalog)
   state.toolCatalogEpoch += 1
   if (reason === "post-compaction") {
-    state.context = state.context.fork({ tools: getCompletionTools(catalog), reason: "tools-change" })
+    state.context = state.context.fork({ tools: getCompletionTools(catalog, "main"), reason: "tools-change" })
     state.context.append({
       role: "user",
       content: `[tool environment epoch ${state.toolCatalogEpoch}] Tool catalog refreshed after context rewrite. Active workspace and client capabilities are now those captured at this epoch.`,
       timestamp: Date.now(),
     } as Message)
   }
+}
+
+function reconcileImageToolCatalog(): void {
+  const reconciled = reconcileImageToolDefinition(state.toolCatalog, buildCurrentCatalog())
+  if (!reconciled.changed) return
+  state.toolCatalog = reconciled.catalog
+  state.toolCatalogFingerprint = catalogFingerprint(state.toolCatalog)
+  state.toolCatalogEpoch += 1
+  state.context = state.context.fork({ tools: getCompletionTools(state.toolCatalog, "main"), reason: "tools-change" })
+  state.context.append({
+    role: "user",
+    content: `[tool environment epoch ${state.toolCatalogEpoch}] image_tool capability refreshed; when available it accepts public HTTP(S) image URLs.`,
+    timestamp: Date.now(),
+  } as Message)
 }
 
 /** Add/remove the bridge when a persisted main session crosses the feature flag. */
@@ -75,7 +91,7 @@ function reconcileAgentChannelCatalog(): void {
   }
   state.toolCatalogFingerprint = catalogFingerprint(state.toolCatalog)
   state.toolCatalogEpoch += 1
-  state.context = state.context.fork({ tools: getCompletionTools(state.toolCatalog), reason: "tools-change" })
+  state.context = state.context.fork({ tools: getCompletionTools(state.toolCatalog, "main"), reason: "tools-change" })
   state.context.append({
     role: "user",
     content: `[tool environment epoch ${state.toolCatalogEpoch}] The durable main/frontend agent channel is now ${config.frontend.enable ? "available" : "unavailable"}.`,
@@ -484,6 +500,7 @@ export async function wake(event: UserMessage): Promise<void> {
     state.discordTargets = saved.discordTargets ?? []
     applyDiscordTargets(event)
     reconcileAgentChannelCatalog()
+    reconcileImageToolCatalog()
     autoSeeDiscordEvent(event)
     state.context.append({
       role: "user",
@@ -501,6 +518,7 @@ export async function wake(event: UserMessage): Promise<void> {
       clientCapabilities: clientTools.getCapabilities(),
       workspace: clientTools.getWorkspace(),
       discord: areDiscordToolsAvailable(),
+      vision: modelStateFor("main").primaryVision,
       agentChannel: config.frontend.enable,
     })
     state.toolCatalogEpoch = 0

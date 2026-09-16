@@ -78,7 +78,7 @@ test("frontend bootstrap shares soul and memories without exposing skills or exe
     triggeredAt: new Date().toISOString(),
     content: "hello",
     raw: null,
-  }, null, { frontend: true, discord: true, agentChannel: true })
+  }, null, { frontend: true, discord: true, agentChannel: true, vision: true })
   const system = String(messages[0]?.content)
   assert.match(system, /shared test soul/)
   assert.match(system, /virtual frontend agent/)
@@ -86,5 +86,7 @@ test("frontend bootstrap shares soul and memories without exposing skills or exe
   assert.match(system, /agent_send/)
   assert.doesNotMatch(system, /zzz-frontend-hidden/)
   assert.doesNotMatch(system, /- `skill`:/)
+  assert.match(system, /`image_tool`: fetch an image from a public HTTP\(S\) URL/)
+  assert.match(system, /local image paths.*unavailable/)
   assert.match(system, /owner-DM Discord transcript and skill memories are excluded/)
 })

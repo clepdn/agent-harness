@@ -190,7 +190,7 @@ async function createStreamedCompletion(
   const modelState = modelStateFor(state.runtimeKind)
   const startedAt = Date.now()
   const resolvedToolChoice = modelState.enableThinking && toolChoice === "required" ? "auto" : toolChoice
-  const completionTools = getCompletionTools(tools)
+  const completionTools = getCompletionTools(tools, state.runtimeKind)
   const modelChanged = JSON.stringify(state.context.model) !== JSON.stringify(model)
   const toolsChanged = JSON.stringify(state.context.tools ?? []) !== JSON.stringify(completionTools)
   const settingsChanged =

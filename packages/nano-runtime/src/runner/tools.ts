@@ -157,11 +157,11 @@ export const TOOLS: Tool[] = [
   },
   {
     name: "image_tool",
-    description: `Attach an image (e.g. ${IMAGE_ROOT_HINT}/screenshot.png) so it is injected as a multimodal user message on the next model turn. Use this after creating/downloading an image with shell.`,
+    description: `Attach an image from a public HTTP(S) URL or a client file (e.g. ${IMAGE_ROOT_HINT}/screenshot.png) so it is injected as a multimodal user message on the next model turn.`,
     parameters: s({
       type: "object",
       properties: {
-        path: { type: "string", description: "Absolute path to an image file." },
+        path: { type: "string", description: "Public HTTP(S) image URL or absolute client path to an image file." },
         note: { type: "string", description: "Optional text instruction to accompany the image for the next turn." },
         timeout_ms: { type: "integer", description: "Read timeout in milliseconds. Defaults to 120000. Max 600000." },
       },
@@ -355,7 +355,8 @@ export const TOOLS: Tool[] = [
   },
 ]
 
-import { modelState } from "./model-state"
+import { modelStateFor } from "./model-state"
+import type { RuntimeKind } from "./types"
 
 // ── Tool filtering ────────────────────────────────────────────────────────────
 
@@ -367,9 +368,9 @@ export const ALL_TOOL_NAMES = TOOLS.map((t) => t.name)
  * - If enabled_tools is empty, all tools are enabled.
  * - blacklisted_tools always removes a tool regardless.
  */
-export function isToolEnabled(name: string): boolean {
+export function isToolEnabled(name: string, runtimeKind: RuntimeKind = "main"): boolean {
   const { enabled_tools, blacklisted_tools } = config.tools
-  if (name === "image_tool" && !modelState.primaryVision) return false
+  if (name === "image_tool" && !modelStateFor(runtimeKind).primaryVision) return false
   if (name === "computer" && !config.computer_use.enabled) return false
   const enabled = enabled_tools.length === 0 || enabled_tools.includes(name)
   return enabled && !blacklisted_tools.includes(name)
@@ -383,8 +384,8 @@ function withImageRoot(tool: Tool): Tool {
 }
 
 /** Filtered tool list for the main agent (after [tools] config). */
-function getActiveTools(): Tool[] {
-  return TOOLS.filter((t) => isToolEnabled(t.name)).map(withImageRoot)
+function getActiveTools(runtimeKind: RuntimeKind = "main"): Tool[] {
+  return TOOLS.filter((t) => isToolEnabled(t.name, runtimeKind)).map(withImageRoot)
 }
 
 /**
@@ -435,8 +436,8 @@ const DYNAMICALLY_GATED_TOOLS = new Set([
   "set_status",
 ])
 
-export function getCompletionTools(toolDefinitions?: ToolDefinition[]): Tool[] {
-  if (!toolDefinitions) return getActiveTools()
+export function getCompletionTools(toolDefinitions?: ToolDefinition[], runtimeKind: RuntimeKind = "main"): Tool[] {
+  if (!toolDefinitions) return getActiveTools(runtimeKind)
 
   const tools = toolDefinitions.map((tool) => ({
     name: tool.function.name,
@@ -444,8 +445,8 @@ export function getCompletionTools(toolDefinitions?: ToolDefinition[]): Tool[] {
     parameters: tool.function.parameters as TSchema,
   }))
   const names = new Set(tools.map((tool) => tool.name))
-  for (const tool of getActiveTools()) {
+  for (const tool of getActiveTools(runtimeKind)) {
     if (!names.has(tool.name) && !DYNAMICALLY_GATED_TOOLS.has(tool.name)) tools.push(tool)
   }
-  return tools.filter((tool) => isToolEnabled(tool.name))
+  return tools.filter((tool) => isToolEnabled(tool.name, runtimeKind))
 }
