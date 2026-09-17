@@ -7,17 +7,8 @@ import {
   beginDiscordToolWait,
   endDiscordToolWait,
   stopDiscordTyping,
-  shouldSendDiscordTyping,
   __discordTypingLeaseTest,
 } from "./typing-lease"
-
-test("outbound typing is limited to Discord DMs", () => {
-  assert.equal(shouldSendDiscordTyping({ type: 1 }), true)
-  assert.equal(shouldSendDiscordTyping({ type: 3 }), true)
-  assert.equal(shouldSendDiscordTyping({ type: 0 }), false)
-  assert.equal(shouldSendDiscordTyping({ type: 11 }), false)
-  assert.equal(shouldSendDiscordTyping(null), false)
-})
 
 test("typing lease starts on model activity and refreshes", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })
@@ -25,7 +16,7 @@ test("typing lease starts on model activity and refreshes", (t) => {
   configureDiscordTyping((channelId) => { sends.push(channelId) })
   try {
     dispatchDiscordTyping("turn-1", "channel-1")
-    t.mock.timers.tick(__discordTypingLeaseTest.fallbackMs - 1)
+    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs * 2)
     assert.deepEqual(sends, [])
     notifyDiscordModelActivity("turn-1")
     assert.deepEqual(sends, ["channel-1"])
@@ -44,7 +35,8 @@ test("stale turn cannot start or stop a superseding lease", (t) => {
     dispatchDiscordTyping("old", "old-channel")
     dispatchDiscordTyping("new", "new-channel")
     notifyDiscordModelActivity("old")
-    t.mock.timers.tick(__discordTypingLeaseTest.fallbackMs)
+    assert.equal(sends, 0)
+    notifyDiscordModelActivity("new")
     assert.equal(sends, 1)
     stopDiscordTyping("old")
     t.mock.timers.tick(__discordTypingLeaseTest.refreshMs)
@@ -74,15 +66,16 @@ test("long tool wait pauses refresh and resumes after tool", (t) => {
   }
 })
 
-test("stop synchronously cancels fallback and refresh timers", (t) => {
+test("stop synchronously cancels refresh timers", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })
   let sends = 0
   configureDiscordTyping(() => { sends++ })
   try {
     dispatchDiscordTyping("turn-3", "channel-3")
+    notifyDiscordModelActivity("turn-3")
     stopDiscordTyping("turn-3")
-    t.mock.timers.tick(__discordTypingLeaseTest.fallbackMs + __discordTypingLeaseTest.refreshMs)
-    assert.equal(sends, 0)
+    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs * 2)
+    assert.equal(sends, 1)
   } finally {
     __discordTypingLeaseTest.reset()
   }

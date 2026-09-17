@@ -92,7 +92,7 @@ test("new Discord event stops typing for the superseded turn", (t) => {
     assert.equal(__loopToolsTest.maybeInterruptAfterTool(1, state, makeTypingSupersessionHooks(state, injected), [], 0), true)
     assert.equal(injected[0]?.source, "discord")
     assert.equal(__loopTest.pendingDiscordChannel(state.context.items, state.context.items.length), "new-channel")
-    t.mock.timers.tick(__discordTypingLeaseTest.fallbackMs + __discordTypingLeaseTest.refreshMs)
+    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs * 2)
     assert.deepEqual(typingChannels, ["old-channel"])
   } finally {
     __discordTypingLeaseTest.reset()
@@ -120,7 +120,7 @@ test("new non-Discord event stops typing for the superseded Discord turn", (t) =
     assert.equal(__loopToolsTest.maybeInterruptAfterTool(1, state, makeTypingSupersessionHooks(state, injected), [], 0), true)
     assert.equal(injected[0]?.source, "chat")
     assert.equal(__loopTest.pendingDiscordChannel(state.context.items, state.context.items.length), undefined)
-    t.mock.timers.tick(__discordTypingLeaseTest.fallbackMs + __discordTypingLeaseTest.refreshMs)
+    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs * 2)
     assert.deepEqual(typingChannels, ["old-channel"])
   } finally {
     __discordTypingLeaseTest.reset()
@@ -407,12 +407,11 @@ test("waitForNextEvent bails out on shutdown instead of looping the idle timer",
   assert.deepEqual(calls, ["timeout"])
 })
 
-test("waitForNextEvent clears a manual compaction request after running the idle pass", async () => {
+test("waitForNextEvent clears a manual compaction request that interrupts the idle wait", async () => {
   const savedIdle = modelState.idleCompactionMs
   modelState.idleCompactionMs = 60_000
 
   const state = makeState()
-  state.compactionRequest = { forceSummaryModel: true, snapcompact: true }
   // Below any trigger — idle compaction must still attempt regardless.
   state.contextSize = 0
 
@@ -422,19 +421,15 @@ test("waitForNextEvent clears a manual compaction request after running the idle
     clientTools: testClientTools,
     refreshToolCatalog: () => {},
     waitForEvent: async () => null,
-    // First "timeout" (interrupt) returns null with the flag set; the loop
-    // clears the flag and runs the idle pass, then loops. On the second
-    // iteration we shut down so the loop exits. This proves the pass ran and
-    // cleared the flag before exit.
+    // First "timeout" simulates /compact interrupting an already-registered
+    // wait. The loop consumes it before subscribing again; the second call
+    // proves the request was cleared before exit.
     waitForEventWithTimeout: async () => {
       timeouts += 1
       if (timeouts === 1) {
-        assert.deepEqual(
-          state.compactionRequest,
-          { forceSummaryModel: true, snapcompact: true },
-          "request should still be set before the first pass",
-        )
+        state.compactionRequest = { forceSummaryModel: true, snapcompact: true }
       } else {
+        assert.equal(state.compactionRequest, undefined)
         shuttingDown = true
       }
       return null
@@ -454,7 +449,7 @@ test("waitForNextEvent clears a manual compaction request after running the idle
   assert.equal(state.compactionRequest, undefined)
 })
 
-test("manual compaction interrupts a plain wait when idle compaction is disabled", async () => {
+test("manual compaction queued during a tool turn runs before the following plain wait", async () => {
   const savedIdle = modelState.idleCompactionMs
   modelState.idleCompactionMs = 0
   const state = makeState()
@@ -466,7 +461,10 @@ test("manual compaction interrupts a plain wait when idle compaction is disabled
     await __loopTest.waitForNextEvent(9, state, {
       clientTools: testClientTools,
       refreshToolCatalog: () => calls.push("refresh"),
-      waitForEvent: async () => { calls.push("wait"); return null },
+      waitForEvent: async () => {
+        calls.push("wait")
+        throw new Error("queued compaction must run before subscribing to the idle wait")
+      },
       waitForEventWithTimeout: async () => { throw new Error("unexpected timeout wait") },
       injectIncomingEvent: () => {},
       flushDeferredEvents: () => {},
@@ -484,7 +482,7 @@ test("manual compaction interrupts a plain wait when idle compaction is disabled
     modelState.idleCompactionMs = savedIdle
   }
 
-  assert.deepEqual(calls, ["wait", "compact", "refresh"])
+  assert.deepEqual(calls, ["compact", "refresh"])
   assert.equal(state.compactionRequest, undefined)
 })
 

@@ -4,7 +4,7 @@ import type { DiscordMessageTarget } from "../types"
 import { initDb } from "../db"
 import { findMessageByContentPrefix } from "./db"
 import { ingestDiscordEvent, resolveDiscordDeliveryTarget } from "./state"
-import { selectDiscordTarget } from "./targets"
+import { DISCORD_TARGET_CAPACITY, registerDiscordTargets, rewriteDiscordTargetLabels, selectDiscordTarget } from "./targets"
 
 const targets: DiscordMessageTarget[] = [
   { position: 1, friendlyId: "alder-bell-book", channelId: "channel-a", messageId: "message-a", itemId: "message-a", content: "first thought" },
@@ -22,6 +22,57 @@ test("Discord targets resolve normalized case-insensitive content prefixes", () 
   assert.equal(selectDiscordTarget(targets, "OK THAT'S GOOD. IMPLEMENT")?.messageId, "message-b")
   assert.equal(selectDiscordTarget(targets, "bamboo-bell-basket")?.messageId, "message-b")
   assert.equal(selectDiscordTarget(targets, "missing"), null)
+})
+
+test("Discord target slots advance across separate single-message events", () => {
+  const firstIncoming: DiscordMessageTarget[] = [
+    { position: 1, channelId: "dm-a", messageId: "message-1", content: "first" },
+  ]
+  const first = registerDiscordTargets([], firstIncoming)
+  assert.equal(first.incomingTargets[0]?.position, 1)
+  assert.equal(rewriteDiscordTargetLabels("target: 1", firstIncoming, first.incomingTargets), "target: 1")
+
+  const secondIncoming: DiscordMessageTarget[] = [
+    { position: 1, channelId: "dm-a", messageId: "message-2", content: "second" },
+  ]
+  const second = registerDiscordTargets(first.targets, secondIncoming)
+  assert.equal(second.incomingTargets[0]?.position, 2)
+  assert.equal(rewriteDiscordTargetLabels("target: 1", secondIncoming, second.incomingTargets), "target: 2")
+  assert.deepEqual(second.targets.map((target) => target.messageId), ["message-1", "message-2"])
+})
+
+test("Discord target registry wraps after sixteen slots and replaces the old occupant", () => {
+  let registry: DiscordMessageTarget[] = []
+  for (let index = 1; index <= DISCORD_TARGET_CAPACITY + 1; index += 1) {
+    const registered = registerDiscordTargets(registry, [{
+      position: 1,
+      channelId: "dm-a",
+      messageId: `message-${index}`,
+      content: `message ${index}`,
+    }])
+    registry = registered.targets
+  }
+
+  assert.equal(registry.length, DISCORD_TARGET_CAPACITY)
+  assert.equal(registry.some((target) => target.messageId === "message-1"), false)
+  assert.equal(selectDiscordTarget(registry, 1)?.messageId, "message-17")
+  assert.equal(selectDiscordTarget(registry, 2)?.messageId, "message-2")
+})
+
+test("Discord target registry preserves the slot for a re-surfaced message", () => {
+  const first = registerDiscordTargets([], [
+    { position: 1, channelId: "dm-a", messageId: "message-1", content: "first" },
+    { position: 2, channelId: "dm-a", messageId: "message-2", content: "second" },
+  ])
+  const repeated = registerDiscordTargets(first.targets, [
+    { position: 1, channelId: "dm-a", messageId: "message-1", content: "first, updated" },
+  ])
+  const next = registerDiscordTargets(repeated.targets, [
+    { position: 1, channelId: "dm-a", messageId: "message-3", content: "third" },
+  ])
+
+  assert.equal(repeated.incomingTargets[0]?.position, 1)
+  assert.equal(next.incomingTargets[0]?.position, 3)
 })
 
 test("stored Discord messages resolve by a case-insensitive content prefix", async () => {
@@ -53,7 +104,7 @@ test("stored Discord messages resolve by a case-insensitive content prefix", asy
     target: "ok that",
     replyMode: "explicit",
   })
-  assert.equal(explicit.referenceMessageId, "1549325035091791934")
+  assert.equal(explicit.referenceMessageId, null)
 })
 
 test("delivery resolves hidden active targets without model-facing snowflakes", async () => {
@@ -71,7 +122,7 @@ test("delivery resolves hidden active targets without model-facing snowflakes", 
     target: "ok that",
     replyMode: "explicit",
   })
-  assert.equal(explicit.referenceMessageId, "message-b")
+  assert.equal(explicit.referenceMessageId, null)
 
   await assert.rejects(
     resolveDiscordDeliveryTarget({ turnTargets: targets, target: 4 }),
@@ -167,7 +218,7 @@ test("auto replies stay plain for the next message and after the first reply in 
   assert.equal(afterNewMessage.referenceMessageId, sourceMessageId)
 })
 
-test("explicit replies keep the first reference and suppress repeats in the same response group", async () => {
+test("explicit replies use the same reference eligibility policy as auto replies", async () => {
   initDb(":memory:")
   const channelId = "1509435403143479398"
   const sourceMessageId = "1549325035091793001"
@@ -202,10 +253,23 @@ test("explicit replies keep the first reference and suppress repeats in the same
     target: 1,
     replyMode: "explicit",
   })
-  assert.equal(first.referenceMessageId, sourceMessageId)
+  assert.equal(first.referenceMessageId, null)
 
   ingest({
     id: "1549325035091793002",
+    content: "aired",
+    author: { id: "200", username: "callie" },
+  })
+
+  const eligible = await resolveDiscordDeliveryTarget({
+    turnTargets: [sourceTarget],
+    target: 1,
+    replyMode: "explicit",
+  })
+  assert.equal(eligible.referenceMessageId, sourceMessageId)
+
+  ingest({
+    id: "1549325035091793003",
     content: "part one",
     message_reference: { message_id: sourceMessageId, channel_id: channelId },
     author: { id: "300", username: "nano", bot: true },
@@ -219,7 +283,7 @@ test("explicit replies keep the first reference and suppress repeats in the same
   assert.equal(second.referenceMessageId, null)
 
   ingest({
-    id: "1549325035091793003",
+    id: "1549325035091793004",
     content: "part two",
     author: { id: "300", username: "nano", bot: true },
   }, true)
@@ -232,7 +296,7 @@ test("explicit replies keep the first reference and suppress repeats in the same
   assert.equal(third.referenceMessageId, null)
 
   ingest({
-    id: "1549325035091793004",
+    id: "1549325035091793005",
     content: "go on",
     author: { id: "200", username: "callie" },
   })

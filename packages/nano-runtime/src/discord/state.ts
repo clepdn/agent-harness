@@ -636,14 +636,7 @@ function shouldKeepAutoReplyPlain(channelId: string, sourceMessageId: string): b
   return responseGroupAlreadyReferencesSource(recent, sourceMessageId)
 }
 
-function shouldSuppressRepeatedExplicitReference(channelId: string, sourceMessageId: string): boolean {
-  return responseGroupAlreadyReferencesSource(
-    queryChannelMessages(channelId, "", AUTO_REPLY_GROUP_SCAN_LIMIT),
-    sourceMessageId,
-  )
-}
-
-function shouldUseExplicitReference(channelId: string, sourceMessageId: string): boolean {
+function shouldUseReplyReference(channelId: string, sourceMessageId: string): boolean {
   const source = getMessageForReference(sourceMessageId)
 
   if (!source?.message_id || !source.channel_id) return false
@@ -701,7 +694,7 @@ export async function resolveDiscordDeliveryTarget(params: DeliveryTargetParams)
   const latest = requestedChannelId || referenceRoute ? null : selectDiscordTarget(turnTargets)
 
   if (selectorSupplied && !selected && typeof params.target === "number") {
-    throw new Error(`target ${String(params.target)} is not present in the active Discord event`)
+    throw new Error(`target ${String(params.target)} is not present in the recent Discord target registry`)
   }
 
   let channelId = requestedChannelId
@@ -737,13 +730,9 @@ export async function resolveDiscordDeliveryTarget(params: DeliveryTargetParams)
   const referenceMessageId = requestedReferenceId
     ? replyMode === "plain"
       ? null
-      : replyMode === "explicit"
-        ? shouldSuppressRepeatedExplicitReference(channelId, requestedReferenceId)
-          ? null
-          : requestedReferenceId
-        : shouldUseExplicitReference(channelId, requestedReferenceId)
-          ? requestedReferenceId
-          : null
+      : shouldUseReplyReference(channelId, requestedReferenceId)
+        ? requestedReferenceId
+        : null
     : null
 
   return {

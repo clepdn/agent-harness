@@ -4,6 +4,7 @@ import { buildBootstrap } from "../bootstrap"
 import { config } from "../config"
 import { areDiscordToolsAvailable } from "../discord/availability"
 import { discordEventImageReferences } from "../discord/context-avatars"
+import { registerDiscordTargets, rewriteDiscordTargetLabels } from "../discord/targets"
 import { markDiscordItem } from "../discord/state"
 import { clearDiscordTypingScope } from "../discord/typing-lease"
 import { endConversation, logMessage, startConversation } from "../db"
@@ -260,8 +261,12 @@ function autoSeeDiscordEvent(event: UserMessage): void {
 }
 
 function applyDiscordTargets(event: UserMessage): void {
-  if (event.source === "discord") state.discordTargets = event.discordTargets ?? []
-  else if (event.source !== "job") state.discordTargets = []
+  if (event.source !== "discord") return
+  const incoming = event.discordTargets ?? []
+  const registered = registerDiscordTargets(state.discordTargets ?? [], incoming)
+  event.content = rewriteDiscordTargetLabels(event.content, incoming, registered.incomingTargets)
+  event.discordTargets = registered.incomingTargets
+  state.discordTargets = registered.targets
 }
 
 function injectIncomingEvent(convId: number, event: UserMessage): void {

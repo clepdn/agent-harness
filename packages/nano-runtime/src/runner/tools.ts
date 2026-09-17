@@ -222,15 +222,15 @@ export const TOOLS: Tool[] = [
   {
     name: "discord_send",
     description:
-      "Send a Discord message. Omit target to answer the latest active message; use its shown target number, plant-object-object id, or a prefix of its text to select a specific message. A shown plant-object-object id is also valid as channel_id and reference_message.",
+      "Send a Discord message. Omit target to answer the latest surfaced message; use a shown rolling target number, plant-object-object id, or a prefix of its text to select a specific message. The 16 most recently surfaced messages remain targetable. A shown plant-object-object id is also valid as channel_id and reference_message.",
     parameters: s({
       type: "object",
       properties: {
         channel_id: { type: "string", description: "Target Discord channel id or a plant-object-object id shown on a message in that channel." },
         content: { type: "string", description: "Message content to send." },
         target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }], description: "Shown target number, plant-object-object id, or message-text prefix." },
-        reply_mode: { type: "string", enum: ["auto", "plain", "explicit"], description: "Reply behavior policy (default auto)." },
-        reference_message: { type: "string", description: "Optional message reference: a Discord message id, a plant-object-object id shown on a message, a message-text prefix, or an author name. A plant-object-object id supplies its channel automatically, so channel_id may be omitted. Use reply_mode=explicit to force a Discord reply." },
+        reply_mode: { type: "string", enum: ["auto", "plain", "explicit"], description: "Reply behavior policy (default auto). Auto and explicit share the same reference eligibility checks; plain never creates a reply reference." },
+        reference_message: { type: "string", description: "Optional message reference: a Discord message id, a plant-object-object id shown on a message, a message-text prefix, or an author name. A plant-object-object id supplies its channel automatically, so channel_id may be omitted." },
       },
       required: ["content"],
     }),
@@ -246,8 +246,8 @@ export const TOOLS: Tool[] = [
         file_path: { type: "string", description: "Absolute or relative path to the file on your filesystem." },
         content: { type: "string", description: "Optional text caption to send with the file." },
         target: { oneOf: [{ type: "integer", minimum: 1 }, { type: "string", minLength: 1 }], description: "Shown target number, plant-object-object id, or message-text prefix." },
-        reply_mode: { type: "string", enum: ["auto", "plain", "explicit"], description: "Reply behavior policy (default auto)." },
-        reference_message: { type: "string", description: "Optional message reference: a Discord message id, a plant-object-object id shown on a message, a message-text prefix, or an author name. A plant-object-object id supplies its channel automatically, so channel_id may be omitted. Use reply_mode=explicit to force a Discord reply." },
+        reply_mode: { type: "string", enum: ["auto", "plain", "explicit"], description: "Reply behavior policy (default auto). Auto and explicit share the same reference eligibility checks; plain never creates a reply reference." },
+        reference_message: { type: "string", description: "Optional message reference: a Discord message id, a plant-object-object id shown on a message, a message-text prefix, or an author name. A plant-object-object id supplies its channel automatically, so channel_id may be omitted." },
       },
       required: ["file_path"],
     }),

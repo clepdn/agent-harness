@@ -6,31 +6,21 @@ export type DiscordTypingTimer = ReturnType<typeof setTimeout>
 export type DiscordTypingLease = {
   turnId: string
   channelId: string
-  fallbackTimer: DiscordTypingTimer | null
   refreshTimer: DiscordTypingTimer | null
   longToolTimer: DiscordTypingTimer | null
   started: boolean
   paused: boolean
 }
 
-const FALLBACK_MS = 750
 const REFRESH_MS = 8_000
 const LONG_TOOL_WAIT_MS = 20_000
-
-/** Temporary policy: expose outbound typing only in DM and group-DM channels. */
-export function shouldSendDiscordTyping(channel: { type?: unknown } | null | undefined): boolean {
-  // Discord channel types: DM = 1, GroupDM = 3.
-  return channel?.type === 1 || channel?.type === 3
-}
 
 let sender: DiscordTypingSender | null = null
 let activeLease: DiscordTypingLease | null = null
 
 function clearLeaseTimers(lease: DiscordTypingLease): void {
-  clearTimeout(lease.fallbackTimer as ReturnType<typeof setTimeout>)
   clearInterval(lease.refreshTimer as unknown as ReturnType<typeof setInterval>)
   clearTimeout(lease.longToolTimer as ReturnType<typeof setTimeout>)
-  lease.fallbackTimer = null
   lease.refreshTimer = null
   lease.longToolTimer = null
 }
@@ -72,18 +62,12 @@ export function dispatchDiscordTyping(turnId: string, channelId: string): void {
   const lease: DiscordTypingLease = {
     turnId: normalizedTurnId,
     channelId: normalizedChannelId,
-    fallbackTimer: null,
     refreshTimer: null,
     longToolTimer: null,
     started: false,
     paused: false,
   }
   activeLease = lease
-  lease.fallbackTimer = setTimeout(() => {
-    lease.fallbackTimer = null
-    startLease(lease)
-  }, FALLBACK_MS)
-  lease.fallbackTimer.unref?.()
 }
 
 /** Marks first model activity, starting the matching lease synchronously. */
@@ -137,7 +121,6 @@ export function endDiscordToolWait(turnId: string): void {
 }
 
 export const __discordTypingLeaseTest = {
-  fallbackMs: FALLBACK_MS,
   refreshMs: REFRESH_MS,
   longToolWaitMs: LONG_TOOL_WAIT_MS,
   reset(): void {

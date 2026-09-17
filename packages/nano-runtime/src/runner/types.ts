@@ -57,7 +57,7 @@ export interface LoopState {
   /** Stable outbound Discord response scope across tool-producing iterations. */
   discordTypingTurnId?: string
   discordTypingChannelId?: string
-  /** Exact targets for the active Discord event; never serialized into model text. */
+  /** Rolling registry of the 16 most recently surfaced Discord message targets. */
   discordTargets?: DiscordMessageTarget[]
 }
 

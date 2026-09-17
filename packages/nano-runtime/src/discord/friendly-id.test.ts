@@ -29,7 +29,7 @@ test("Discord friendly ids are unique plant-object-object handles with distinct 
   }
 })
 
-test("a friendly id resolves as both a channel id and a message reference", async () => {
+test("a friendly id resolves a channel while reply eligibility still applies", async () => {
   initDb(":memory:")
   const id = getOrCreateDiscordFriendlyId("message-a", "channel-a")
 
@@ -45,5 +45,5 @@ test("a friendly id resolves as both a channel id and a message reference", asyn
     replyMode: "explicit",
   })
   assert.equal(delivery.channelId, "channel-a")
-  assert.equal(delivery.referenceMessageId, "message-a")
+  assert.equal(delivery.referenceMessageId, null)
 })

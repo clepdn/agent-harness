@@ -19,6 +19,7 @@ import type { ToolDefinition } from "@nano/harness-core"
 import { fromBoredom } from "../triggers/boredom"
 import { createBoredomTimer } from "./boredom-timer"
 import { discordEventImageReferences } from "../discord/context-avatars"
+import { registerDiscordTargets, rewriteDiscordTargetLabels } from "../discord/targets"
 import { cancelRunningJobs } from "./jobs"
 import { createRuntimeContext } from "./context"
 import { getCompletionTools } from "./tools"
@@ -404,8 +405,12 @@ function formatIncomingEvent(event: UserMessage): string {
 }
 
 function applyDiscordTargets(event: UserMessage): void {
-  if (event.source === "discord") state.discordTargets = event.discordTargets ?? []
-  else if (event.source !== "job") state.discordTargets = []
+  if (event.source !== "discord") return
+  const incoming = event.discordTargets ?? []
+  const registered = registerDiscordTargets(state.discordTargets ?? [], incoming)
+  event.content = rewriteDiscordTargetLabels(event.content, incoming, registered.incomingTargets)
+  event.discordTargets = registered.incomingTargets
+  state.discordTargets = registered.targets
 }
 
 function autoSeeDiscordEvent(event: UserMessage): void {

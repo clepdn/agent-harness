@@ -62,6 +62,26 @@ async function waitForNextEvent(
   // event — or a rest/shutdown request — breaks out immediately. Even when the
   // timer is disabled, an interrupted plain wait can carry a manual /compact.
   while (true) {
+    if (state.restRequested || hooks.shouldShutdown()) return
+
+    // A /compact can be queued while a model or tool call is still in flight.
+    // In that case interruptEventWaiters() has nothing to interrupt, so consume
+    // the request before subscribing here. Otherwise a following `wait` tool
+    // can miss the wakeup and leave the runner asleep with compaction pending.
+    if (state.compactionRequest) {
+      const request = state.compactionRequest
+      state.compactionRequest = undefined
+      const compacted = await compact(state, request)
+      if (compacted === "rewritten") {
+        hooks.refreshToolCatalog("post-compaction")
+        console.log("[runner] manual /compact rewrote context at the idle boundary; reactivating immediately")
+        return
+      }
+      if (compacted === "suppressed") console.log("[runner] idle compaction suppressed after no tool result reduction")
+      console.log("[runner] manual /compact requested but nothing to compact (summary not smaller)")
+      continue
+    }
+
     // Resolve each time so inherited main-model swaps take effect in both lanes.
     const idleCompactionMs = modelStateFor(state.runtimeKind).idleCompactionMs
     const incoming = idleCompactionMs > 0
@@ -76,24 +96,21 @@ async function waitForNextEvent(
     // the loop can handle it.
     if (state.restRequested || hooks.shouldShutdown()) return
 
-    // A manual /compact request interrupts either kind of wait; consume the
-    // full request so its provider/archive choices apply to exactly one burn.
-    const request = state.compactionRequest
-    if (request) state.compactionRequest = undefined
+    // A manual request that interrupted this wait is consumed at the top of
+    // the next iteration. Keeping that path in one place also closes the race
+    // where the request was queued just before this wait was registered.
+    if (state.compactionRequest) continue
 
     // A null from a plain wait without a request is a harmless spurious wake.
-    if (!request && idleCompactionMs <= 0) continue
+    if (idleCompactionMs <= 0) continue
 
-    const compacted = await compact(state, request)
+    const compacted = await compact(state)
     if (compacted === "rewritten") {
       hooks.refreshToolCatalog("post-compaction")
-      console.log(`[runner] idle compaction rewrote context while waiting for the next event${request ? " (manual /compact)" : ""}`)
+      console.log("[runner] idle compaction rewrote context while waiting for the next event")
       return
     }
     if (compacted === "suppressed") console.log("[runner] idle compaction suppressed after no tool result reduction")
-    if (request) {
-      console.log("[runner] manual /compact requested but nothing to compact (summary not smaller)")
-    }
   }
 }
 
