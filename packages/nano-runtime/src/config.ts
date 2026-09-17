@@ -220,11 +220,14 @@ const prometheusT = table(merged.prometheus)
 const webSearchT = table(merged.web_search)
 const frontendT = table(merged.frontend)
 
-const frontendModel = (() => {
-  if (!("model" in frontendT)) return undefined
-  const value = frontendT.model
+const frontendPreset = (() => {
+  if ("model" in frontendT) {
+    throw new Error("[frontend].model was renamed to [frontend].preset")
+  }
+  if (!("preset" in frontendT)) return undefined
+  const value = frontendT.preset
   if (typeof value !== "string" || !value.trim()) {
-    throw new Error("[frontend].model must be a non-empty model preset or model id when defined")
+    throw new Error("[frontend].preset must be a non-empty model preset name when defined")
   }
   return value.trim()
 })()
@@ -279,6 +282,7 @@ const modelConfig = {
   base_url: str(modelT.base_url, "").trim(),
   api_key: str(modelT.api_key, "").trim(),
   tool_choice: pickEnum(modelT.tool_choice, toolChoices, "required"),
+  fast: bool(modelT.fast, false),
   enable_thinking: bool(modelT.enable_thinking, true),
   thinking_effort: pickEnum(modelT.thinking_effort, thinkingEfforts, "low"),
   vision: bool(modelT.vision, false),
@@ -334,7 +338,7 @@ export const config = {
     enable: bool(frontendT.enable, false),
     // Undefined means live inheritance from the main runtime model. An empty
     // string is deliberately invalid rather than acting as a sentinel.
-    model: frontendModel,
+    preset: frontendPreset,
   },
   container: {
     name: str(containerT.name, "").trim(),
@@ -495,10 +499,10 @@ const MIN_SECRET_LENGTH = 8
 type SecretEntry = { label: string; value: string }
 
 function collectSecrets(): SecretEntry[] {
-  const frontendPreset = config.frontend.model ? getModelPreset(config.frontend.model) : null
+  const frontendModelPreset = config.frontend.preset ? getModelPreset(config.frontend.preset) : null
   const entries: SecretEntry[] = [
     { label: "model.api_key",      value: config.model.api_key },
-    { label: "frontend.model.api_key", value: typeof frontendPreset?.api_key === "string" ? frontendPreset.api_key : "" },
+    { label: "frontend.preset.api_key", value: typeof frontendModelPreset?.api_key === "string" ? frontendModelPreset.api_key : "" },
     { label: "fallback.api_key",   value: config.fallback.api_key },
     { label: "summary.api_key",    value: config.summary.api_key },
     { label: "embeddings.api_key", value: config.embeddings.api_key },

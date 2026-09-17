@@ -12,6 +12,7 @@
 
 import type { Model } from "../llm"
 import { config, getModelPreset, type ToolChoice, type ThinkingEffort, type CompactionStrategy } from "../config"
+import { setCodexFastMode } from "../codex-fast-mode"
 import type { RuntimeKind } from "./types"
 import {
   buildModel,
@@ -93,11 +94,12 @@ export const modelState: RuntimeModelConfig = {
 }
 
 function frontendModelConfig(): RuntimeModelConfig | null {
-  const configured = config.frontend.model
+  const configured = config.frontend.preset
   if (configured === undefined) return null
 
   const preset = getModelPreset(configured)
-  const source = preset ?? { model: configured }
+  if (!preset) throw new Error(`model preset ${JSON.stringify(configured)} not found in [models]`)
+  const source = preset
   const provider = typeof source.provider === "string" ? source.provider.trim() : config.model.provider
   const modelId = typeof source.model === "string" ? source.model.trim() : ""
   const baseUrl = typeof source.base_url === "string" ? source.base_url.trim() : config.model.base_url
@@ -117,7 +119,7 @@ function frontendModelConfig(): RuntimeModelConfig | null {
     Object.keys(headers).length ? headers : undefined,
     contextWindow,
   )
-  if (!primaryModel) throw new Error(`[frontend].model ${JSON.stringify(configured)} could not be resolved`)
+  if (!primaryModel) throw new Error(`[frontend].preset ${JSON.stringify(configured)} could not be resolved`)
 
   const toolChoice: ToolChoice =
     typeof source.tool_choice === "string" && ["required", "auto", "none"].includes(source.tool_choice)
@@ -160,9 +162,9 @@ function frontendModelConfig(): RuntimeModelConfig | null {
 
 let fixedFrontendModelState: RuntimeModelConfig | null | undefined
 
-/** Resolve the model state for a virtual runner. Undefined frontend.model is live inheritance. */
+/** Resolve the model state for a virtual runner. Undefined frontend.preset is live inheritance. */
 export function modelStateFor(kind: RuntimeKind | undefined): RuntimeModelConfig {
-  if (kind !== "frontend" || config.frontend.model === undefined) return modelState
+  if (kind !== "frontend" || config.frontend.preset === undefined) return modelState
   if (fixedFrontendModelState === undefined) fixedFrontendModelState = frontendModelConfig()
   return fixedFrontendModelState ?? modelState
 }
@@ -176,6 +178,7 @@ export type SwapDecision =
       model: Model
       apiKey: string | undefined
       toolChoice: ToolChoice
+      fast: boolean
       enableThinking: boolean
       thinkingEffort: ThinkingEffort
       vision: boolean
@@ -271,6 +274,8 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
   const enableThinking =
     typeof preset.enable_thinking === "boolean" ? preset.enable_thinking : modelState.enableThinking
 
+  const fast = typeof preset.fast === "boolean" ? preset.fast : false
+
   const thinkingEffort: ThinkingEffort =
     typeof preset.thinking_effort === "string" &&
     ["minimal", "low", "medium", "high", "xhigh"].includes(preset.thinking_effort as string)
@@ -323,6 +328,7 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
     model,
     apiKey: apiKey || undefined,
     toolChoice,
+    fast,
     enableThinking,
     thinkingEffort,
     vision,
@@ -343,6 +349,7 @@ export function applyModelSwap(decision: Extract<SwapDecision, { action: "swap" 
   modelState.primaryModel = decision.model
   modelState.primaryApiKey = decision.apiKey
   modelState.primaryToolChoice = decision.toolChoice
+  setCodexFastMode(decision.fast)
   modelState.primaryVision = decision.vision
   modelState.primaryNudgeOnNoTool = decision.nudgeOnNoTool
   modelState.idleCompactionMs = decision.idleCompactionMs

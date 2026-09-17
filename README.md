@@ -40,7 +40,8 @@ The configured Discord owner can use `/fast` to toggle priority service for
 Codex models, or `/fast enabled:true` and `/fast enabled:false` to set it
 explicitly. `/model info` shows the current setting. Changes apply to subsequent
 Codex requests (including subagents and summaries); off uses the default service
-tier. The setting is local to the agent runtime and resets to off on restart.
+tier. The setting is local to the agent runtime and resets on restart to the
+active model or preset's `fast` value (`false` by default).
 
 `/interrupt` stops the active model generation or foreground blocking job while
 keeping the session. `/discard` stops all session work, archives the raw snapshot
@@ -63,8 +64,8 @@ Discord event except DMs authored by `discord.owner_id`. It sees the main soul
 through a private, three-way-rebased patch and shares memories with the main agent,
 but has its own session and model loop, no executor
 or skill access, no owner-DM lookup access, and a durable `agent_send` /
-`agent_channel` bridge to the main agent. Omit `frontend.model` to follow the
-main agent's live model; set it to a preset or raw model id to pin a separate one.
+`agent_channel` bridge to the main agent. Omit `frontend.preset` to follow the
+main agent's live model; set it to a named model preset to pin a separate one.
 
 ## Agent memory
 

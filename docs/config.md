@@ -71,7 +71,7 @@ Its Discord reads/searches also exclude the owner's DM channel.
 | Key | Default | Description |
 |---|---|---|
 | `enable` | `false` | Start the virtual frontend runtime and enable Discord routing. |
-| `model` | *(undefined)* | Optional model preset or raw model id. When the key is omitted, the frontend follows the main runtime's currently active model, including live swaps. A defined empty string is invalid. |
+| `preset` | *(undefined)* | Optional named model preset. When the key is omitted, the frontend follows the main runtime's currently active model, including live swaps. A defined empty string or unknown preset is invalid. |
 
 ---
 
@@ -85,6 +85,7 @@ Used for normal agent turns.
 | `name` | *(required)* | Model id — e.g. `"deepseek/deepseek-r1"`, `"claude-sonnet-4-5"`. Required unless `agent.env = "local"`. |
 | `base_url` | *(from registry)* | OpenAI-compatible base URL override for unlisted/self-hosted endpoints. |
 | `tool_choice` | `"required"` | `"required"`, `"auto"`, or `"none"`. |
+| `fast` | `false` | Use OpenAI's priority service tier for GPT/Codex models. May also be set on a named model preset. |
 | `enable_thinking` | `true` | Extended reasoning on models that support it. |
 | `thinking_effort` | `"low"` | Reasoning budget: `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`. |
 | `api_key` *(secret)* | *(required)* | API key for the primary endpoint. Place this in `secrets.toml.env`. |

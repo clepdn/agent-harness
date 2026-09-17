@@ -80,10 +80,10 @@ env = "default"
 # skill access.
 [frontend]
 enable = false
-# Optional preset name or raw model id. Omit this key entirely to follow the
+# Optional named model preset. Omit this key entirely to follow the
 # main runtime's currently active model, including live model swaps. An empty
 # string is invalid.
-# model = "umans"
+# preset = "umans"
 
 # Optional: route shell tools through a Docker container instead of the local shell.
 # Set both to enable. Mutually exclusive with [ssh].
@@ -100,6 +100,9 @@ identity = ""
 # Reference a preset defined under [models.<name>], or set fields directly.
 preset = "umans"
 # Any field here overrides the preset.
+# Use OpenAI's priority service tier for GPT/Codex models. Defaults to false.
+# Set this on a [models.<name>] preset to have it swap with the model.
+# fast = false
 # Minutes of session idle before a mid-session compaction pass runs. 0 = off.
 # Per-model/preset because it depends on the model's context + cache behavior.
 # Set it on a [models.<name>] preset to have it swap with the model.
