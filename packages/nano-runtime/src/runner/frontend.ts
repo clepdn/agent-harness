@@ -113,6 +113,20 @@ export function isFrontendWaitingForEvent(): boolean {
   return eventResolvers.length > 0
 }
 
+export function getFrontendRunnerStatus(): {
+  running: boolean
+  idle: boolean
+  tokenCount: number
+  contextSize: number
+} {
+  return {
+    running: state.running,
+    idle: isFrontendWaitingForEvent(),
+    tokenCount: state.tokenCount,
+    contextSize: state.contextSize,
+  }
+}
+
 function interruptEventWaiters(): void {
   const resolvers = eventResolvers
   eventResolvers = []

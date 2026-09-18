@@ -71,6 +71,40 @@ test("/interrupt and /discard report when no session is running", async (t) => {
   assert.ok(replies.every((reply) => reply.ephemeral))
 })
 
+test("/status includes frontend model stats only when the frontend is enabled", async (t) => {
+  const previousOwner = config.discord.owner_id
+  const previousFrontend = config.frontend.enable
+  t.after(() => {
+    config.discord.owner_id = previousOwner
+    config.frontend.enable = previousFrontend
+  })
+  config.discord.owner_id = "owner"
+
+  const replies: { content: string; ephemeral: boolean }[] = []
+  const invoke = () => handleInteraction({
+    user: { id: "owner" },
+    commandName: "status",
+    options: { getSubcommand: () => null },
+    reply: async (reply: { content: string; ephemeral: boolean }) => { replies.push(reply) },
+  } as unknown as ChatInputCommandInteraction)
+
+  config.frontend.enable = false
+  await invoke()
+  assert.doesNotMatch(replies.at(-1)!.content, /\*\*frontend:\*\*/)
+
+  config.frontend.enable = true
+  await invoke()
+  const content = replies.at(-1)!.content
+  assert.match(content, /\*\*frontend:\*\*/)
+  assert.match(content, /- \*\*state:\*\* resting/)
+  assert.match(content, /- \*\*model:\*\*/)
+  assert.match(content, /- \*\*context size:\*\* 0 tokens/)
+  assert.match(content, /- \*\*total tokens:\*\* 0/)
+  assert.match(content, /- \*\*respect prompt cache:\*\*/)
+  assert.match(content, /- \*\*thinking:\*\*/)
+  assert.equal(replies.at(-1)!.ephemeral, true)
+})
+
 test("/fast requires the owner, toggles, accepts explicit values, and appears in model info", async (t) => {
   const previousOwner = config.discord.owner_id
   const previousMode = getCodexFastMode()

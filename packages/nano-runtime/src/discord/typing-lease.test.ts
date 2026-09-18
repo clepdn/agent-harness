@@ -1,5 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
+import { config } from "../config"
 import {
   configureDiscordTyping,
   dispatchDiscordTyping,
@@ -9,6 +10,24 @@ import {
   stopDiscordTyping,
   __discordTypingLeaseTest,
 } from "./typing-lease"
+
+test("Discord typing is enabled by default", () => {
+  assert.equal(config.discord.typing_enabled, true)
+})
+
+test("disabled typing does not create a lease", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })
+  let sends = 0
+  configureDiscordTyping(() => { sends++ }, false)
+  try {
+    dispatchDiscordTyping("turn-disabled", "channel-disabled")
+    notifyDiscordModelActivity("turn-disabled")
+    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs * 2)
+    assert.equal(sends, 0)
+  } finally {
+    __discordTypingLeaseTest.reset()
+  }
+})
 
 test("typing lease starts on model activity and refreshes", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })

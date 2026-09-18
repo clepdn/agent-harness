@@ -187,6 +187,8 @@ include_user_avatars = false
 # Include the bot's own avatar whenever a fresh context starts.
 include_bot_avatar = false
 gateway_enabled = true
+# Send and refresh Discord's typing indicator while a response is being generated.
+typing_enabled = true
 gateway_trace = false
 gateway_raw_fallback = true
 gateway_raw_fallback_all = false

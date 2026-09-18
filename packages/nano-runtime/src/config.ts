@@ -436,6 +436,7 @@ export const config = {
     dm_whitelist: strArray(discordT.dm_whitelist),
     owner_id: str(discordT.owner_id, "").trim(),
     gateway_enabled: bool(discordT.gateway_enabled, true),
+    typing_enabled: bool(discordT.typing_enabled, true),
     gateway_trace: bool(discordT.gateway_trace, false),
     gateway_raw_fallback: bool(discordT.gateway_raw_fallback, true),
     gateway_raw_fallback_all: bool(discordT.gateway_raw_fallback_all, false),

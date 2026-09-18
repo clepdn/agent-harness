@@ -10,7 +10,8 @@ import { SlashCommandBuilder } from "discord.js"
 import { config, listModelPresets } from "../config"
 import { getCodexFastMode, setCodexFastMode } from "../codex-fast-mode"
 import { getRunnerStatus, isRunning, isWaitingForEvent, requestRest, requestCompaction, requestDiscard, requestInterrupt } from "../runner/index"
-import { modelState, evaluateModelSwap, applyModelSwap } from "../runner/model-state"
+import { getFrontendRunnerStatus } from "../runner/frontend"
+import { modelState, modelStateFor, evaluateModelSwap, applyModelSwap } from "../runner/model-state"
 import { startActivityTrace, getRecentActivity, formatActivityTrace } from "./activity-trace"
 import { getVoiceSessionStatus, joinOwnerVoice, leaveVoice, setVoice, SUPPORTED_VOICES } from "./voice"
 
@@ -278,6 +279,25 @@ async function handleStatus(interaction: ChatInputCommandInteraction): Promise<v
     `**thinking:** ${modelState.enableThinking ? `on (${modelState.thinkingEffort})` : "off"}`,
     `**voice:** ${voiceStatus.active ? `connected (${voiceStatus.channelName ?? voiceStatus.channelId}, ${voiceStatus.model}, ${voiceStatus.voice})` : `disconnected (selected: ${voiceStatus.voice})`}`,
   ]
+
+  if (config.frontend.enable) {
+    const frontendStatus = getFrontendRunnerStatus()
+    const frontendState = frontendStatus.running
+      ? (frontendStatus.idle ? "idle (waiting for events)" : "working")
+      : "resting"
+    const frontendModel = modelStateFor("frontend")
+    const frontendModelId = frontendModel.primaryModel?.id ?? frontendModel.fallbackModel.id
+    lines.push(
+      "",
+      "**frontend:**",
+      `- **state:** ${frontendState}`,
+      `- **model:** ${frontendModelId}`,
+      `- **context size:** ${frontendStatus.contextSize.toLocaleString()} tokens`,
+      `- **total tokens:** ${frontendStatus.tokenCount.toLocaleString()}`,
+      `- **respect prompt cache:** ${frontendModel.respectPromptCache}`,
+      `- **thinking:** ${frontendModel.enableThinking ? `on (${frontendModel.thinkingEffort})` : "off"}`,
+    )
+  }
 
   await interaction.reply({ content: lines.join("\n"), ephemeral: true })
 }

@@ -244,6 +244,7 @@ The harness explains this capability when it assembles each fresh context. It do
 | Key | Default | Description |
 |---|---|---|
 | `gateway_enabled` | `true` | Disable the WebSocket gateway entirely. Useful when only REST polling is wanted. |
+| `typing_enabled` | `true` | Send and refresh Discord's typing indicator while generating a response. Set to `false` to suppress outbound typing indicators without disabling the gateway. |
 | `gateway_trace` | `false` | Verbose per-message trace logging (noisy; for debugging). |
 | `gateway_raw_fallback` | `true` | Use the raw `MESSAGE_CREATE` packet handler as a DM fallback for messages discord.js doesn't surface. |
 | `gateway_raw_fallback_all` | `false` | Extend the raw fallback to all channel types, not just DMs. |

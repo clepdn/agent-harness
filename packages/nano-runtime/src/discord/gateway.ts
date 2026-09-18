@@ -256,7 +256,7 @@ export async function startDiscordGateway(): Promise<DiscordGatewayHandle | null
     const channel = client.channels.cache.get(channelId)
     if (!channel || !("sendTyping" in channel) || typeof channel.sendTyping !== "function") return Promise.resolve()
     return channel.sendTyping()
-  })
+  }, config.discord.typing_enabled)
 
   if (trace) {
     console.log("[discord gateway] trace enabled")

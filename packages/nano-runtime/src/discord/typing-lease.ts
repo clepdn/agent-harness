@@ -47,9 +47,9 @@ function startLease(lease: DiscordTypingLease): void {
 }
 
 /** Installs the gateway-backed typing transport. */
-export function configureDiscordTyping(next: DiscordTypingSender | null): void {
+export function configureDiscordTyping(next: DiscordTypingSender | null, enabled = true): void {
   stopDiscordTyping()
-  sender = next
+  sender = enabled ? next : null
 }
 
 /** Opens a lease for a newly dispatched Discord response. */
