@@ -14,6 +14,7 @@
 
 import { existsSync, readFileSync } from "node:fs"
 import { deepMerge, isTable, parseToml, type TomlTable, type TomlValue } from "@nano/toml"
+import { cacheLifetimeMinutes, respectPromptCache } from "./cache-policy"
 
 // ── CLI flag parsing ──────────────────────────────────────────────────────────
 
@@ -287,10 +288,11 @@ const modelConfig = {
   thinking_effort: pickEnum(modelT.thinking_effort, thinkingEfforts, "low"),
   vision: bool(modelT.vision, false),
   nudge_on_no_tool: bool(modelT.nudge_on_no_tool, false),
-  // Minutes of session idle before a mid-session compaction pass runs. 0 = off.
-  // Per-model because it's really about that model's context/cache behavior;
-  // the global default stays 0 so it only turns on for presets that opt in.
-  idle_compaction_minutes: num(modelT.idle_compaction_minutes, 0),
+  cache_warming: bool(modelT.cache_warming, false),
+  cache_warming_minutes: Math.max(0, num(modelT.cache_warming_minutes, 0)),
+  cache_warming_mode: pickEnum(modelT.cache_warming_mode, ["completion", "prewarm"] as const, "completion"),
+  // idle_compaction_minutes remains an input alias; the new key takes priority.
+  cache_lifetime_minutes: cacheLifetimeMinutes(modelT),
   // ── Per-model context behavior ──────────────────────────────────────────
   // These four used to live under [context]. They're really functions of the
   // model (its context window, its price cliffs, whether it does prompt
@@ -311,14 +313,7 @@ const modelConfig = {
     90000,
   ),
   deep_archive: bool(modelT.deep_archive ?? contextT.deep_archive, true),
-  respect_prompt_cache: bool(
-    // new name wins; fall back to the legacy per-model or [context] key
-    modelT.respect_prompt_cache ??
-      modelT.preserve_prompt_cache ??
-      contextT.respect_prompt_cache ??
-      contextT.preserve_prompt_cache,
-    true,
-  ),
+  respect_prompt_cache: respectPromptCache(modelT, respectPromptCache(contextT)),
 }
 
 export const config = {

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict"
-import test from "node:test"
+import test, { type TestContext } from "node:test"
 import { __loopTest } from "./loop"
 import { __loopToolsTest, processToolCalls } from "./loop-tools"
 import { modelState } from "./model-state"
 import { fallbackModel } from "./config"
 import type { Message, UserMessage } from "../types"
-import type { LoopState } from "./types"
+import type { LoopHooks, LoopState } from "./types"
 import { makeUserMessage, makeAssistantMessage, makeToolResultMessage } from "./test-helpers"
 import {
   configureDiscordTyping,
@@ -368,6 +368,94 @@ test("waitForNextEvent returns after successful compaction for immediate reactiv
   }
 
   assert.deepEqual(calls, ["timeout", "compact"])
+})
+
+async function makeCacheBudgetState(t: TestContext): Promise<LoopState> {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"] })
+  const saved = { ...modelState }
+  t.after(() => Object.assign(modelState, saved))
+  Object.assign(modelState, {
+    cacheWarming: true,
+    cacheWarmingDurationMs: 315 * 60_000,
+    cacheLifetimeMs: 30 * 60_000,
+    useFallback: false,
+    compactionStrategy: "companion",
+    idleCompactionMs: 28 * 60_000,
+  })
+  t.mock.method(globalThis, "fetch", async () => Response.json({
+    choices: [{ index: 0, message: { role: "assistant", content: "ready" }, finish_reason: "stop" }],
+  }))
+  const state = makeState()
+  state.context = new Context({
+    model: { ...fallbackModel, api: "openai-completions", provider: "openai", baseUrl: "https://cache-budget.invalid/v1" },
+    apiKey: "test",
+    items: [makeUserMessage("hello")],
+  })
+  await state.context.complete({ captureCacheWarmRequest: true })
+  assert.equal(state.context.lastCompletionAt, 0)
+  return state
+}
+
+function cacheBudgetHooks(wait: LoopHooks["waitForEventWithTimeout"], overrides: Partial<LoopHooks> = {}): LoopHooks {
+  return {
+    waitForEvent: async () => { throw new Error("seeded warming budget must use a deadline") },
+    waitForEventWithTimeout: wait,
+    injectIncomingEvent: () => {},
+    refreshToolCatalog: () => {},
+    flushDeferredEvents: () => {},
+    clearSession: async () => {},
+    saveSession: async () => {},
+    saveShutdownSnapshot: async () => {},
+    shouldShutdown: () => false,
+    resolveShutdown: () => {},
+    ...overrides,
+  }
+}
+
+test("warming budget overrides idle compaction and ignores an early interrupted wait", async (t) => {
+  const state = await makeCacheBudgetState(t)
+  const waits: number[] = []
+  let refreshes = 0
+  await __loopTest.waitForNextEvent(7, state, cacheBudgetHooks(async (timeoutMs) => {
+    waits.push(timeoutMs / 60_000)
+    t.mock.timers.tick(waits.length === 1 ? 60_000 : timeoutMs)
+    return null
+  }, { refreshToolCatalog: () => { refreshes++ } }), async () => {
+    assert.equal(Date.now(), 324 * 60_000)
+    return "rewritten"
+  })
+  assert.deepEqual(waits, [324, 323])
+  assert.equal(refreshes, 1)
+})
+
+test("warming-budget compaction retries one refresh interval after a failed rewrite", async (t) => {
+  const state = await makeCacheBudgetState(t)
+  const waits: number[] = []
+  const attempts: number[] = []
+  await __loopTest.waitForNextEvent(7, state, cacheBudgetHooks(async (timeoutMs) => {
+    waits.push(timeoutMs / 60_000)
+    t.mock.timers.tick(timeoutMs)
+    return null
+  }), async () => {
+    attempts.push(Date.now() / 60_000)
+    return attempts.length === 1 ? "none" : "rewritten"
+  })
+  assert.deepEqual(waits, [324, 27])
+  assert.deepEqual(attempts, [324, 351])
+})
+
+test("an incoming event preempts warming-budget compaction", async (t) => {
+  const state = await makeCacheBudgetState(t)
+  const event: UserMessage = { source: "chat", triggeredAt: "2026-09-27T00:00:00.000Z", content: "hello", raw: {} }
+  let injected: UserMessage | undefined
+  await __loopTest.waitForNextEvent(7, state, cacheBudgetHooks(async (timeoutMs) => {
+    assert.equal(timeoutMs, 324 * 60_000)
+    t.mock.timers.tick(60_000)
+    return event
+  }, { injectIncomingEvent: (_convId, incoming) => { injected = incoming } }), async () => {
+    throw new Error("incoming activity must run before compaction")
+  })
+  assert.equal(injected, event)
 })
 
 test("waitForNextEvent bails out on shutdown instead of looping the idle timer", async () => {

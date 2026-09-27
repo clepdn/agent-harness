@@ -111,3 +111,49 @@ test("complete refuses to append a stale response when the Context changes in fl
   await assert.rejects(pending, /changed while completion was in flight/)
   assert.deepEqual(context.items.map((item) => item.role), ["user", "user"])
 })
+
+test("cache warming replays the exact successful wire prompt and never appends output", async (t) => {
+  const bodies: any[] = []
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    bodies.push(JSON.parse(String(init.body)))
+    return completionResponse("discard me")
+  })
+  const context = new Context({ model: { ...model, id: "gpt-6-sol" }, apiKey: "test", systemPrompt: "stable instructions",
+    thinkingLevel: "high", toolChoice: "auto", tools: [{ name: "lookup", description: "Lookup", parameters: { type: "object" } }], items: [user("hello")] })
+  assert.equal(await context.warmCache(), undefined, "an unseeded context makes no request")
+  await context.complete({ captureCacheWarmRequest: true })
+  const lastCompletionAt = context.lastCompletionAt
+  context.append(user("new input that must not enter the warming replay"))
+  const before = context.snapshot()
+  await context.warmCache()
+  assert.deepEqual(bodies[1], { ...bodies[0], max_completion_tokens: 1 })
+  await context.warmCache({ mode: "prewarm" })
+  assert.deepEqual(bodies[2], { ...bodies[0], prompt_cache_options: { prewarm: true, ttl: "30m" } })
+  assert.deepEqual(context.snapshot(), before)
+  assert.equal(context.lastCompletionAt, lastCompletionAt, "warming must not move the real-request clock")
+  assert.equal(bodies.length, 3)
+  assert.equal(context.fork().lastCacheUseAt, undefined, "forks cannot warm the old request")
+})
+
+test("streaming requests retain their prompt for warming, and prewarm errors never generate a fallback", async (t) => {
+  const bodies: any[] = []
+  let reject = false
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    const body = JSON.parse(String(init.body))
+    bodies.push(body)
+    if (reject) return Response.json({ error: { message: "unsupported prewarm" } }, { status: 400 })
+    return body.stream ? streamResponse() : completionResponse()
+  })
+  const context = new Context({ model, apiKey: "test", items: [user("hello")] })
+  await context.complete({ captureCacheWarmRequest: true, onEvent: () => {} })
+  const before = context.snapshot()
+  const lastUsed = context.lastCacheUseAt
+  reject = true
+  await assert.rejects(context.warmCache({ mode: "prewarm" }), /unsupported prewarm/)
+  assert.deepEqual(bodies[1].messages, bodies[0].messages)
+  assert.equal(bodies[1].stream, false)
+  assert.equal(bodies[1].stream_options, undefined)
+  assert.equal(bodies.length, 2, "rejected prewarming must not retry as normal generation")
+  assert.equal(context.lastCacheUseAt, lastUsed)
+  assert.deepEqual(context.snapshot(), before)
+})

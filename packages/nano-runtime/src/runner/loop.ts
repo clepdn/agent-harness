@@ -4,7 +4,8 @@ import { recordMetric } from "../metrics"
 import { emit } from "../stream"
 import { setContextSize, setWorking } from "../discord/status-updater"
 import { dispatchDiscordTyping, stopDiscordTyping } from "../discord/typing-lease"
-import { setPromWorking } from "../prometheus"
+import { recordLlmRequest, setPromWorking } from "../prometheus"
+import { cacheRefreshIntervalMs, cacheWarmingCompactionAt, createCacheWarmer } from "./cache-warmer"
 import type { Message } from "../types"
 import { modelStateFor } from "./model-state"
 import {
@@ -56,6 +57,8 @@ async function waitForNextEvent(
       ? applyManualCompaction(currentState, request)
       : applyCompaction(currentState, "idle"),
 ): Promise<void> {
+  let previousCacheDeadline: number | undefined
+  let cacheCompactionRetryAt = 0
   // Wait with the idle timeout when enabled. Each time the timeout fires with no
   // event, compact the idle conversation (summarize the middle so a long-lived
   // session doesn't sit at full context forever) and keep waiting. Any real
@@ -83,7 +86,19 @@ async function waitForNextEvent(
     }
 
     // Resolve each time so inherited main-model swaps take effect in both lanes.
-    const idleCompactionMs = modelStateFor(state.runtimeKind).idleCompactionMs
+    const modelState = modelStateFor(state.runtimeKind)
+    const cacheDeadline = modelState.cacheWarming && !modelState.useFallback && modelState.compactionStrategy !== "off"
+      ? cacheWarmingCompactionAt(state.context.lastCompletionAt, modelState.cacheLifetimeMs, modelState.cacheWarmingDurationMs)
+      : undefined
+    if (cacheDeadline !== previousCacheDeadline) {
+      previousCacheDeadline = cacheDeadline
+      cacheCompactionRetryAt = 0
+    }
+    const cacheWaitUntil = cacheDeadline !== undefined ? Math.max(cacheDeadline, cacheCompactionRetryAt) : undefined
+    // A finite warming budget owns idle compaction timing for this preset.
+    const idleCompactionMs = cacheWaitUntil !== undefined
+      ? Math.min(2_147_483_647, Math.max(1, cacheWaitUntil - Date.now()))
+      : modelState.idleCompactionMs
     const incoming = idleCompactionMs > 0
       ? await hooks.waitForEventWithTimeout(idleCompactionMs)
       : await hooks.waitForEvent()
@@ -103,8 +118,13 @@ async function waitForNextEvent(
 
     // A null from a plain wait without a request is a harmless spurious wake.
     if (idleCompactionMs <= 0) continue
+    if (cacheWaitUntil !== undefined && Date.now() < cacheWaitUntil) continue
 
     const compacted = await compact(state)
+    if (cacheDeadline !== undefined) {
+      // Failed/suppressed compaction retries after a refresh interval, not a spin.
+      cacheCompactionRetryAt = Date.now() + cacheRefreshIntervalMs(modelState.cacheLifetimeMs)
+    }
     if (compacted === "rewritten") {
       hooks.refreshToolCatalog("post-compaction")
       console.log("[runner] idle compaction rewrote context while waiting for the next event")
@@ -537,9 +557,33 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
   let turnCount = 0
   let previousTurnSignature: string | null = null
   let consecutiveIdenticalToolTurns = 0
+  const cacheWarmer = createCacheWarmer({
+    target: () => {
+      const modelState = modelStateFor(state.runtimeKind)
+      return {
+        context: state.context,
+        lifetimeMs: modelState.cacheLifetimeMs,
+        durationMs: modelState.compactionStrategy === "off" ? 0 : modelState.cacheWarmingDurationMs,
+        mode: modelState.cacheWarmingMode,
+        enabled: modelState.cacheWarming && !modelState.useFallback &&
+          !state.restRequested && !state.discardRequested && !hooks.shouldShutdown() &&
+          state.context.model.id === modelState.primaryModel?.id,
+        busy: state.turnInFlight || state.toolInFlight,
+      }
+    },
+    onUsage: (target, usage) => {
+      const context = target.context
+      recordLlmRequest(context.model.id, "success", usage)
+      recordMetric({ type: "usage", usage })
+      if (state.context === context) state.tokenCount += usage.totalTokens
+      console.log(`[cache-warm] ${context.model.id}: input=${usage.input} cache_read=${usage.cacheRead} cache_write=${usage.cacheWrite} output=${usage.output}`)
+    },
+    onError: (error) => console.warn("[cache-warm] refresh failed; retrying later:", error instanceof Error ? error.message : String(error)),
+  })
 
   try {
   while (true) {
+    cacheWarmer.activity()
     hooks.onTurnStart?.()
     if (state.discardRequested) {
       console.log("[runner] session discard requested")
@@ -717,6 +761,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     }
   }
   } finally {
+    cacheWarmer.stop()
     clearDiscordTypingScope(state)
   }
 }

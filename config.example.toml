@@ -17,6 +17,15 @@ base_url = "https://api.code.umans.ai/v1"
 tool_choice = "required"
 enable_thinking = true
 thinking_effort = "low"
+# Opt in on a GPT/OpenAI preset whose endpoint honors max_completion_tokens.
+# Replays the last successful prompt three minutes before expiry, discarding output.
+# cache_warming = true
+# cache_lifetime_minutes = 30
+# Keep warm for at least this many quiet minutes, then compact at the next
+# refresh boundary. 315 rounds up to 324 with a 30-minute lifetime. 0 = unlimited.
+# cache_warming_minutes = 315
+# For llm-bridge Codex models, use upstream Responses prewarming instead:
+# cache_warming_mode = "prewarm"
 
 [models.glm_openrouter]
 provider = "openrouter"
@@ -103,10 +112,10 @@ preset = "umans"
 # Use OpenAI's priority service tier for GPT/Codex models. Defaults to false.
 # Set this on a [models.<name>] preset to have it swap with the model.
 # fast = false
-# Minutes of session idle before a mid-session compaction pass runs. 0 = off.
-# Per-model/preset because it depends on the model's context + cache behavior.
-# Set it on a [models.<name>] preset to have it swap with the model.
-# idle_compaction_minutes = 45
+# With cache respect enabled and warming disabled, compact after lifetime - 3
+# quiet minutes. A 30-minute lifetime gives 27 minutes. Values <= 3 disable it.
+# cache_lifetime_minutes = 30
+# Legacy idle_compaction_minutes is accepted as an alias for cache lifetime.
 #
 # ── Per-model context behavior (moved here from [context]) ──────────────────
 # These are really functions of the model — its context window, its price
@@ -146,7 +155,7 @@ compact_summary_max_chars = 16000
 # NOTE: these moved to [model] (per-model/preset options now, since they're
 # really about the model's context/cache behavior). Setting them here still
 # works as a back-compat fallback, but prefer the preset:
-#   idle_compaction_minutes  (default 0)
+#   cache_lifetime_minutes   (default 30; old idle_compaction_minutes is an alias)
 #   compaction_strategy      (default "companion")
 #   compact_trigger_tokens   (default 90000)
 #   deep_archive             (default true)

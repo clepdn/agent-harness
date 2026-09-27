@@ -190,6 +190,8 @@ export interface ContextOptions {
 }
 
 export interface ContextCompletionOptions {
+  /** Retain the successful wire prompt for cache refreshes. */
+  captureCacheWarmRequest?: boolean
   signal?: AbortSignal
   timeoutMs?: number
   maxRetries?: number
@@ -255,6 +257,11 @@ export class Context {
 
   private _items: readonly ContextItem[] = Object.freeze([])
   private revision = 0
+  private cacheWarmRequest?: {
+    params: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming
+    lastUsedAt: number
+    lastCompletionAt: number
+  }
   private readonly imageHydration = new Map<number, {
     imageAttachments?: ContextImageAttachment[]
     imageNotes?: string[]
@@ -405,7 +412,11 @@ export class Context {
   async complete(options: ContextCompletionOptions = {}): Promise<AssistantMessage> {
     const expectedRevision = this.revision
     const messages = await this.requestMessages()
-    const { onEvent, ...requestOptions } = options
+    const { onEvent, captureCacheWarmRequest, ...requestOptions } = options
+    const startedAt = Date.now()
+    const cacheParams = captureCacheWarmRequest
+      ? buildParams(this.model, this.requestContext(messages), this.completionOptions(requestOptions), false) as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming
+      : undefined
     let result: AssistantMessage
     if (onEvent) {
       const events = stream(
@@ -429,7 +440,50 @@ export class Context {
       throw new ContextChangedError("Context changed while completion was in flight; refusing to append a stale assistant response")
     }
     this.append(result)
+    this.cacheWarmRequest = cacheParams ? { params: cacheParams, lastUsedAt: startedAt, lastCompletionAt: startedAt } : undefined
     return result
+  }
+
+  get lastCacheUseAt(): number | undefined {
+    return this.cacheWarmRequest?.lastUsedAt
+  }
+
+  /** Last successful real request, unaffected by cache-warming requests. */
+  get lastCompletionAt(): number | undefined {
+    return this.cacheWarmRequest?.lastCompletionAt
+  }
+
+  /** Replay the last successful prompt, discard its output, and never append it. */
+  async warmCache(options: Pick<ContextCompletionOptions, "signal" | "timeoutMs"> & { mode?: "completion" | "prewarm" } = {}): Promise<Usage | undefined> {
+    const request = this.cacheWarmRequest
+    if (!request) return undefined
+    const startedAt = Date.now()
+    const client = createClient(this.model, this.apiKey ?? "", this.completionOptions(options))
+    const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming & {
+      prompt_cache_options?: { prewarm?: boolean; ttl?: "30m" }
+    } = { ...request.params, stream: false }
+    if (options.mode === "prewarm") {
+      // llm-bridge forwards this extension to the upstream Responses request.
+      // Do not fall back to generation if the backend rejects prewarming.
+      delete params.max_completion_tokens
+      params.prompt_cache_options = { prewarm: true, ttl: "30m" }
+    } else {
+      params.max_completion_tokens = 1
+    }
+    const response = await client.chat.completions.create(params, {
+      signal: options.signal,
+      timeout: options.timeoutMs ?? 60_000,
+      maxRetries: 0,
+    })
+    const choice = response.choices[0]
+    if (!choice) throw new Error("No choices in cache warming response")
+    const result = mapStopReason(choice.finish_reason)
+    if (result.stopReason === "error" || result.stopReason === "aborted") {
+      throw new Error(result.errorMessage ?? "Cache warming failed")
+    }
+    // A real completion may have superseded this request while it was in flight.
+    if (this.cacheWarmRequest === request) request.lastUsedAt = startedAt
+    return parseUsage(response.usage, this.model)
   }
 }
 

@@ -88,7 +88,52 @@ Used for normal agent turns.
 | `fast` | `false` | Use OpenAI's priority service tier for GPT/Codex models. May also be set on a named model preset. |
 | `enable_thinking` | `true` | Extended reasoning on models that support it. |
 | `thinking_effort` | `"low"` | Reasoning budget: `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`. |
+| `cache_warming` | `false` | Keep the primary session's prompt cache warm while waiting. Also supported on named presets and follows live model swaps. |
+| `cache_warming_minutes` | `0` | Quiet-time budget before compaction, rounded up to the next cache-refresh boundary. `0` keeps warming indefinitely. Requires warming enabled and compaction strategy other than `"off"`. Owns idle compaction timing while warming is enabled. |
+| `cache_warming_mode` | `"completion"` | `"completion"` replays with a one-token output cap, requiring an endpoint that honors it. `"prewarm"` uses llm-bridge's `prompt_cache_options.prewarm` extension for upstream Codex Responses; requires bridge forwarding and backend support. |
+| `cache_lifetime_minutes` | `30` | Assumed provider cache lifetime. Refresh or idle compaction runs three minutes early (27 minutes for a 30-minute lifetime). Values at or below `3` disable both timers. This does not change the provider's retention policy. |
+| `respect_prompt_cache` | `true` | Preserve the prompt prefix. When warming is disabled, compact after `cache_lifetime_minutes - 3` quiet minutes. Accepts the legacy `preserve_prompt_cache` name. |
 | `api_key` *(secret)* | *(required)* | API key for the primary endpoint. Place this in `secrets.toml.env`. |
+
+Cache warming replays the last successful request's full messages, tools, and
+reasoning settings through the same Chat Completions endpoint with
+`max_completion_tokens = 1` in completion mode. In prewarm mode it instead sends
+`prompt_cache_options = { prewarm = true, ttl = "30m" }`, which llm-bridge forwards
+to Responses without generating output on a supporting backend. It adds no
+messages, executes no tools, and does not
+wake the agent. Real model requests postpone refreshes; busy turns, fallback use,
+rest, and shutdown skip them. Each runner (including the frontend) warms its own
+session. Refresh usage is recorded in usage metrics and logs. Requests still
+incur input charges, and cache hits are subject to provider routing and availability.
+Codex's bridge path strips output caps, so use `cache_warming_mode = "prewarm"`
+there. Prewarm errors are logged and never fall back to ordinary generation.
+With warming enabled, the warming budget replaces the ordinary idle timeout.
+An unlimited budget (`cache_warming_minutes = 0`) disables idle compaction.
+Public API documentation describes
+prewarming for GPT-5.6 and later; the subscription Codex backend's acceptance
+still needs live verification after deploying the bridge and runtime together.
+
+For example, `cache_lifetime_minutes = 30` refreshes every 27 minutes.
+With `cache_warming_minutes = 315`, Coral warms at 27, 54, …, 297 minutes,
+then compacts at 324 minutes instead of warming again. The calculation is
+`ceil(315 / 27) × 27 = 324`. A real model request resets this quiet-time budget;
+warming does not. After compaction the next model request starts a fresh budget.
+If compaction fails or cannot shrink the context, warming stops and compaction
+retries after another refresh interval. Normal token-triggered and manual
+compaction can still happen sooner.
+
+Without warming, `respect_prompt_cache = true` and `cache_lifetime_minutes = 30`
+give a 27-minute idle compaction timeout. Set cache respect to `false` or the
+lifetime to `0` to disable this automatic idle pass. Token-triggered and manual
+compaction are separate. All cache timing settings apply to the selected preset,
+including independent frontend presets and model swaps.
+
+`idle_compaction_minutes = X` is now a legacy alias for
+`cache_lifetime_minutes = X` with cache respect enabled. This intentionally changes
+the idle timeout from `X` to `X - 3` minutes. The new key wins in TOML when both
+are supplied. The Nix module renames this option under `services.nano.settings.model`
+and each `services.nano.settings.models.<name>` preset, defaults cache respect to
+`true` for migrated definitions, and emits only the new keys in generated TOML.
 
 ## `[fallback]`
 
@@ -161,7 +206,6 @@ Token / compaction thresholds.
 | `compact_recent_messages` | `80` | Recent messages retained verbatim during compaction. |
 | `compact_chunk_messages` | `32` | Messages summarized per compaction chunk. |
 | `compact_summary_max_chars` | `16000` | Hard cap on generated summary length. |
-| `idle_compaction_minutes` | `45` | Idle time before background compaction runs. Decimals supported (e.g. `2.5` for 2m30s). Set to `0` to disable. |
 | `preserve_prompt_cache` | `true` | Keep the conversation prefix stable for prompt caching. Disables LLM compaction and requires a rest before switching models. |
 | `tool_result_compaction_min_age_turns` | `5` | Minimum later assistant turns before a tool result is eligible for proactive compaction. |
 | `tool_result_compaction_min_chars` | `2000` | Minimum tool-result length eligible for proactive compaction. |

@@ -66,7 +66,8 @@ preset = "front"
 provider = "openai"
 model = "frontend-model"
 context_window = 64000
-idle_compaction_minutes = 2
+cache_lifetime_minutes = 5
+respect_prompt_cache = true
 `, `
     import assert from "node:assert/strict"
     const { modelState, modelStateFor } = await import(${JSON.stringify(modelStateUrl)})
@@ -77,6 +78,67 @@ idle_compaction_minutes = 2
     assert.equal(frontend.idleCompactionMs, 120000)
     modelState.idleCompactionMs = 999
     assert.equal(modelStateFor("frontend").idleCompactionMs, 120000)
+  `)
+  assert.equal(result.code, 0, [result.stdout, result.stderr].filter(Boolean).join("\n"))
+})
+
+test("cache lifetime derives idle timing at startup, on the frontend, and after model swaps", async () => {
+  const result = await runWithConfig(`
+[agent]
+env = "production"
+[model]
+provider = "openai"
+model = "main"
+api_key = "test-key"
+cache_lifetime_minutes = 30
+respect_prompt_cache = true
+[frontend]
+enable = true
+preset = "front"
+[models.front]
+provider = "openai"
+model = "gpt-6-sol"
+cache_lifetime_minutes = 50
+respect_prompt_cache = true
+cache_warming = false
+[models.legacy]
+provider = "openai"
+model = "legacy"
+idle_compaction_minutes = 30
+[models.new-wins]
+provider = "openai"
+model = "new-wins"
+idle_compaction_minutes = 80
+cache_lifetime_minutes = 20
+[models.no-respect]
+provider = "openai"
+model = "no-respect"
+cache_lifetime_minutes = 30
+respect_prompt_cache = false
+[models.warm]
+provider = "openai"
+model = "warm"
+cache_warming = true
+cache_lifetime_minutes = 30
+[models.off]
+provider = "openai"
+model = "off"
+cache_lifetime_minutes = 0
+respect_prompt_cache = true
+`, `
+    import assert from "node:assert/strict"
+    const { modelState, modelStateFor, evaluateModelSwap, applyModelSwap } = await import(${JSON.stringify(modelStateUrl)})
+    assert.equal(modelState.idleCompactionMs, 27 * 60000)
+    assert.equal(modelStateFor("frontend").idleCompactionMs, 47 * 60000)
+    for (const [name, expected] of [["legacy", 27], ["new-wins", 17], ["warm", 0], ["no-respect", 0], ["off", 0]]) {
+      // Start from a session that permits a swap; each target restores its policy.
+      modelState.respectPromptCache = false
+      const decision = evaluateModelSwap(name, 0)
+      assert.equal(decision.action, "swap")
+      applyModelSwap(decision)
+      assert.equal(modelState.idleCompactionMs, expected * 60000, name)
+      assert.equal(modelStateFor("frontend").idleCompactionMs, 47 * 60000)
+    }
   `)
   assert.equal(result.code, 0, [result.stdout, result.stderr].filter(Boolean).join("\n"))
 })
@@ -167,6 +229,73 @@ api_key = "test-key"
     assert.equal(defaultTier.action, "swap")
     if (defaultTier.action === "swap") applyModelSwap(defaultTier)
     assert.equal(getCodexFastMode(), false)
+  `)
+  assert.equal(result.code, 0, [result.stdout, result.stderr].filter(Boolean).join("\n"))
+})
+
+test("cache warming is opt-in and preset settings follow frontend resolution and model swaps", async () => {
+  const defaults = await runWithConfig(mainConfig.replace("idle_compaction_minutes = 1", ""), `
+    import assert from "node:assert/strict"
+    const { modelState } = await import(${JSON.stringify(modelStateUrl)})
+    assert.equal(modelState.cacheWarming, false)
+    assert.equal(modelState.cacheWarmingDurationMs, 0)
+    assert.equal(modelState.cacheWarmingMode, "completion")
+    assert.equal(modelState.cacheLifetimeMs, 1800000)
+  `)
+  assert.equal(defaults.code, 0, defaults.stderr)
+  const result = await runWithConfig(`${mainConfig}
+respect_prompt_cache = false
+
+[frontend]
+enable = true
+preset = "warm"
+
+[models.warm]
+provider = "openai"
+model = "gpt-6-sol"
+api_key = "test-key"
+cache_warming = true
+cache_warming_minutes = 315
+cache_warming_mode = "prewarm"
+cache_lifetime_minutes = 20
+
+[models.off]
+provider = "openai"
+model = "gpt-6-luna"
+api_key = "test-key"
+cache_warming = false
+cache_lifetime_minutes = 0
+
+[models.unconfigured]
+provider = "openai"
+model = "claude"
+api_key = "test-key"
+`, `
+    import assert from "node:assert/strict"
+    const { modelState, modelStateFor, evaluateModelSwap, applyModelSwap } = await import(${JSON.stringify(modelStateUrl)})
+    const frontend = modelStateFor("frontend")
+    assert.equal(frontend.cacheWarming, true)
+    assert.equal(frontend.cacheWarmingDurationMs, 18900000)
+    assert.equal(frontend.cacheWarmingMode, "prewarm")
+    assert.equal(frontend.cacheLifetimeMs, 1200000)
+    const warm = evaluateModelSwap("warm", 0)
+    assert.equal(warm.action, "swap")
+    applyModelSwap(warm)
+    assert.equal(modelState.cacheWarming, true)
+    assert.equal(modelState.cacheWarmingDurationMs, 18900000)
+    assert.equal(modelState.cacheWarmingMode, "prewarm")
+    assert.equal(modelState.cacheLifetimeMs, 1200000)
+    const unconfigured = evaluateModelSwap("unconfigured", 0)
+    assert.equal(unconfigured.cacheWarming, false, "warming must not leak into other providers on a swap")
+    assert.equal(unconfigured.cacheWarmingDurationMs, 0)
+    assert.equal(unconfigured.cacheWarmingMode, "completion")
+    const off = evaluateModelSwap("off", 0)
+    assert.equal(off.action, "swap")
+    applyModelSwap(off)
+    assert.equal(modelState.cacheWarming, false)
+    assert.equal(modelState.cacheWarmingDurationMs, 0)
+    assert.equal(modelState.cacheLifetimeMs, 0)
+    assert.equal(modelStateFor("frontend").cacheWarming, true)
   `)
   assert.equal(result.code, 0, [result.stdout, result.stderr].filter(Boolean).join("\n"))
 })

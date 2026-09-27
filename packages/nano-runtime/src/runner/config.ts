@@ -1,9 +1,10 @@
 import type { Model } from "../llm"
 import { config } from "../config"
+import { idleCacheCompactionMs } from "../cache-policy"
 
 // ── Misc thresholds ───────────────────────────────────────────────────────────
 
-// These four are per-model preset options (like idle_compaction_minutes). They
+// These four are per-model preset options (like cache_lifetime_minutes). They
 // hold the initial value from the resolved primary preset; presets can override
 // them and they swap at runtime via modelState.* (see model-state.ts). Older
 // configs that still set them under [context] keep working: config.model.*
@@ -33,15 +34,14 @@ export function meetsToolResultCompactionContextThreshold(
 }
 
 /**
- * Idle compaction is a per-model preset option (like nudge_on_no_tool). This is
- * the initial value from [model]; presets can override it and it's swappable at
- * runtime via modelState.idleCompactionMs. 0 = disabled.
+ * Cache-respecting idle compaction runs three minutes before cache expiry.
+ * Warming takes over this timing when enabled. Preset swaps recalculate it.
  */
-export const PRIMARY_IDLE_COMPACTION_MS = (() => {
-  const minutes = config.model.idle_compaction_minutes
-  if (!Number.isFinite(minutes) || minutes <= 0) return 0
-  return Math.round(minutes * 60_000)
-})()
+export const PRIMARY_IDLE_COMPACTION_MS = idleCacheCompactionMs(
+  config.model.cache_lifetime_minutes * 60_000,
+  config.model.respect_prompt_cache,
+  config.model.cache_warming,
+)
 
 export const USE_FALLBACK = config.agent.env === "local"
 

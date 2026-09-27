@@ -13,6 +13,7 @@
 import type { Model } from "../llm"
 import { config, getModelPreset, type ToolChoice, type ThinkingEffort, type CompactionStrategy } from "../config"
 import { setCodexFastMode } from "../codex-fast-mode"
+import { cacheLifetimeMinutes, idleCacheCompactionMs, respectPromptCache } from "../cache-policy"
 import type { RuntimeKind } from "./types"
 import {
   buildModel,
@@ -43,8 +44,12 @@ export interface RuntimeModelConfig {
   primaryToolChoice: ToolChoice
   primaryVision: boolean
   primaryNudgeOnNoTool: boolean
-  // Idle compaction timeout in ms for the primary model (0 = off). Per-preset.
+  // Derived from cache lifetime and respect; warming owns its own budget.
   idleCompactionMs: number
+  cacheWarming: boolean
+  cacheWarmingDurationMs: number
+  cacheWarmingMode: "completion" | "prewarm"
+  cacheLifetimeMs: number
   enableThinking: boolean
   thinkingEffort: ThinkingEffort
 
@@ -76,6 +81,10 @@ export const modelState: RuntimeModelConfig = {
   primaryVision: initPrimaryVision,
   primaryNudgeOnNoTool: initPrimaryNudgeOnNoTool,
   idleCompactionMs: initPrimaryIdleCompactionMs,
+  cacheWarming: config.model.cache_warming,
+  cacheWarmingDurationMs: config.model.cache_warming_minutes * 60_000,
+  cacheWarmingMode: config.model.cache_warming_mode,
+  cacheLifetimeMs: config.model.cache_lifetime_minutes * 60_000,
   enableThinking: initEnableThinking,
   thinkingEffort: initThinkingEffort,
 
@@ -134,6 +143,10 @@ function frontendModelConfig(): RuntimeModelConfig | null {
       ? source.compaction_strategy as CompactionStrategy
       : modelState.compactionStrategy
 
+  const cacheWarming = typeof source.cache_warming === "boolean" ? source.cache_warming : false
+  const cacheLifetimeMs = cacheLifetimeMinutes(source) * 60_000
+  const respectCache = respectPromptCache(source, modelState.respectPromptCache)
+
   return {
     ...modelState,
     primaryModel,
@@ -143,19 +156,20 @@ function frontendModelConfig(): RuntimeModelConfig | null {
     primaryNudgeOnNoTool: typeof source.nudge_on_no_tool === "boolean" ? source.nudge_on_no_tool : modelState.primaryNudgeOnNoTool,
     enableThinking: typeof source.enable_thinking === "boolean" ? source.enable_thinking : modelState.enableThinking,
     thinkingEffort,
-    idleCompactionMs: typeof source.idle_compaction_minutes === "number"
-      ? Math.max(0, Math.round(source.idle_compaction_minutes * 60_000))
-      : modelState.idleCompactionMs,
+    idleCompactionMs: idleCacheCompactionMs(cacheLifetimeMs, respectCache, cacheWarming),
+    cacheWarming,
+    cacheWarmingDurationMs: typeof source.cache_warming_minutes === "number" && Number.isFinite(source.cache_warming_minutes)
+      ? Math.max(0, source.cache_warming_minutes * 60_000)
+      : 0,
+    cacheWarmingMode: source.cache_warming_mode === "prewarm" || source.cache_warming_mode === "completion"
+      ? source.cache_warming_mode : "completion",
+    cacheLifetimeMs,
     compactionStrategy,
     compactTriggerTokens: typeof source.compact_trigger_tokens === "number" && source.compact_trigger_tokens > 0
       ? Math.trunc(source.compact_trigger_tokens)
       : modelState.compactTriggerTokens,
     deepArchive: typeof source.deep_archive === "boolean" ? source.deep_archive : modelState.deepArchive,
-    respectPromptCache: typeof source.respect_prompt_cache === "boolean"
-      ? source.respect_prompt_cache
-      : typeof source.preserve_prompt_cache === "boolean"
-        ? source.preserve_prompt_cache
-        : modelState.respectPromptCache,
+    respectPromptCache: respectCache,
     useFallback: false,
   }
 }
@@ -184,6 +198,10 @@ export type SwapDecision =
       vision: boolean
       nudgeOnNoTool: boolean
       idleCompactionMs: number
+      cacheWarming: boolean
+      cacheWarmingDurationMs: number
+      cacheWarmingMode: "completion" | "prewarm"
+      cacheLifetimeMs: number
       compactionStrategy: CompactionStrategy
       compactTriggerTokens: number
       deepArchive: boolean
@@ -288,15 +306,6 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
   const nudgeOnNoTool =
     typeof preset.nudge_on_no_tool === "boolean" ? preset.nudge_on_no_tool : modelState.primaryNudgeOnNoTool
 
-  // Idle compaction is specified in minutes on the preset; convert to ms. 0/absent
-  // falls back to the current runtime value. Non-positive/invalid disables it.
-  const idleCompactionMs =
-    typeof preset.idle_compaction_minutes === "number"
-      ? preset.idle_compaction_minutes > 0
-        ? Math.round(preset.idle_compaction_minutes * 60_000)
-        : 0
-      : modelState.idleCompactionMs
-
   // Per-model context behavior. Each falls back to the current runtime value
   // when the target preset doesn't specify it, so a swap never silently resets
   // a knob the new preset was quiet about.
@@ -314,13 +323,9 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
   const deepArchive =
     typeof preset.deep_archive === "boolean" ? preset.deep_archive : modelState.deepArchive
 
-  // New name wins; accept the legacy preserve_prompt_cache key too.
-  const respectPromptCache =
-    typeof preset.respect_prompt_cache === "boolean"
-      ? preset.respect_prompt_cache
-      : typeof preset.preserve_prompt_cache === "boolean"
-        ? preset.preserve_prompt_cache
-        : modelState.respectPromptCache
+  const respectCache = respectPromptCache(preset, modelState.respectPromptCache)
+  const cacheWarming = typeof preset.cache_warming === "boolean" ? preset.cache_warming : false
+  const cacheLifetimeMs = cacheLifetimeMinutes(preset) * 60_000
 
   return {
     action: "swap",
@@ -333,11 +338,18 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
     thinkingEffort,
     vision,
     nudgeOnNoTool,
-    idleCompactionMs,
+    idleCompactionMs: idleCacheCompactionMs(cacheLifetimeMs, respectCache, cacheWarming),
+    cacheWarming,
+    cacheWarmingDurationMs: typeof preset.cache_warming_minutes === "number" && Number.isFinite(preset.cache_warming_minutes)
+      ? Math.max(0, preset.cache_warming_minutes * 60_000)
+      : 0,
+    cacheWarmingMode: preset.cache_warming_mode === "prewarm" || preset.cache_warming_mode === "completion"
+      ? preset.cache_warming_mode : "completion",
+    cacheLifetimeMs,
     compactionStrategy,
     compactTriggerTokens,
     deepArchive,
-    respectPromptCache,
+    respectPromptCache: respectCache,
   }
 }
 
@@ -353,6 +365,10 @@ export function applyModelSwap(decision: Extract<SwapDecision, { action: "swap" 
   modelState.primaryVision = decision.vision
   modelState.primaryNudgeOnNoTool = decision.nudgeOnNoTool
   modelState.idleCompactionMs = decision.idleCompactionMs
+  modelState.cacheWarming = decision.cacheWarming
+  modelState.cacheWarmingDurationMs = decision.cacheWarmingDurationMs
+  modelState.cacheWarmingMode = decision.cacheWarmingMode
+  modelState.cacheLifetimeMs = decision.cacheLifetimeMs
   modelState.compactionStrategy = decision.compactionStrategy
   modelState.compactTriggerTokens = decision.compactTriggerTokens
   modelState.deepArchive = decision.deepArchive

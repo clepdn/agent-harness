@@ -217,6 +217,7 @@ async function createStreamedCompletion(
   let bufferedThinking = ""
   const completionContext = state.context
   const finalMessage = await completionContext.complete({
+    captureCacheWarmRequest: modelState.cacheWarming && !modelState.useFallback,
     ...(signal ? { signal } : {}),
     onEvent: (event: AssistantMessageEvent) => {
       if (event.type === "text_delta") {

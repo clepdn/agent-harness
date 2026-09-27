@@ -88,8 +88,40 @@
 		    tool_result_compaction_min_chars = 2000;
 		    tool_result_compaction_min_context_percent = 50;
 		};
+		modelSettingsType = lib.types.submodule ({ options, ... }: {
+		    freeformType = settingsFormat.type;
+		    imports = [
+			(lib.mkRenamedOptionModule [ "idle_compaction_minutes" ] [ "cache_lifetime_minutes" ])
+		    ];
+		    options = {
+			cache_lifetime_minutes = lib.mkOption {
+			    type = lib.types.nullOr (lib.types.addCheck lib.types.number (value: value >= 0));
+			    default = null;
+			    description = "Cache lifetime in minutes. Cache-respecting idle compaction runs three minutes before expiry.";
+			};
+			respect_prompt_cache = lib.mkOption {
+			    type = lib.types.nullOr lib.types.bool;
+			    default = null;
+			    description = "Keep the prompt prefix stable and compact before the configured cache lifetime expires.";
+			};
+		    };
+		    config.respect_prompt_cache = lib.mkIf options.idle_compaction_minutes.isDefined (lib.mkDefault true);
+		});
+		normalizeModelSettings = settings:
+		    lib.filterAttrs (name: value:
+			name != "idle_compaction_minutes" &&
+			(!(builtins.elem name [ "cache_lifetime_minutes" "respect_prompt_cache" ]) || value != null)
+		    ) settings;
 		settingsType = lib.types.submodule {
 		    freeformType = settingsFormat.type;
+		    options.model = lib.mkOption {
+			type = modelSettingsType;
+			default = {};
+		    };
+		    options.models = lib.mkOption {
+			type = lib.types.attrsOf modelSettingsType;
+			default = {};
+		    };
 		    options.context = lib.mkOption {
 			type = lib.types.submodule {
 			    freeformType = settingsFormat.type;
@@ -124,11 +156,15 @@
 		    };
 		};
 		contextSettings = removeAttrs cfg.settings.context oldContextSettings;
+		modelSettings = normalizeModelSettings cfg.settings.model;
+		modelPresets = lib.mapAttrs (_: normalizeModelSettings) cfg.settings.models;
 		settingsForToml =
-		    removeAttrs cfg.settings [ "context" ]
+		    removeAttrs cfg.settings [ "context" "model" "models" ]
 		    // lib.optionalAttrs (contextSettings != defaultContextSettings) {
 			context = contextSettings;
-		    };
+		    }
+		    // lib.optionalAttrs (modelSettings != {}) { model = modelSettings; }
+		    // lib.optionalAttrs (modelPresets != {}) { models = modelPresets; };
 	    in {
 		options.services.nano = {
 		    enable = lib.mkEnableOption "nano";
