@@ -111,6 +111,15 @@ type ChatLine = {
   label: string
   text: string
   detail?: string
+  toolArgs?: string
+  toolResult?: string
+  toolStatus?: "running" | "complete" | "error"
+}
+
+type ToolCallView = {
+  id: string
+  name: string
+  arguments: unknown
 }
 
 const PANEL_COOKIE = "nano_control_panels"
@@ -302,6 +311,29 @@ function toolLabel(text: string): string {
   return `${first.slice(0, 79)}...`
 }
 
+function toolCallsFromPayload(payload: Record<string, unknown>): ToolCallView[] {
+  if (!Array.isArray(payload.toolCalls)) return []
+
+  return payload.toolCalls.flatMap((value, index) => {
+    if (!value || typeof value !== "object") return []
+    const call = value as Record<string, unknown>
+    const name = typeof call.name === "string" && call.name ? call.name : "unknown tool"
+    return [{
+      id: typeof call.id === "string" && call.id ? call.id : `anonymous-${index}`,
+      name,
+      arguments: call.arguments ?? {},
+    }]
+  })
+}
+
+function formatToolArguments(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2) ?? String(value)
+  } catch {
+    return String(value)
+  }
+}
+
 function discordContextLine(text: string): Pick<ChatLine, "kind" | "label" | "text" | "detail"> {
   const stats = text.match(/new_messages=(\d+).*?channels=(\d+).*?pending_inbox=(\d+)/s)
   const recent = text.match(/recent messages:\s*([\s\S]*?)(?:\n\npending preview:|$)/)
@@ -367,12 +399,24 @@ function linesFromEvents(events: WorkerEvent[]): ChatLine[] {
   const lines: ChatLine[] = []
   const sorted = [...events].sort((a, b) => a.seq - b.seq)
   const streamUserTexts = new Set<string>()
+  const toolResults = new Map<string, { content: string; isError: boolean }>()
+  const knownToolCallIds = new Set<string>()
 
   for (const event of sorted) {
-    if (event.type !== "stream.event") continue
     const payload = eventPayloadObject(event)
-    if (payload.type === "user" && typeof payload.text === "string" && payload.text.trim()) {
+    if (event.type === "stream.event" && payload.type === "user" && typeof payload.text === "string" && payload.text.trim()) {
       streamUserTexts.add(payload.text.trim())
+    }
+    if (event.type !== "conversation.message") continue
+
+    const role = String(payload.role ?? "")
+    if (role === "assistant") {
+      for (const call of toolCallsFromPayload(payload)) knownToolCallIds.add(call.id)
+      continue
+    }
+    if ((role === "tool" || role === "toolResult") && typeof payload.toolCallId === "string") {
+      const content = String(payload.content ?? "")
+      toolResults.set(payload.toolCallId, { content, isError: content.trimStart().startsWith("error:") })
     }
   }
 
@@ -455,21 +499,40 @@ function linesFromEvents(events: WorkerEvent[]): ChatLine[] {
 
     const role = String(payload.role ?? "")
     const content = String(payload.content ?? "")
-    if (!content.trim()) continue
 
     if (role === "assistant") {
-      lines.push({
-        key: event.id,
-        seq: event.seq,
-        at: String(payload.createdAt ?? event.createdAt),
-        kind: "agent",
-        label: "agent",
-        text: content,
-      })
+      if (content.trim()) {
+        lines.push({
+          key: event.id,
+          seq: event.seq,
+          at: String(payload.createdAt ?? event.createdAt),
+          kind: "agent",
+          label: "agent",
+          text: content,
+        })
+      }
+
+      for (const [index, call] of toolCallsFromPayload(payload).entries()) {
+        const result = toolResults.get(call.id)
+        lines.push({
+          key: `${event.id}:tool:${call.id}:${index}`,
+          seq: event.seq,
+          at: String(payload.createdAt ?? event.createdAt),
+          kind: "tool",
+          label: call.name,
+          text: result?.content ?? "",
+          toolArgs: formatToolArguments(call.arguments),
+          toolResult: result?.content,
+          toolStatus: result ? (result.isError ? "error" : "complete") : "running",
+        })
+      }
       continue
     }
 
-    if (role === "tool") {
+    if (role === "tool" || role === "toolResult") {
+      const toolCallId = typeof payload.toolCallId === "string" ? payload.toolCallId : ""
+      if (toolCallId && knownToolCallIds.has(toolCallId)) continue
+      if (!content.trim()) continue
       lines.push({
         key: event.id,
         seq: event.seq,
@@ -477,11 +540,14 @@ function linesFromEvents(events: WorkerEvent[]): ChatLine[] {
         kind: "tool",
         label: toolLabel(content),
         text: content,
+        toolResult: content,
+        toolStatus: content.trimStart().startsWith("error:") ? "error" : "complete",
       })
       continue
     }
 
     if (role === "user") {
+      if (!content.trim()) continue
       if (streamUserTexts.has(content.trim())) continue
       if (content.trim().startsWith("[wake]")) continue
       const clean = userLineFromContent(content)
@@ -605,18 +671,32 @@ function TerminalMessage({
   const prefix = prefixForLine(line, agentName)
 
   if (line.kind === "tool") {
+    const status = line.toolStatus ?? "complete"
     return (
-      <article className="terminal-message terminal-message-tool">
+      <article className={`terminal-message terminal-message-tool terminal-message-tool-${status}`}>
         <div className="terminal-row">
           <span className="terminal-prefix terminal-prefix-tool">tool:</span>
           <div className="terminal-body">
             <button type="button" className="terminal-command" onClick={() => onToggle(line.key)}>
               <span>{line.label}</span>
-              <small>{expanded ? "hide result" : "show result"}</small>
+              <small>{expanded ? "hide details" : status === "running" ? "running" : `${status} · show details`}</small>
             </button>
             {expanded ? (
               <div className="terminal-block terminal-block-tool">
-                <HighlightedCode text={line.text} />
+                {line.toolArgs !== undefined ? (
+                  <section className="terminal-tool-detail">
+                    <p>arguments</p>
+                    <HighlightedCode text={line.toolArgs} language="json" />
+                  </section>
+                ) : null}
+                {line.toolResult !== undefined ? (
+                  <section className="terminal-tool-detail">
+                    <p>result</p>
+                    <HighlightedCode text={line.toolResult} />
+                  </section>
+                ) : (
+                  <p className="terminal-tool-pending">waiting for result...</p>
+                )}
               </div>
             ) : null}
           </div>

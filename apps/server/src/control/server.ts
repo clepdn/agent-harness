@@ -73,7 +73,7 @@ function mirrorWorkerEvents(raw: unknown, agentId?: string): void {
   for (const event of events) mirrorWorkerEvent(event, agentId)
 }
 
-function compactWorkerEventForChat(raw: unknown): WorkerEvent | null {
+export function compactWorkerEventForChat(raw: unknown): WorkerEvent | null {
   if (!looksLikeWorkerEvent(raw)) return null
   const payload = raw.payload && typeof raw.payload === "object" ? (raw.payload as Record<string, unknown>) : {}
 
@@ -98,16 +98,21 @@ function compactWorkerEventForChat(raw: unknown): WorkerEvent | null {
 
   const role = typeof payload.role === "string" ? payload.role : ""
   const content = typeof payload.content === "string" ? payload.content : ""
-  if (!content.trim()) return null
+  const toolCalls = role === "assistant" && Array.isArray(payload.toolCalls) ? payload.toolCalls : []
+  if (!content.trim() && toolCalls.length === 0) return null
   if (role === "user" && content.trim().startsWith("[wake]")) return null
   if (role === "user" && content.trim().startsWith("[incoming")) return null
-  if (role !== "assistant" && role !== "tool" && role !== "user") return null
+  if (role !== "assistant" && role !== "tool" && role !== "toolResult" && role !== "user") return null
+
+  const isToolResult = role === "tool" || role === "toolResult"
 
   return {
     ...raw,
     payload: {
       role,
-      content: role === "tool" ? compactText(content, 2400) : content,
+      content: isToolResult ? compactText(content, 2400) : content,
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
+      ...(isToolResult && typeof payload.toolCallId === "string" ? { toolCallId: payload.toolCallId } : {}),
       createdAt: payload.createdAt,
     },
   }
@@ -118,7 +123,7 @@ function compactText(text: string, maxChars: number): string {
   return `${text.slice(0, maxChars).trimEnd()}\n\n... truncated for the control panel ...`
 }
 
-function compactEventsForChat(events: unknown[]): WorkerEvent[] {
+export function compactEventsForChat(events: unknown[]): WorkerEvent[] {
   const compacted: WorkerEvent[] = []
   for (const event of events) {
     const compact = compactWorkerEventForChat(event)

@@ -184,10 +184,13 @@ export async function runSubagent(
 
     const text = assistantContentText(finalMessage.content)
     if (text) lastText = text
-    logMessage(convId, "assistant", `[subagent:${subagent.name}] ${text}`)
-
-    // Extract tool calls
     const toolCalls = finalMessage.content.filter(isFunctionToolCall) as ToolCall[]
+    logMessage(
+      convId,
+      "assistant",
+      `[subagent:${subagent.name}] ${text}`,
+      toolCalls.length > 0 ? toolCalls : undefined,
+    )
 
     if (toolCalls.length === 0) {
       // No tool calls — subagent is done

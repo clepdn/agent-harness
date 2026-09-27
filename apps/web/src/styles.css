@@ -535,6 +535,32 @@ dt,
   border-left-color: #655b36;
 }
 
+.terminal-message-tool-running .terminal-command small {
+  color: #b89a56;
+}
+
+.terminal-message-tool-error .terminal-command,
+.terminal-message-tool-error .terminal-command:hover:not(:disabled) {
+  color: var(--danger-ink);
+}
+
+.terminal-tool-detail + .terminal-tool-detail {
+  margin-top: 12px;
+}
+
+.terminal-tool-detail > p,
+.terminal-tool-pending {
+  margin: 0 0 5px;
+  color: #777;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.terminal-tool-detail .code-block {
+  margin: 0;
+}
+
 .terminal-block-thinking {
   border-left-color: #3d3d5c;
 }
