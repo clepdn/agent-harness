@@ -1,4 +1,4 @@
-# Evaluate option migration and the exact settings passed to the TOML generator.
+# Evaluate option migration and the exact settings passed to the JSON generator.
 # nix-instantiate --eval --strict --json tests/cache-policy.nix --arg nixpkgs <path>
 { nixpkgs }:
 let
@@ -11,7 +11,7 @@ let
   };
   testPkgs = pkgs // {
     formats = pkgs.formats // {
-      toml = args: (pkgs.formats.toml args) // {
+      json = args: (pkgs.formats.json args) // {
         # Encode the generator input as an absolute path, without building.
         generate = _: value: "/" + builtins.toJSON value;
       };

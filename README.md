@@ -2,21 +2,23 @@
 
 ## Run the server
 
+Nix is the source configuration format. The NixOS module generates JSON directly
+from `services.nano.settings` and `services.nano.agents`; see [configuration](docs/config.md).
+For a source checkout:
+
 ```sh
 npm ci
-cp agents/mira.example.toml agents/mira.toml
-chmod 600 agents/mira.toml
-# edit agents/mira.toml
-npm start
+cp config.example.nix config.nix
+cp agents/mira.example.nix agents/mira.nix
+# edit both Nix files; keep credentials in a separate JSON secrets file
+nix eval --json --file config.nix > config.json
+nix eval --json --file agents/mira.nix > agents/mira.json
+npm start -- --config config.json
 ```
 
-The server reads every `.toml` file in `agents/`. Files ending in `.example.toml` are skipped.
-Pass the shared runtime config to the control plane to apply `[server]` settings
-such as the bind address (command-line `--host` and `--port` flags take precedence):
-
-```sh
-npm start -- --config /path/to/config.toml
-```
+The server reads every `.json` file in `agents/`. Files ending in `.example.json`
+are skipped. Shared `server` settings control the bind address;
+command-line `--host` and `--port` flags take precedence.
 
 The web dashboard is served by the control plane at `/ui/` on the same port.
 Nix packages include the built UI automatically. With `services.nano.agents`
@@ -47,7 +49,7 @@ active model or preset's `fast` value (`false` by default).
 keeping the session. `/discard` stops all session work, archives the raw snapshot
 as `memories/discarded-{datetime}.json`, and removes it from the active runner.
 `/compact` runs an immediate context compaction. `/compact force:true` requires
-the dedicated `[summary]` model and hands its detailed play-by-play to the primary
+the dedicated `summary` model and hands its detailed play-by-play to the primary
 model to journal on the next turn. Add `snapcompact:true` to preserve the discarded
 span as a bitmap frame (with a text fallback if rendering is unavailable).
 Shell calls still running after two minutes detach automatically; the model can
@@ -59,7 +61,7 @@ transient error repeats three times. Alerts are deduplicated for six hours and
 include a **Mute this error forever** button. Muting is stored in `nano.db` and
 applies only to that error fingerprint.
 
-Set `[frontend].enable = true` to run a second virtual nano for every model-eligible
+Set `frontend.enable = true` to run a second virtual nano for every model-eligible
 Discord event except DMs authored by `discord.owner_id`. It sees the main soul
 through a private, three-way-rebased patch and shares memories with the main agent,
 but has its own session and model loop, no executor
@@ -82,14 +84,16 @@ For example, an agent with `home: /home/nano` keeps long-term memories in `/home
 
 For routine maintenance, ask the agent to inspect, organize, or repair their own memories using the memory tools. Treat `soul.md` and `memories/` like a private diary: do not read or change them unless the agent asks; it's weird if you do. For backup or recovery, stop the worker and preserve the entire agent home rather than copying only the Markdown files.
 
-## Agent TOML specification
+## Agent JSON specification
 
-One file in `agents/` is one agent. Files ending in `.example.toml` are skipped.
-Keys are literal — write nested values as tables, never as dotted keys.
+One file in `agents/` is one agent. Files ending in `.example.json` are skipped.
+The NixOS module generates these files from `services.nano.agents`. For standalone
+use, evaluate an agent Nix attribute set to JSON. JSON uses nested objects; a key
+containing a dot is a literal key, not a nested setting.
 
 An agent file describes only what the control plane owns. Everything the agent
 *runs on* — model, fallback, tools, context, Discord, subagents — lives in the
-runtime TOML named by `config`, in the same format a standalone
+runtime JSON named by `config`, in the same format a standalone
 `nano --config …` run reads. There is one config dialect, and both ways of
 starting a worker feed it the identical file.
 
@@ -97,7 +101,7 @@ starting a worker feed it the identical file.
 
 | Field | Type | Required | Default |
 | --- | --- | --- | --- |
-| `id` | string matching `[a-zA-Z0-9_-]+` | no | filename without `.toml` |
+| `id` | string matching `[a-zA-Z0-9_-]+` | no | filename without `.json` |
 | `name` | string | no | `id` |
 | `port` | integer `1..65535` | no | control port plus the file's sorted position |
 | `home` | path | no | `data/agents/<id>` |
@@ -105,7 +109,7 @@ starting a worker feed it the identical file.
 | `workspace` | path | no | repository root; applies to `client = "local"` |
 | `config` | path, or a list of paths | no | — |
 | `secrets` | path | no | — |
-| `[settings]` | table | no | `{}` |
+| `settings` | object | no | `{}` |
 
 Relative `home`, `workspace`, `config`, and `secrets` paths resolve from the
 repository root. A `config` or `secrets` path that does not exist fails startup.
@@ -117,23 +121,23 @@ may be a list: each file is deep-merged over the previous one, so several
 agents can share a base file and layer their own differences on top. `secrets`
 is merged last, so a key set in both resolves to the secrets value.
 
-```toml
-config = ["/etc/nano/config.toml", "/etc/nano/agents/mira.toml"]
-secrets = "/run/agenix/nanoSecrets"
+```nix
+config = [ "/etc/nano/config.json" "/etc/nano/agents/mira.json" ];
+secrets = "/run/agenix/nanoSecrets"; # JSON contents; the filename may be extensionless
 ```
 
 Credentials reach the worker as files, never as environment variables — the
 agent's own shell tool inherits that environment.
 
-### `[settings]`
+### `settings`
 
 `settings` accepts string, number, and boolean values keyed by uppercase
 runtime setting names, and becomes the worker's environment. It is for the
 settings that are genuinely environment-shaped; anything the runtime reads from
-TOML belongs in `config`. Names the server manages — `PORT`, `HOME`,
+JSON belongs in `config`. Names the server manages — `PORT`, `HOME`,
 `NANO_CONFIG`, `NANO_SECRETS`, and the `NANO_*` prefixes — are rejected.
 
-> **TODO:** Promote the remaining active settings into first-party TOML sections for tools, context management, Discord batching/cooldowns, state, and bridges. Remove the settings that have no runtime reader.
+> **TODO:** Promote the remaining active settings into first-party configuration sections for tools, context management, Discord batching/cooldowns, state, and bridges. Remove the settings that have no runtime reader.
 
 #### Tools and model calls
 
@@ -193,7 +197,7 @@ TOML belongs in `config`. Names the server manages — `PORT`, `HOME`,
 
 Agent ids, worker ports, canonical home paths, Discord tokens, and enabled bridge ports must be unique.
 
-Agent TOML files contain credentials and should use mode `0600`. Tool-client endpoints should stay on loopback or a trusted private network.
+Keep credentials in separate JSON secrets files with mode `0600`. Tool-client endpoints should stay on loopback or a trusted private network.
 
 ## Check the repository
 

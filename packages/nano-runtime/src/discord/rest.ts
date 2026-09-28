@@ -11,11 +11,11 @@ import { config } from "../config"
  * Returns the configured Discord bot token.
  *
  * @returns Bot token string.
- * @throws When `[discord].bot_token` is not set in the secrets TOML.
+ * @throws When `[discord].bot_token` is not set in the secrets JSON.
  */
 export function getBotToken(): string {
   const token = config.discord.bot_token
-  if (!token) throw new Error("[discord].bot_token is required (set it in the secrets TOML)")
+  if (!token) throw new Error("[discord].bot_token is required (set it in the secrets JSON)")
   return token
 }
 

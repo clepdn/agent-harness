@@ -1,8 +1,8 @@
 /**
  * Shim mode: run the harness from a local checkout instead of the nix store.
  *
- * At startup, index.ts calls tryShim() before main(). If ~/.harness.toml
- * exists with [shim] enable = true and harness_path = "...", the shim spawns
+ * At startup, index.ts calls tryShim() before main(). If ~/.harness.json
+ * exists with shim.enable = true and shim.harness_path = "...", the shim spawns
  * the local harness as a child process and proxies stdio + signals.
  *
  * Exit semantics:
@@ -15,6 +15,7 @@
 import { existsSync, readFileSync } from "node:fs"
 import { spawn } from "node:child_process"
 import { join } from "node:path"
+import { isConfigObject, parseConfig } from "@nano/config"
 
 /** Environment variable set when the shim child fails and we enter safe mode. */
 export const SHIM_FAILED_ENV = "NANO_SHIM_FAILED"
@@ -28,55 +29,19 @@ interface ShimConfig {
 function parseShimConfig(configPath: string): ShimConfig | null {
   if (!existsSync(configPath)) return null
 
-  let content: string
   try {
-    content = readFileSync(configPath, "utf8")
+    const { shim } = parseConfig(readFileSync(configPath, "utf8"))
+    if (!isConfigObject(shim) || shim.enable !== true ||
+        typeof shim.harness_path !== "string" || !shim.harness_path.trim()) return null
+    const override = typeof shim.config_path === "string" ? shim.config_path.trim() : ""
+    return { enable: true, harnessPath: shim.harness_path.trim(), ...(override ? { configPath: override } : {}) }
   } catch {
     return null
   }
-
-  let inShimSection = false
-  let enable = false
-  let harnessPath = ""
-  let configPathOverride: string | undefined
-
-  for (const raw of content.split(/\r?\n/)) {
-    // strip comments (naive — doesn't handle # inside quoted strings)
-    const hashIdx = raw.indexOf("#")
-    const line = (hashIdx >= 0 ? raw.slice(0, hashIdx) : raw).trim()
-    if (!line) continue
-
-    if (line.startsWith("[") && line.endsWith("]")) {
-      inShimSection = line.slice(1, -1).trim() === "shim"
-      continue
-    }
-
-    if (!inShimSection) continue
-
-    const eq = line.indexOf("=")
-    if (eq <= 0) continue
-    const key = line.slice(0, eq).trim()
-    let value = line.slice(eq + 1).trim()
-
-    // strip surrounding quotes
-    if (
-      (value.startsWith('"') && value.endsWith('"')) ||
-      (value.startsWith("'") && value.endsWith("'"))
-    ) {
-      value = value.slice(1, -1)
-    }
-
-    if (key === "enable") enable = value === "true"
-    else if (key === "harness_path") harnessPath = value
-    else if (key === "config_path") configPathOverride = value
-  }
-
-  if (!enable || !harnessPath) return null
-  return { enable, harnessPath, ...(configPathOverride ? { configPath: configPathOverride } : {}) }
 }
 
 /**
- * Check for ~/.harness.toml and, if shim mode is enabled, spawn the local
+ * Check for ~/.harness.json and, if shim mode is enabled, spawn the local
  * harness as a child process. Blocks until the child exits.
  *
  * Returns normally only if:
@@ -90,7 +55,7 @@ export async function tryShim(): Promise<void> {
   if (process.env.NANO_SHIM_ACTIVE) return
 
   const homeDir = process.env.HOME ?? "/home/nano"
-  const shimConfigPath = join(homeDir, ".harness.toml")
+  const shimConfigPath = join(homeDir, ".harness.json")
 
   const shimConfig = parseShimConfig(shimConfigPath)
   if (!shimConfig) return

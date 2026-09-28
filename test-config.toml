@@ -1,3 +1,0 @@
-# Minimal test config — avoids model validation crash on import
-[agent]
-env = "local"

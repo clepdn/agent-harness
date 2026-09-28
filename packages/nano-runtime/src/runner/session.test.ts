@@ -12,7 +12,7 @@ import { resolveNiriHome } from "../agent-config"
 const require = createRequire(import.meta.url)
 const tsxLoader = require.resolve("tsx")
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..")
-const testConfig = path.join(repoRoot, "test-config.toml")
+const testConfig = path.join(repoRoot, "test-config.json")
 
 function runChild(script: string, cwd: string, env: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {

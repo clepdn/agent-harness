@@ -12,7 +12,7 @@ type SupervisorOptions = {
 }
 
 /**
- * The worker takes its whole configuration from TOML, so the control plane
+ * The worker takes its whole configuration from JSON, so the control plane
  * hands it the very flags a standalone `nano` run would use. Nothing about
  * the model, tools, or Discord travels through the environment.
  */

@@ -20,7 +20,7 @@
 		    # NOTE: regenerate after any package-lock change — run
 		    # `nix run nixpkgs#prefetch-npm-deps -- package-lock.json`,
 		    # or `nix build` prints the correct value on mismatch.
-		    npmDepsHash = "sha256-ovlX9rUA2WMb4Oqcb6R2/9S99yLL0CfSWy0dPcLVw5k=";
+		    npmDepsHash = "sha256-g+aZc5TL6CE14I6jTkbdCiDE4uwow4QQjqba3Asa+94=";
 
 		    nativeBuildInputs = with pkgs; [
 			python3      # node-gyp (better-sqlite3, node-pty)
@@ -51,7 +51,7 @@
 			    $out/lib/nano/
 			test -f $out/lib/nano/apps/web/dist/index.html
 
-			# Worker — one process per agent, reads its TOML from --config
+			# Worker — one process per agent, reads its JSON from --config
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/nano \
 			    --add-flags "$out/lib/nano/node_modules/.bin/tsx" \
 			    --add-flags "$out/lib/nano/packages/nano-runtime/src/index.ts" \
@@ -76,7 +76,7 @@
 	nixosModules.nano = { config, pkgs, lib, ... }:
 	    let
 		cfg            = config.services.nano;
-		settingsFormat = pkgs.formats.toml {};
+		settingsFormat = pkgs.formats.json {};
 		oldContextSettings = [
 		    "respect_cache"
 		    "compaction_turn_age"
@@ -158,7 +158,7 @@
 		contextSettings = removeAttrs cfg.settings.context oldContextSettings;
 		modelSettings = normalizeModelSettings cfg.settings.model;
 		modelPresets = lib.mapAttrs (_: normalizeModelSettings) cfg.settings.models;
-		settingsForToml =
+		settingsForJson =
 		    removeAttrs cfg.settings [ "context" "model" "models" ]
 		    // lib.optionalAttrs (contextSettings != defaultContextSettings) {
 			context = contextSettings;
@@ -213,9 +213,9 @@
 			    }
 			'';
 			description = ''
-			    Freeform TOML settings serialized to config.toml and passed via --config.
-			    Keys map directly to TOML — use snake_case throughout (e.g. `discord.gateway_enabled`).
-			    See config.example.toml in the nano repo for the full schema.
+			    Freeform JSON settings serialized to config.json and passed via --config.
+			    Nix attribute sets map directly to JSON objects — use snake_case throughout (e.g. `discord.gateway_enabled`).
+			    See config.example.nix in the nano repo for the full schema.
 
 			    Ignored if `configFile` is set explicitly.
 			'';
@@ -224,21 +224,21 @@
 		    configFile = lib.mkOption {
 			type    = lib.types.nullOr lib.types.path;
 			default =
-			    if settingsForToml == {}
+			    if settingsForJson == {}
 			    then null
-			    else settingsFormat.generate "nano-config.toml" settingsForToml;
+			    else settingsFormat.generate "nano-config.json" settingsForJson;
 			defaultText = lib.literalExpression ''
-			    null when normalized settings are empty; otherwise generated TOML
+			    null when normalized settings are empty; otherwise generated JSON
 			'';
 			description = ''
-			    Path to a TOML config file passed via --config.
+			    Path to a JSON config file passed via --config.
 			    Defaults to a file generated from `settings`; set explicitly to bypass `settings`.
 			'';
 		    };
 		    secretsFile = lib.mkOption {
 			type    = lib.types.nullOr lib.types.str;
 			default = null;
-			description = "Path to a TOML secrets file passed via --secrets.";
+			description = "Path to a JSON secrets file passed via --secrets.";
 		    };
 		    agents = lib.mkOption {
 			type    = lib.types.attrsOf settingsFormat.type;
@@ -248,13 +248,13 @@
 				nano = { client = "local"; };
 				mira  = {
 				    client = "http://mira-macbook.local:3002";
-				    config = [ "/etc/nano/mira-overrides.toml" ];
+				    config = [ "/etc/nano/mira-overrides.json" ];
 				};
 			    }
 			'';
 			description = ''
 			    Agents supervised by the control plane, keyed by agent id. Each
-			    value is a freeform agent TOML file — see "Agent TOML
+			    value is a freeform agent JSON file — see "Agent JSON
 			    specification" in the nano README.
 
 			    `config`, `secrets`, `home`, and `workspace` are filled in from
@@ -345,7 +345,7 @@ let
     # workers keep the login home.
     agentHome = if controlPlane then cfg.stateDir else cfg.homeDir;
 
-    agentFile = id: agent: settingsFormat.generate "nano-agent-${id}.toml" ({
+    agentFile = id: agent: settingsFormat.generate "nano-agent-${id}.json" ({
 home      = "${agentHome}/agents/${id}";
 workspace = agentHome;
     }
@@ -354,7 +354,7 @@ workspace = agentHome;
     // agent);
 
     agentDirectory = pkgs.linkFarm "nano-agents" (lib.mapAttrsToList (id: agent: {
-name = "${id}.toml";
+name = "${id}.json";
 path = agentFile id agent;
     }) cfg.agents);
 

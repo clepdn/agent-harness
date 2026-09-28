@@ -184,7 +184,7 @@ export const summaryModel: Model | null =
     ? buildModel(SUMMARY_PROVIDER, SUMMARY_MODEL, SUMMARY_BASE_URL || undefined, Object.keys(summaryHeaders).length ? summaryHeaders : undefined) ?? null
     : null
 
-// API keys come from the secrets TOML. Empty string means "not configured" and
+// API keys come from the secrets JSON. Empty string means "not configured" and
 // is treated as undefined so callers fall through to their no-key paths.
 export const PRIMARY_API_KEY: string | undefined = config.model.api_key || undefined
 export const FALLBACK_API_KEY: string | undefined = config.fallback.api_key || undefined

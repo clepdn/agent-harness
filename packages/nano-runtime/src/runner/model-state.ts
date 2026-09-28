@@ -2,7 +2,7 @@
  * Mutable runtime model state.
  *
  * The harness resolves model configuration (provider, api_key, thinking, etc.)
- * from TOML presets at startup. This module holds that resolved config in a
+ * from JSON presets at startup. This module holds that resolved config in a
  * mutable singleton so it can be swapped at runtime via the model-swap feature.
  *
  * All code that makes LLM API calls reads from `modelState` rather than the

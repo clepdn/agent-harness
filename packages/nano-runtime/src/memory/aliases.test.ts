@@ -8,7 +8,7 @@ import test from "node:test"
 
 const require = createRequire(import.meta.url)
 const tsxLoader = require.resolve("tsx")
-const testConfig = path.resolve(import.meta.dirname, "../../../../test-config.toml")
+const testConfig = path.resolve(import.meta.dirname, "../../../../test-config.json")
 
 function runChild(script: string, cwd: string, env: NodeJS.ProcessEnv): Promise<void> {
   return new Promise((resolve, reject) => {

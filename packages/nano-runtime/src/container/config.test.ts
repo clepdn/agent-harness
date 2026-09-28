@@ -10,7 +10,7 @@ import test from "node:test"
 const require = createRequire(import.meta.url)
 const tsxLoader = require.resolve("tsx")
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..")
-const baseConfig = path.join(repoRoot, "test-config.toml")
+const baseConfig = path.join(repoRoot, "test-config.json")
 
 type PromiseResolverSet<T> = {
   promise: Promise<T>
@@ -78,10 +78,10 @@ test("explicit image_tool root remains unchanged", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-image-root-explicit-"))
   const home = path.join(root, "durable-home")
   const storeCwd = path.join(root, "nix-store", "nano")
-  const configPath = path.join(root, "config.toml")
+  const configPath = path.join(root, "config.json")
   await fs.mkdir(home, { recursive: true })
   await fs.mkdir(storeCwd, { recursive: true })
-  await fs.writeFile(configPath, '[image_tool]\nroot = "/srv/nano-images"\n')
+  await fs.writeFile(configPath, JSON.stringify({ "image_tool": { "root": "/srv/nano-images" } }))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
 
   assert.equal(await imageRootForChild(storeCwd, configPath, home), "/srv/nano-images")
@@ -91,10 +91,10 @@ test("Docker image root keeps its container path", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-image-root-docker-"))
   const home = path.join(root, "durable-home")
   const storeCwd = path.join(root, "nix-store", "nano")
-  const configPath = path.join(root, "config.toml")
+  const configPath = path.join(root, "config.json")
   await fs.mkdir(home, { recursive: true })
   await fs.mkdir(storeCwd, { recursive: true })
-  await fs.writeFile(configPath, '[container]\nname = "nano"\nuser = "nano"\n')
+  await fs.writeFile(configPath, JSON.stringify({ "container": { "name": "nano", "user": "nano" } }))
   t.after(() => fs.rm(root, { recursive: true, force: true }))
 
   assert.equal(await imageRootForChild(storeCwd, configPath, home), "/home/nano/images")

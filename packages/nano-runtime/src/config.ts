@@ -1,10 +1,10 @@
 /**
- * Runtime configuration loaded from TOML files passed via CLI flags.
+ * Runtime configuration loaded from JSON files passed via CLI flags.
  *
  * Values never touch `process.env` — anything secret stays inside this module
  * so spawned subprocesses (the agent's bash tool) don't inherit credentials.
  *
- *   nano --config /etc/nano/config.toml --secrets /etc/nano/secrets.toml.env
+ *   nano --config /etc/nano/config.json --secrets /etc/nano/secrets.json
  *
  * Both flags are optional; missing values fall back to the defaults defined
  * below. `--config` may be repeated, in which case each file is deep-merged
@@ -13,7 +13,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs"
-import { deepMerge, isTable, parseToml, type TomlTable, type TomlValue } from "@nano/toml"
+import { deepMerge, isConfigObject, parseConfig, type ConfigObject, type ConfigValue } from "@nano/config"
 import { cacheLifetimeMinutes, respectPromptCache } from "./cache-policy"
 
 // ── CLI flag parsing ──────────────────────────────────────────────────────────
@@ -35,25 +35,25 @@ function parseFlags(argv: string[]): { configPaths: string[]; secretsPath?: stri
 
 // ── Loading & merging ─────────────────────────────────────────────────────────
 
-function loadFile(path: string): TomlTable {
+function loadFile(path: string): ConfigObject {
   if (!existsSync(path)) throw new Error(`config file not found: ${path}`)
   try {
-    return parseToml(readFileSync(path, "utf8"))
+    return parseConfig(readFileSync(path, "utf8"))
   } catch (err) {
     throw new Error(`failed to parse ${path}: ${err instanceof Error ? err.message : String(err)}`)
   }
 }
 
-function trimmedString(value: TomlValue | undefined): string {
+function trimmedString(value: ConfigValue | undefined): string {
   return typeof value === "string" ? value.trim() : ""
 }
 
 // Resolve the remote-bridge auth key, preferring an inline value over a file.
 // The file path supports the NixOS/agenix "path to a secret" pattern, keeping
-// the credential out of the config/secrets TOML. Throws when a key file is
+// the credential out of the config/secrets JSON. Throws when a key file is
 // configured but unreadable, so nano fails closed instead of running
 // unauthenticated.
-function resolveBridgeApiKey(config: TomlTable): string {
+function resolveBridgeApiKey(config: ConfigObject): string {
   const inlineKey = trimmedString(config.llm_bridge_api_key)
   if (inlineKey) return inlineKey
 
@@ -77,7 +77,7 @@ const resolvedConfigPaths = configPaths.length > 0
   : (process.env.NANO_CONFIG ? [process.env.NANO_CONFIG] : [])
 const resolvedSecretsPath = secretsPath ?? process.env.NANO_SECRETS
 
-const baseTable = resolvedConfigPaths.reduce<TomlTable>((acc, file) => deepMerge(acc, loadFile(file)), {})
+const baseTable = resolvedConfigPaths.reduce<ConfigObject>((acc, file) => deepMerge(acc, loadFile(file)), {})
 const secretsTable = resolvedSecretsPath ? loadFile(resolvedSecretsPath) : {}
 const merged = deepMerge(baseTable, secretsTable)
 
@@ -90,12 +90,12 @@ if (bridgeApiKey) merged.llm_bridge_api_key = bridgeApiKey
 // section's own fields override. Resolution happens after the config+secrets
 // deep merge, so api_keys from the secrets file merge into presets naturally.
 
-function resolvePreset(section: TomlValue | undefined, presets: TomlTable): TomlTable {
+function resolvePreset(section: ConfigValue | undefined, presets: ConfigObject): ConfigObject {
   const t = table(section)
   const presetName = t.preset
   if (typeof presetName !== "string" || !presetName.trim()) return t
   const preset = presets[presetName.trim()]
-  if (!isTable(preset)) {
+  if (!isConfigObject(preset)) {
     throw new Error(`model preset "${presetName}" not found in [models]`)
   }
   const resolved = deepMerge(preset, t)
@@ -130,11 +130,11 @@ function resolvePreset(section: TomlValue | undefined, presets: TomlTable): Toml
 
 /**
  * Looks up a named model preset from [models.<name>] after config+secrets merge.
- * Returns the resolved TOML table (with secrets merged in) or null if not found.
+ * Returns the resolved configuration object (with secrets merged in) or null if not found.
  */
 export function getModelPreset(name: string): Record<string, unknown> | null {
   const preset = modelsT[name.trim()]
-  if (!isTable(preset)) return null
+  if (!isConfigObject(preset)) return null
   // Resolve bridge/provider/api_key just like resolvePreset does at startup,
   // so runtime model swaps see the correct bridge url and key.
   const resolved = { ...preset }
@@ -167,35 +167,35 @@ export function listModelPresets(): string[] {
 
 // ── Typed accessors ───────────────────────────────────────────────────────────
 
-function table(value: TomlValue | undefined): TomlTable {
-  return isTable(value) ? value : {}
+function table(value: ConfigValue | undefined): ConfigObject {
+  return isConfigObject(value) ? value : {}
 }
 
-function str(value: TomlValue | undefined, fallback: string): string {
+function str(value: ConfigValue | undefined, fallback: string): string {
   return typeof value === "string" ? value : fallback
 }
 
-function num(value: TomlValue | undefined, fallback: number): number {
+function num(value: ConfigValue | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback
 }
 
-function int(value: TomlValue | undefined, fallback: number): number {
+function int(value: ConfigValue | undefined, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? Math.trunc(value) : fallback
 }
 
-function bool(value: TomlValue | undefined, fallback: boolean): boolean {
+function bool(value: ConfigValue | undefined, fallback: boolean): boolean {
   return typeof value === "boolean" ? value : fallback
 }
 
-function strArray(value: TomlValue | undefined): string[] {
+function strArray(value: ConfigValue | undefined): string[] {
   if (Array.isArray(value)) return value.filter((v): v is string => typeof v === "string")
   // Accept the comma-separated spelling too: these fields were environment
-  // variables before they were TOML, and both surfaces still hand us strings.
+  // variables before they were file settings, and both surfaces still hand us strings.
   if (typeof value === "string") return value.split(",").map((item) => item.trim()).filter(Boolean)
   return []
 }
 
-function pickEnum<T extends string>(value: TomlValue | undefined, allowed: readonly T[], fallback: T): T {
+function pickEnum<T extends string>(value: ConfigValue | undefined, allowed: readonly T[], fallback: T): T {
   return typeof value === "string" && (allowed as readonly string[]).includes(value) ? (value as T) : fallback
 }
 
@@ -248,7 +248,7 @@ const subagentConfigs: SubagentConfig[] = (() => {
   const raw = merged.subagents
   if (!Array.isArray(raw)) return []
   return raw
-    .filter((entry): entry is TomlTable => isTable(entry))
+    .filter((entry): entry is ConfigObject => isConfigObject(entry))
     .map((entry) => ({
       name: str(entry.name, "").trim(),
       model: str(entry.model, "").trim(),
@@ -269,7 +269,7 @@ export type ThinkingEffort = (typeof thinkingEfforts)[number]
 export type CompactionStrategy = (typeof compactionStrategies)[number]
 
 /** Validate an enum-valued config string, falling back on unknown values. */
-function enumStr<T extends string>(value: TomlValue | undefined, allowed: readonly T[], fallback: T): T {
+function enumStr<T extends string>(value: ConfigValue | undefined, allowed: readonly T[], fallback: T): T {
   const raw = str(value, fallback).trim().toLowerCase()
   return (allowed as readonly string[]).includes(raw) ? (raw as T) : fallback
 }
@@ -470,7 +470,7 @@ export const config = {
   },
   web_search: {
     // Exa API key. When present and non-empty, the web_search tool is enabled.
-    // Provisioned via the secrets TOML: [web_search] exa_api_key = "exa_..."
+    // Provisioned through web_search.exa_api_key in the JSON secrets file.
     exa_api_key: str(webSearchT.exa_api_key, "").trim(),
   },
 }

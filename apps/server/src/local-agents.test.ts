@@ -27,53 +27,44 @@ function fixture(t: test.TestContext, files: Record<string, string> | ((dir: str
 
 const options = { controlPort: 4300, repoRoot: "/tmp/nano-review" }
 
-test("one toml file is one complete agent", (t) => {
+test("one JSON file is one complete agent", (t) => {
   const directory = fixture(t, (dir) => ({
-    "cfg/base.toml": "[model]\nmodel = \"openai/gpt-5\"\n",
-    "cfg/secrets.toml": "[model]\napi_key = \"model-secret\"\n",
-    "mira.toml": [
-      "name = \"Mira\"",
-      "client = \"http://mira-macbook.local:3002\"",
-      `config = "${dir}/cfg/base.toml"`,
-      `secrets = "${dir}/cfg/secrets.toml"`,
-      "",
-      "[settings]",
-      "RUNNER_MAX_TURNS = 80",
-      "",
-    ].join("\n"),
+    "cfg/base.json": JSON.stringify({ "model": { "model": "openai/gpt-5" } }),
+    "cfg/secrets.json": JSON.stringify({ "model": { "api_key": "model-secret" } }),
+    "mira.json": JSON.stringify({ "name": "Mira", "client": "http://mira-macbook.local:3002", "config": `${dir}/cfg/base.json`, "secrets": `${dir}/cfg/secrets.json`, "settings": { "RUNNER_MAX_TURNS": 80 } }),
   }))
 
   const [agent] = resolveLocalAgents(loadAgentFiles(directory), options)
   assert.equal(agent?.id, "mira")
   assert.equal(agent?.name, "Mira")
   assert.equal(agent?.client, "http://mira-macbook.local:3002")
-  assert.deepEqual(agent?.config, [path.join(directory, "cfg/base.toml")])
-  assert.equal(agent?.secrets, path.join(directory, "cfg/secrets.toml"))
+  assert.deepEqual(agent?.config, [path.join(directory, "cfg/base.json")])
+  assert.equal(agent?.secrets, path.join(directory, "cfg/secrets.json"))
   assert.equal(agent?.settings.RUNNER_MAX_TURNS, "80")
 })
 
 test("config accepts one path or an ordered list of layers", (t) => {
   const directory = fixture(t, (dir) => ({
-    "cfg/base.toml": "[model]\nmodel = \"base\"\n",
-    "cfg/override.toml": "[model]\nmodel = \"override\"\n",
-    "a.toml": `client = "local"\nconfig = ["${dir}/cfg/base.toml", "${dir}/cfg/override.toml"]\n`,
+    "cfg/base.json": JSON.stringify({ "model": { "model": "base" } }),
+    "cfg/override.json": JSON.stringify({ "model": { "model": "override" } }),
+    "a.json": JSON.stringify({ "client": "local", "config": [`${dir}/cfg/base.json`, `${dir}/cfg/override.json`] }),
   }))
 
   const [agent] = resolveLocalAgents(loadAgentFiles(directory), options)
   assert.deepEqual(agent?.config, [
-    path.join(directory, "cfg/base.toml"),
-    path.join(directory, "cfg/override.toml"),
+    path.join(directory, "cfg/base.json"),
+    path.join(directory, "cfg/override.json"),
   ])
 })
 
 test("a config path that does not exist fails startup by name", (t) => {
-  const directory = fixture(t, { "a.toml": "client = \"local\"\nconfig = \"/nowhere/config.toml\"\n" })
-  assert.throws(() => resolveLocalAgents(loadAgentFiles(directory), options), /config file not found: \/nowhere\/config.toml/)
+  const directory = fixture(t, { "a.json": JSON.stringify({ "client": "local", "config": "/nowhere/config.json" }) })
+  assert.throws(() => resolveLocalAgents(loadAgentFiles(directory), options), /config file not found: \/nowhere\/config.json/)
 })
 
 test("local makes the server machine the client", (t) => {
   const directory = fixture(t, {
-    "local.toml": "client = \"local\"\nworkspace = \"/tmp\"\n",
+    "local.json": JSON.stringify({ "client": "local", "workspace": "/tmp" }),
   })
   const [agent] = resolveLocalAgents(loadAgentFiles(directory), options)
   assert.equal(agent?.client, "local")
@@ -82,23 +73,16 @@ test("local makes the server machine the client", (t) => {
 
 test("agent identity, ports, and homes stay isolated", (t) => {
   const directory = fixture(t, {
-    "a.toml": "client = \"local\"\nport = 4301\nhome = \"/tmp/shared\"\n",
-    "b.toml": "client = \"local\"\nport = 4301\nhome = \"/tmp/shared\"\n",
+    "a.json": JSON.stringify({ "client": "local", "port": 4301, "home": "/tmp/shared" }),
+    "b.json": JSON.stringify({ "client": "local", "port": 4301, "home": "/tmp/shared" }),
   })
   assert.throws(() => resolveLocalAgents(loadAgentFiles(directory), options), /share port/)
 })
 
 test("worker environment carries host basics and the executor token path, never raw credentials", (t) => {
   const directory = fixture(t, (dir) => ({
-    "cfg/base.toml": "[model]\nmodel = \"openai/gpt-5\"\napi_key = \"model-secret\"\n\n[discord]\nbot_token = \"discord-secret\"\n",
-    "mira.toml": [
-      "client = \"local\"",
-      `config = "${dir}/cfg/base.toml"`,
-      "",
-      "[settings]",
-      "RUNNER_MAX_TURNS = 80",
-      "",
-    ].join("\n"),
+    "cfg/base.json": JSON.stringify({ "model": { "model": "openai/gpt-5", "api_key": "model-secret" }, "discord": { "bot_token": "discord-secret" } }),
+    "mira.json": JSON.stringify({ "client": "local", "config": `${dir}/cfg/base.json`, "settings": { "RUNNER_MAX_TURNS": 80 } }),
   }))
 
   const [agent] = resolveLocalAgents(loadAgentFiles(directory), options)
@@ -123,38 +107,48 @@ test("worker environment carries host basics and the executor token path, never 
   assert.equal(env.SHELL, undefined)
 })
 
-test("unknown and reserved toml settings fail startup", (t) => {
-  const unknownKey = fixture(t, { "a.toml": "client = \"local\"\nmodel = \"gpt-5\"\n" })
+test("unknown and reserved JSON settings fail startup", (t) => {
+  const unknownKey = fixture(t, { "a.json": JSON.stringify({ "client": "local", "model": "gpt-5" }) })
   assert.throws(() => loadAgentFiles(unknownKey), /unknown keys: model/)
 
-  const lowercase = fixture(t, { "a.toml": "client = \"local\"\n\n[settings]\nrunner_max_turns = 80\n" })
+  const lowercase = fixture(t, { "a.json": JSON.stringify({ "client": "local", "settings": { "runner_max_turns": 80 } }) })
   assert.throws(() => loadAgentFiles(lowercase), /uppercase runtime setting name/)
 
-  const reserved = fixture(t, { "a.toml": "client = \"local\"\n\n[settings]\nNANO_CLIENT = \"local\"\n" })
+  const reserved = fixture(t, { "a.json": JSON.stringify({ "client": "local", "settings": { "NANO_CLIENT": "local" } }) })
   assert.throws(() => loadAgentFiles(reserved), /managed by the server/)
 
-  const configVar = fixture(t, { "a.toml": "client = \"local\"\n\n[settings]\nNANO_CONFIG = \"/etc/nano/config.toml\"\n" })
+  const configVar = fixture(t, { "a.json": JSON.stringify({ "client": "local", "settings": { "NANO_CONFIG": "/etc/nano/config.json" } }) })
   assert.throws(() => loadAgentFiles(configVar), /managed by the server/)
 
-  const executorToken = fixture(t, { "a.toml": "client = \"local\"\n\n[settings]\nNANO_EXECUTOR_TOKEN_FILE = \"/tmp/token\"\n" })
+  const executorToken = fixture(t, { "a.json": JSON.stringify({ "client": "local", "settings": { "NANO_EXECUTOR_TOKEN_FILE": "/tmp/token" } }) })
   assert.throws(() => loadAgentFiles(executorToken), /managed by the server/)
 })
 
-test("malformed toml names the file", (t) => {
-  const directory = fixture(t, { "broken.toml": "client = \n" })
-  assert.throws(() => loadAgentFiles(directory), /broken\.toml: invalid toml/)
+test("malformed JSON names the file", (t) => {
+  const directory = fixture(t, { "broken.json": "{\"client\":" })
+  assert.throws(() => loadAgentFiles(directory), /broken\.json: invalid JSON/)
 })
 
 test("yaml files are no longer discovered", (t) => {
   const directory = fixture(t, { "a.yaml": "client: local\n" })
-  assert.throws(() => loadAgentFiles(directory), /no agent toml files found/)
+  assert.throws(() => loadAgentFiles(directory), /no agent JSON files found/)
+})
+
+test("discovery skips TOML, Nix source files, and JSON examples", (t) => {
+  const directory = fixture(t, {
+    "old.toml": 'client = "local"',
+    "source.nix": '{ client = "local"; }',
+    "ignored.example.json": "invalid example",
+    "active.json": JSON.stringify({ client: "local" }),
+  })
+  assert.deepEqual(resolveLocalAgents(loadAgentFiles(directory), options).map(agent => agent.id), ["active"])
 })
 
 test("one discord bot cannot be driven by two agents", (t) => {
   const directory = fixture(t, (dir) => ({
-    "cfg/shared.toml": "[discord]\nbot_token = \"same-token\"\n",
-    "a.toml": `client = "local"\nconfig = "${dir}/cfg/shared.toml"\n`,
-    "b.toml": `client = "local"\nconfig = "${dir}/cfg/shared.toml"\n`,
+    "cfg/shared.json": JSON.stringify({ "discord": { "bot_token": "same-token" } }),
+    "a.json": JSON.stringify({ "client": "local", "config": `${dir}/cfg/shared.json` }),
+    "b.json": JSON.stringify({ "client": "local", "config": `${dir}/cfg/shared.json` }),
   }))
   const agents = resolveLocalAgents(loadAgentFiles(directory), options)
   assert.throws(() => assertNoDuplicateDiscordTokens(agents), /share \[discord\]\.bot_token/)
@@ -162,9 +156,9 @@ test("one discord bot cannot be driven by two agents", (t) => {
 
 test("a discord token declared only in secrets is still seen", (t) => {
   const directory = fixture(t, (dir) => ({
-    "cfg/secrets.toml": "[discord]\nbot_token = \"secret-token\"\n",
-    "a.toml": `client = "local"\nsecrets = "${dir}/cfg/secrets.toml"\n`,
-    "b.toml": `client = "local"\nsecrets = "${dir}/cfg/secrets.toml"\n`,
+    "cfg/secrets.json": JSON.stringify({ "discord": { "bot_token": "secret-token" } }),
+    "a.json": JSON.stringify({ "client": "local", "secrets": `${dir}/cfg/secrets.json` }),
+    "b.json": JSON.stringify({ "client": "local", "secrets": `${dir}/cfg/secrets.json` }),
   }))
   const agents = resolveLocalAgents(loadAgentFiles(directory), options)
   assert.throws(() => assertNoDuplicateDiscordTokens(agents), /share \[discord\]\.bot_token/)
@@ -172,8 +166,8 @@ test("a discord token declared only in secrets is still seen", (t) => {
 
 test("bridge ports cannot collide with the control plane or a worker", (t) => {
   const directory = fixture(t, {
-    "a.toml": "client = \"local\"\nport = 4301\n\n[settings]\nANTIGRAVITY_BRIDGE_ENABLED = true\nANTIGRAVITY_BRIDGE_PORT = 4400\n",
-    "b.toml": "client = \"local\"\nport = 4302\n\n[settings]\nCODEX_BRIDGE_ENABLED = true\nCODEX_BRIDGE_PORT = 4400\n",
+    "a.json": JSON.stringify({ "client": "local", "port": 4301, "settings": { "ANTIGRAVITY_BRIDGE_ENABLED": true, "ANTIGRAVITY_BRIDGE_PORT": 4400 } }),
+    "b.json": JSON.stringify({ "client": "local", "port": 4302, "settings": { "CODEX_BRIDGE_ENABLED": true, "CODEX_BRIDGE_PORT": 4400 } }),
   })
   const agents = resolveLocalAgents(loadAgentFiles(directory), options)
   assert.throws(() => assertNoDuplicateBridgePorts(agents, 4300), /bridges share port 4400/)

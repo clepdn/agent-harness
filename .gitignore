@@ -26,3 +26,12 @@ home/*
 .codex-tmp-baal-sync
 .codex-tmp*
 result
+
+# Nix source and generated JSON for private configuration
+agents/*.nix
+!agents/*.example.nix
+agents/*.json
+!agents/*.example.json
+config.nix
+config.json
+secrets.json

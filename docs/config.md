@@ -1,46 +1,72 @@
 # Configuration
 
-All runtime configuration for nano lives in two TOML files passed on the
-command line:
-
-```
-nano --config /path/to/config.toml --secrets /path/to/secrets.toml.env
-```
-
-Both flags are optional. When omitted, the values below fall back to their
-defaults. Keys in the secrets file are deep-merged on top of the config file,
-so a key declared in both resolves to the secrets value.
-
-The control plane also accepts `--config`; it reads `[server]` from that file
-for the Web UI bind address and port. Explicit `--host` and `--port` flags win.
-
-> **Why two files?** Secrets are kept out of the main config (and the process
-> environment) so spawned subprocesses — including the agent's shell tool —
-> never inherit credentials. `secrets.toml.env` should be permission-restricted
-> and excluded from version control.
-
-The systemd module (`flake.nix`) exposes matching options:
+Nix is the source configuration format. The NixOS module in `flake.nix` turns
+attribute sets directly into JSON with `pkgs.formats.json`; workers and the
+control plane read the generated JSON. No TOML parser or conversion step is used.
 
 ```nix
 services.nano = {
-  enable      = true;
-  configFile  = "/etc/nano/config.toml";
-  secretsFile = "/etc/nano/secrets.toml.env";
+  enable = true;
+  settings = {
+    server = { port = 3000; listen = "127.0.0.1"; };
+    models.primary = {
+      provider = "openai";
+      model = "your-model-id";
+      cache_lifetime_minutes = 30;
+      respect_prompt_cache = true;
+    };
+    model.preset = "primary";
+  };
+  agents.nano = { client = "local"; };
+  secretsFile = "/run/agenix/nanoSecrets"; # decrypted contents must be JSON
 };
 ```
 
-Both are nullable; when set, they're appended to the service's `ExecStart`.
+Use `services.nano.settings = import ./config.nix;` to keep settings in a separate
+Nix file; [config.example.nix](../config.example.nix) provides a starting point.
+`services.nano.agents` generates one `.json` file per agent. Leaving `agents`
+empty runs a standalone worker. `configFile` can point at an existing JSON file
+to bypass generation from `settings`.
+
+For a source checkout, generate the runtime file directly:
+
+```sh
+nix eval --json --file config.nix > config.json
+npm run start:worker -- --config config.json --secrets /path/to/secrets.json
+```
+
+Both CLI flags are optional. Defaults apply when omitted. Repeat `--config` to
+layer files: objects merge recursively, arrays and other values replace previous
+values, and secrets merge last. Named model presets resolve after merging, so
+credentials can live under matching `models.<name>` objects in the secrets file.
+JSON keys containing dots remain literal keys; use nested objects for sections.
+
+The control plane also accepts `--config`; it reads `server` settings for the Web
+UI bind address and port. Explicit `--host` and `--port` flags win.
+
+Keep secrets out of Nix attribute sets and the Nix store. Use a permission-restricted
+JSON secrets file (see [secrets.example.json](../secrets.example.json)), or an
+extensionless decrypted secret with JSON contents. Credentials are read from
+files rather than the process environment, so tool subprocesses do not inherit
+them. Do not commit secrets.
+
+**Migration:** Coral now accepts JSON only. Existing TOML runtime files, agent
+files, and secrets must be migrated before deploying this version. Updating the
+module regenerates nonsecret settings from Nix as JSON, but does not convert
+external files or encrypted secrets. The optional development shim now reads
+`~/.harness.json`, with a nested `shim` object containing `enable`, `harness_path`,
+and optional `config_path` fields.
 
 ---
 
-## `[server]`
+## `server`
 
 | Key | Default | Description |
 |---|---|---|
 | `port` | `3000` | HTTP port the server listens on. |
 | `listen` | `"127.0.0.1"` | Address the HTTP server and web UI bind to. Use `"0.0.0.0"` for all IPv4 interfaces. |
 
-## `[agent]`
+## `agent`
 
 | Key | Default | Description |
 |---|---|---|
@@ -49,7 +75,7 @@ Both are nullable; when set, they're appended to the service's `ExecStart`.
 
 ---
 
-## `[frontend]`
+## `frontend`
 
 Enables a second virtual nano inside the same worker. Owner-authored DMs route
 to the main runtime; all other Discord ingress that would normally wake nano
@@ -75,7 +101,7 @@ Its Discord reads/searches also exclude the owner's DM channel.
 
 ---
 
-## `[model]` — primary
+## `model` — primary
 
 Used for normal agent turns.
 
@@ -93,7 +119,7 @@ Used for normal agent turns.
 | `cache_warming_mode` | `"completion"` | `"completion"` replays with a one-token output cap, requiring an endpoint that honors it. `"prewarm"` uses llm-bridge's `prompt_cache_options.prewarm` extension for upstream Codex Responses; requires bridge forwarding and backend support. |
 | `cache_lifetime_minutes` | `30` | Assumed provider cache lifetime. Refresh or idle compaction runs three minutes early (27 minutes for a 30-minute lifetime). Values at or below `3` disable both timers. This does not change the provider's retention policy. |
 | `respect_prompt_cache` | `true` | Preserve the prompt prefix. When warming is disabled, compact after `cache_lifetime_minutes - 3` quiet minutes. Accepts the legacy `preserve_prompt_cache` name. |
-| `api_key` *(secret)* | *(required)* | API key for the primary endpoint. Place this in `secrets.toml.env`. |
+| `api_key` *(secret)* | *(required)* | API key for the primary endpoint. Place this in `secrets.json`. |
 
 Cache warming replays the last successful request's full messages, tools, and
 reasoning settings through the same Chat Completions endpoint with
@@ -130,12 +156,12 @@ including independent frontend presets and model swaps.
 
 `idle_compaction_minutes = X` is now a legacy alias for
 `cache_lifetime_minutes = X` with cache respect enabled. This intentionally changes
-the idle timeout from `X` to `X - 3` minutes. The new key wins in TOML when both
+the idle timeout from `X` to `X - 3` minutes. The new key wins in JSON when both
 are supplied. The Nix module renames this option under `services.nano.settings.model`
 and each `services.nano.settings.models.<name>` preset, defaults cache respect to
-`true` for migrated definitions, and emits only the new keys in generated TOML.
+`true` for migrated definitions, and emits only the new keys in generated JSON.
 
-## `[fallback]`
+## `fallback`
 
 Used when the primary endpoint is unreachable or `agent.env = "local"`.
 Defaults target a small, cheap model suitable for local LM Studio / Ollama.
@@ -154,7 +180,7 @@ Defaults target a small, cheap model suitable for local LM Studio / Ollama.
 | `title` | — | `X-Title` header on fallback requests. |
 | `api_key` *(secret)* | — | API key override for the fallback endpoint. |
 
-## `[summary]`
+## `summary`
 
 Optional dedicated summarizer model. Falls back to the primary if not configured
 for automatic uses. Discord `/compact force:true` requires this model, uses it
@@ -176,7 +202,7 @@ bitmap archive of the discarded span, falling back to a text appendix.
 
 ---
 
-## `[embeddings]`
+## `embeddings`
 
 Embeddings power semantic memory search. Set `api_key` to enable; without it
 the embedding client is disabled and memory search falls back to keyword
@@ -193,7 +219,7 @@ matching.
 
 ---
 
-## `[context]`
+## `context`
 
 Token / compaction thresholds.
 
@@ -211,7 +237,7 @@ Token / compaction thresholds.
 | `tool_result_compaction_min_chars` | `2000` | Minimum tool-result length eligible for proactive compaction. |
 | `tool_result_compaction_min_context_percent` | `50` | Minimum percentage of the active generation model's context window that must be used before proactive tool-result compaction runs. |
 
-## `[runner]`
+## `runner`
 
 | Key | Default | Description |
 |---|---|---|
@@ -220,13 +246,13 @@ Token / compaction thresholds.
 
 ---
 
-## `[container]` and `[ssh]`
+## `container` and `ssh`
 
 Three execution backends are available: local shell (default), Docker, and
 SSH. The two override sections are mutually exclusive — setting fields in
 both throws at startup.
 
-### `[container]` (Docker)
+### `container` (Docker)
 
 | Key | Default | Description |
 |---|---|---|
@@ -236,14 +262,14 @@ both throws at startup.
 The harness home (soul, memories, DB) is anchored to the repo-local `home/`
 directory, which should be bind-mounted into the container.
 
-### `[ssh]`
+### `ssh`
 
 | Key | Default | Description |
 |---|---|---|
 | `target` | — | SSH destination in `user@host` form. Setting this activates SSH mode: shell commands run on the remote host via `ssh <target> bash -c <cmd>`. |
 | `identity` | — | Path to the SSH private key passed as `ssh -i <path>`. Omit to use the agent's default key or `~/.ssh/config`. |
 
-## `[image_tool]`
+## `image_tool`
 
 | Key | Default | Description |
 |---|---|---|
@@ -254,7 +280,7 @@ directory, which should be bind-mounted into the container.
 
 ---
 
-## `[context_images]`
+## `context_images`
 
 | Key | Default | Description |
 |---|---|---|
@@ -268,7 +294,7 @@ The harness explains this capability when it assembles each fresh context. It do
 
 ---
 
-## `[discord]`
+## `discord`
 
 ### Credentials & identity
 
@@ -280,7 +306,7 @@ The harness explains this capability when it assembles each fresh context. It do
 | `attach_emoji_bitmap` | `true` | Attach custom Discord emoji as bitmap images when they enter vision context. Animated emoji are fetched as PNG, so only the first frame is included. |
 | `include_user_avatars` | `false` | Attach an author's Discord avatar the first time their message enters vision context, including wake events, inbox, backread, and search results. Deduplicated while their avatar remains in context; the bot uses the separate option below. |
 | `include_bot_avatar` | `false` | Attach the bot user's Discord avatar on each fresh context. Resuming a saved context retains the existing image. |
-| `scan_channel_ids` | `[]` | Channel ids the bot treats as its inbox. DMs are always included regardless. Example: `["1234567890", "0987654321"]`. |
+| `scan_channel_ids` | `[]` | Channel ids the bot treats as its inbox. DMs are always included regardless. Example: `[ "1234567890" "0987654321" ]` in Nix. |
 | `owner_id` | — | Discord user id allowed to use slash commands and whose audio is relayed during realtime voice calls. |
 
 ### Gateway (WebSocket listener)
@@ -325,7 +351,7 @@ The harness explains this capability when it assembles each fresh context. It do
 
 ---
 
-## `[metrics]`
+## `metrics`
 
 | Key | Default | Description |
 |---|---|---|

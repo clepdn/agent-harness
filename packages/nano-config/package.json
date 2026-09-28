@@ -1,8 +1,8 @@
 {
-  "name": "@nano/toml",
+  "name": "@nano/config",
   "version": "0.1.0",
   "private": true,
-  "description": "The house TOML dialect, shared by the runtime config and the agent files.",
+  "description": "JSON configuration loading and layering shared by the runtime and control plane.",
   "type": "module",
   "files": [
     "dist"

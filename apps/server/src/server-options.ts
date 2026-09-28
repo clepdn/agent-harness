@@ -1,5 +1,5 @@
 import fs from "node:fs"
-import { deepMerge, isTable, parseToml, type TomlTable } from "@nano/toml"
+import { deepMerge, isConfigObject, parseConfig, type ConfigObject } from "@nano/config"
 
 export type ControlServerOptions = {
   host: string
@@ -26,23 +26,23 @@ function configPaths(argv: string[], env: NodeJS.ProcessEnv): string[] {
   return paths.length > 0 ? paths : (env.NANO_CONFIG ? [env.NANO_CONFIG] : [])
 }
 
-function loadConfig(paths: string[]): TomlTable {
-  return paths.reduce<TomlTable>((config, path) => {
+function loadConfig(paths: string[]): ConfigObject {
+  return paths.reduce<ConfigObject>((config, path) => {
     try {
-      return deepMerge(config, parseToml(fs.readFileSync(path, "utf8")))
+      return deepMerge(config, parseConfig(fs.readFileSync(path, "utf8")))
     } catch (error) {
       throw new Error(`failed to load config ${path}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }, {})
 }
 
-/** Resolve control-plane network settings. CLI flags override [server] TOML. */
+/** Resolve control-plane network settings. CLI flags override the server config. */
 export function controlServerOptions(
   argv: string[],
   env: NodeJS.ProcessEnv = process.env,
 ): ControlServerOptions {
   const config = loadConfig(configPaths(argv, env))
-  const server = isTable(config.server) ? config.server : {}
+  const server = isConfigObject(config.server) ? config.server : {}
   const configuredHost = typeof server.listen === "string" ? server.listen.trim() : ""
   const host = flag(argv, "--host")?.trim() || configuredHost || "127.0.0.1"
   const rawPort = flag(argv, "--port") ?? server.port ?? 3000
