@@ -15,7 +15,7 @@ import { isWebSearchAvailable } from "../web-search"
 import { createBoredomTimer } from "./boredom-timer"
 import { archiveContextMessages } from "./context-store"
 import { runLoop } from "./loop"
-import { createNiriToolCatalog, reconcileImageToolDefinition } from "./tool-catalog"
+import { createNiriToolCatalog, reconcileImageToolDefinition, reconcileMemoryFileToolDefinitions } from "./tool-catalog"
 import type { RunnerStateInternal } from "./types"
 import {
   archiveDiscardedSession,
@@ -91,16 +91,21 @@ function refreshToolCatalog(reason: "new-session" | "post-compaction"): void {
   }
 }
 
-function reconcileImageToolCatalog(): void {
-  const reconciled = reconcileImageToolDefinition(state.toolCatalog, buildCurrentCatalog())
-  if (!reconciled.changed) return
-  state.toolCatalog = reconciled.catalog
+function reconcileFileToolCatalog(): void {
+  const current = buildCurrentCatalog()
+  const image = reconcileImageToolDefinition(state.toolCatalog, current)
+  const memoryFiles = reconcileMemoryFileToolDefinitions(image.catalog, current)
+  if (!image.changed && !memoryFiles.changed) return
+  state.toolCatalog = memoryFiles.catalog
   state.toolCatalogFingerprint = catalogFingerprint(state.toolCatalog)
   state.toolCatalogEpoch += 1
   state.context = state.context.fork({ tools: getCompletionTools(state.toolCatalog, "frontend"), reason: "tools-change" })
   state.context.append({
     role: "user",
-    content: `[tool environment epoch ${state.toolCatalogEpoch}] image_tool capability refreshed; it accepts public HTTP(S) image URLs.`,
+    content: `[tool environment epoch ${state.toolCatalogEpoch}] ${[
+      image.changed ? "image_tool capability refreshed; it accepts public HTTP(S) image URLs." : null,
+      memoryFiles.changed ? "memory:// read_file exposes LINE#HASH anchors, and edit_file accepts anchored hashline edits." : null,
+    ].filter(Boolean).join(" ")}`,
     timestamp: Date.now(),
   } as Message)
 }
@@ -331,7 +336,7 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
     state.toolCatalogEpoch = saved.toolCatalogEpoch
     state.toolCatalogFingerprint = saved.toolCatalogFingerprint
     state.discordTargets = saved.discordTargets ?? []
-    reconcileImageToolCatalog()
+    reconcileFileToolCatalog()
     applyDiscordTargets(event)
     autoSeeDiscordEvent(event)
     state.context.append({

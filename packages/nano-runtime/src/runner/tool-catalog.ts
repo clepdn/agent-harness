@@ -81,11 +81,15 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
       options.workspace?.imageRoot ?? options.workspace?.root ?? "the attached client workspace",
     ))
   }
+  const memoryRead = createReadFileToolDefinition({ hashline: options.workspace?.hashline === true, memory: true })
   tools.push(
-    createReadFileToolDefinition({
-      hashline: options.workspace?.hashline === true,
-      memory: true,
-    }),
+    {
+      ...memoryRead,
+      function: {
+        ...memoryRead.function,
+        description: `${memoryRead.function.description} Memory:// file lines include LINE#HASH anchors for edit_file, regardless of client hashline settings.`,
+      },
+    },
     MEMORY_FS_TOOL_DEFINITION,
     functionTool("job_list", "List background jobs and their current status.", emptyParameters),
     functionTool(
@@ -125,15 +129,16 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
     ),
     functionTool(
       "edit_file",
-      "Edit a client file or server-owned memory by replacing exactly one old_text occurrence. For memory:// URIs, use the exact content and documentHash returned by memory_search; set new_text to an empty string to expunge a bad fact.",
+      "Edit a client file or server-owned memory. For memory:// URIs, replace one exact old_text occurrence, initialize an existing empty file with old_text: \"\", or use hashline edits with LINE#HASH anchors from read_file. Append/prepend can omit pos for file boundaries. expected_hash guards against stale memory content; use the documentHash returned by memory_search when editing a search result.",
       {
         type: "object",
         additionalProperties: false,
         properties: {
           path: { type: "string", description: "A client path or memory:// Markdown URI." },
-          old_text: { type: "string", minLength: 1, description: "Exact text to replace; it must occur once." },
+          old_text: { type: "string", description: "Exact text to replace once. Empty only when the memory:// file is empty." },
           new_text: { type: "string", description: "Replacement text; may be empty to delete." },
           edits: {
+            description: "Hashline edits for memory:// or enabled clients: replace, append, prepend, or replace_text. Use LINE#HASH from read_file for pos/end; append/prepend may omit pos at file boundaries.",
             type: "array",
             minItems: 1,
             items: {
@@ -557,14 +562,14 @@ export function createNiriToolCatalog(options: NiriToolCatalogOptions = {}): Too
           ...definition,
           function: {
             ...definition.function,
-            description: "Read a server-owned memory:// file or directory. Ordinary and attached-client paths are unavailable; memories/skills is also unavailable.",
+            description: "Read a server-owned memory:// file or directory. File lines include LINE#HASH anchors for edit_file. Ordinary and attached-client paths are unavailable; memories/skills is also unavailable.",
           },
         }
       }
       if (tool.function.name === "edit_file") {
         return functionTool(
           "edit_file",
-          "Edit a server-owned memory:// Markdown resource by replacing exactly one old_text occurrence. Local and attached-client paths are unavailable.",
+          "Edit a server-owned memory:// Markdown resource. Replace one old_text occurrence, initialize an empty file with old_text: \"\", or use hashline edits anchored by LINE#HASH from read_file. Append/prepend may omit pos at file boundaries. Local and attached-client paths are unavailable.",
           tool.function.parameters,
         )
       }
@@ -586,4 +591,23 @@ export function reconcileImageToolDefinition(
     catalog.splice(readIndex < 0 ? catalog.length : readIndex, 0, desired)
   }
   return { catalog, changed: true }
+}
+
+/** Refresh memory read/edit contracts in a restored session's pinned catalog. */
+export function reconcileMemoryFileToolDefinitions(
+  saved: readonly ToolDefinition[],
+  current: readonly ToolDefinition[],
+): { catalog: ToolDefinition[]; changed: boolean } {
+  const catalog = [...saved]
+  let changed = false
+  for (const name of ["read_file", "edit_file"]) {
+    const desired = current.find((tool) => tool.function.name === name)
+    if (!desired) continue
+    const existingIndex = catalog.findIndex((tool) => tool.function.name === name)
+    if (existingIndex >= 0 && JSON.stringify(catalog[existingIndex]) === JSON.stringify(desired)) continue
+    if (existingIndex >= 0) catalog.splice(existingIndex, 1, desired)
+    else catalog.push(desired)
+    changed = true
+  }
+  return { catalog, changed }
 }

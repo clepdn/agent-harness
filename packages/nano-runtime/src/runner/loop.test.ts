@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test, { type TestContext } from "node:test"
-import { __loopTest } from "./loop"
+import { __loopTest, runLoop } from "./loop"
 import { __loopToolsTest, processToolCalls } from "./loop-tools"
 import { modelState } from "./model-state"
 import { fallbackModel } from "./config"
@@ -369,6 +369,82 @@ test("waitForNextEvent returns after successful compaction for immediate reactiv
 
   assert.deepEqual(calls, ["timeout", "compact"])
 })
+
+for (const firstReply of ["wait", "no-tools"] as const) {
+  test(`full-context compaction checks for unfinished work before a ${firstReply} reply idles`, async (t) => {
+    initDb(":memory:")
+    const convId = startConversation("test", new Date().toISOString())
+    const savedModelState = { ...modelState }
+    t.after(() => Object.assign(modelState, savedModelState))
+    Object.assign(modelState, {
+      useFallback: false,
+      primaryModel: { ...fallbackModel, id: "post-compact-test", provider: "openai", baseUrl: "https://post-compact.invalid/v1" },
+      primaryApiKey: "test",
+      primaryToolChoice: "auto",
+      primaryNudgeOnNoTool: false,
+      cacheWarming: false,
+      compactionStrategy: "remote",
+      compactTriggerTokens: 100_000,
+      idleCompactionMs: 0,
+    })
+
+    const state = makeState()
+    state.contextSize = 100_000
+    state.context = new Context({
+      model: modelState.primaryModel!,
+      apiKey: "test",
+      items: [
+        ...Array.from({ length: 50 }, (_, i) => i % 2 === 0
+          ? makeUserMessage(`Earlier request ${i}: ${"details ".repeat(35)}`)
+          : makeAssistantMessage(`Earlier work ${i}: ${"progress ".repeat(35)}`)),
+        makeUserMessage("Finish the current task after compaction."),
+      ],
+    })
+    state.toolCatalog = [{
+      type: "function",
+      function: { name: "wait", description: "wait", parameters: { type: "object", properties: {} } },
+    }]
+    const prompts: Array<Record<string, any>> = []
+    let summaryRequests = 0
+    let idleWaits = 0
+    t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as Record<string, any>
+      if (!body.stream) {
+        summaryRequests += 1
+        return Response.json({
+          choices: [{ index: 0, message: { role: "assistant", content: "I was handling the current task and had completed the older steps. The latest request is still open; I should continue it." }, finish_reason: "stop" }],
+        })
+      }
+      prompts.push(body)
+      const delta = prompts.length === 1 && firstReply === "wait"
+        ? { tool_calls: [{ index: 0, id: "call_wait", type: "function", function: { name: "wait", arguments: "{}" } }] }
+        : { content: "Thinking through the remaining work." }
+      return new Response(`data: ${JSON.stringify({ choices: [{ index: 0, delta, finish_reason: delta.tool_calls ? "tool_calls" : "stop" }] })}\n\ndata: [DONE]\n\n`, {
+        headers: { "content-type": "text/event-stream" },
+      })
+    })
+
+    const outcome = await runLoop(convId, state, {
+      clientTools: testClientTools,
+      refreshToolCatalog: () => {},
+      waitForEvent: async () => { idleWaits += 1; state.discardRequested = true; return null },
+      waitForEventWithTimeout: async () => { idleWaits += 1; state.discardRequested = true; return null },
+      injectIncomingEvent: () => {},
+      flushDeferredEvents: () => {},
+      clearSession: async () => {},
+      saveSession: async () => {},
+      saveShutdownSnapshot: async () => {},
+      shouldShutdown: () => state.discardRequested === true,
+      resolveShutdown: () => {},
+    })
+
+    assert.equal(outcome, "discard")
+    assert.equal(summaryRequests, 1)
+    assert.equal(prompts.length, 2)
+    assert.equal(idleWaits, 1, "the second idle decision is honored without another retry")
+    assert.match(JSON.stringify(prompts[1]!.messages), /Continue any unfinished work from before the compaction/)
+  })
+}
 
 async function makeCacheBudgetState(t: TestContext): Promise<LoopState> {
   t.mock.timers.enable({ apis: ["setTimeout", "Date"] })

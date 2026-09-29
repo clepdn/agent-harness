@@ -8,7 +8,10 @@ import { MEMORY_FS_TOOL_DEFINITION } from "./tool-catalog"
 // Placeholder: the real root belongs to whichever client is attached, which
 // can change mid-session via the /client/connect handshake.
 const IMAGE_ROOT_HINT = "{{IMAGE_ROOT}}"
-const READ_FILE_TOOL = createReadFileToolDefinition({ memory: true }).function
+const READ_FILE_TOOL = {
+  ...createReadFileToolDefinition({ memory: true }).function,
+  description: "Read a client file or server-owned memory:// resource. Memory file lines include LINE#HASH anchors for edit_file; directory reads list immediate contents.",
+}
 
 /** Cast a plain JSON Schema object to the TSchema type. */
 function s(schema: Record<string, unknown>): TSchema {
@@ -94,16 +97,33 @@ export const TOOLS: Tool[] = [
   {
     name: "edit_file",
     description:
-      "Edit a file by replacing an exact snippet of text. old_text must match exactly once in the file — precise, safe, and no shell-escaping headaches. Use read_file first if you need to confirm the exact text. Supports timeout_ms (default 120000, max 600000).",
+      "Edit a client file or memory:// Markdown resource. Replace one exact old_text occurrence; for an existing empty memory file use old_text: \"\" for its first write. Memory files also accept hashline edits using LINE#HASH anchors from read_file. Supports timeout_ms (default 120000, max 600000).",
     parameters: s({
       type: "object",
       properties: {
-        path: { type: "string", description: "Absolute or relative path to the file." },
-        old_text: { type: "string", description: "The exact text to find and replace. Must appear exactly once in the file." },
+        path: { type: "string", description: "Client path or memory:// Markdown URI." },
+        old_text: { type: "string", description: "The exact text to find and replace once; empty only for an empty memory file." },
         new_text: { type: "string", description: "Replacement text. May be empty to delete old_text." },
+        edits: {
+          type: "array",
+          minItems: 1,
+          items: {
+            type: "object",
+            properties: {
+              op: { type: "string", enum: ["replace", "append", "prepend", "replace_text"] },
+              pos: { type: "string" },
+              end: { type: "string" },
+              lines: { type: "array", minItems: 1, items: { type: "string" } },
+              oldText: { type: "string" },
+              newText: { type: "string" },
+            },
+            required: ["op"],
+          },
+        },
+        expected_hash: { type: "string", description: "Optional SHA-1 document hash for stale memory-source protection." },
         timeout_ms: { type: "integer", description: "Edit timeout in milliseconds. Defaults to 120000. Max 600000." },
       },
-      required: ["path", "old_text", "new_text"],
+      required: ["path"],
     }),
   },
   {

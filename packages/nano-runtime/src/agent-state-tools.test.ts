@@ -106,6 +106,58 @@ test("memory_fs manages memory resources and copies container files", async (t) 
   await assert.rejects(() => fs.access(path.join(memoriesDir, "temporary")))
 })
 
+test("new memory files accept a first write and hashline edits", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-memory-first-write-"))
+  const home = path.join(root, "home")
+  const filePath = path.join(home, "memories", "journal", "today.md")
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+
+  const moduleUrl = new URL("./agent-state-tools.ts", import.meta.url).href
+  const script = `
+    import assert from "node:assert/strict"
+    import { createHash } from "node:crypto"
+    const { editMemoryResource, editMemoryResourceHashline, memoryFs, readMemory } = await import(${JSON.stringify(moduleUrl)})
+    const uri = "memory://journal/today.md"
+    await memoryFs(uri, "create")
+    const emptyHash = createHash("sha1").update("").digest("hex")
+    await editMemoryResource(uri, "", "# Today\\nfirst entry\\nsecond entry\\n", emptyHash)
+    assert.match(await readMemory(uri), /# Today/)
+    await assert.rejects(() => editMemoryResource(uri, "", "overwrite"), /requires an empty file/)
+    await assert.rejects(() => editMemoryResourceHashline(uri, [{ op: "append", lines: ["stale"] }], emptyHash), /changed since search/)
+    const read = await readMemory(uri, undefined, undefined, { hashline: true })
+    const anchor = read.match(/^(2#[A-Z]+): first entry$/m)?.[1]
+    assert.ok(anchor, read)
+    assert.ok((await readMemory(uri, 2, 2, { hashline: true })).includes(anchor + ": first entry"))
+    await editMemoryResourceHashline(uri, [{ op: "replace", pos: anchor, lines: ["updated entry"] }])
+    await assert.rejects(() => editMemoryResourceHashline(uri, [{ op: "replace", pos: anchor, lines: ["stale"] }]), /E_STALE_ANCHOR/)
+    const updated = await readMemory(uri, undefined, undefined, { hashline: true })
+    const updatedAnchor = updated.match(/^(2#[A-Z]+): updated entry$/m)?.[1]
+    assert.ok(updatedAnchor, updated)
+    await editMemoryResourceHashline(uri, [{ op: "append", pos: updatedAnchor, lines: ["anchored addition"] }])
+    await editMemoryResourceHashline(uri, [{ op: "prepend", lines: ["Preface"] }])
+    const ranged = await readMemory(uri, undefined, undefined, { hashline: true })
+    const rangeStart = ranged.match(/^(3#[A-Z]+): updated entry$/m)?.[1]
+    const rangeEnd = ranged.match(/^(4#[A-Z]+): anchored addition$/m)?.[1]
+    assert.ok(rangeStart && rangeEnd, ranged)
+    await editMemoryResourceHashline(uri, [{ op: "replace", pos: rangeStart, end: rangeEnd, lines: ["combined entry"] }])
+    await editMemoryResourceHashline(uri, [{ op: "replace_text", oldText: "second entry", newText: "final entry" }])
+    await assert.rejects(() => editMemoryResourceHashline(uri, [{ op: "replace", lines: ["bad"] }]), /requires a "pos" anchor/)
+    await assert.rejects(() => editMemoryResourceHashline("memory://journal/missing.md", [{ op: "append", lines: ["bad"] }]), /does not exist/)
+  `
+  const result = await new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      env: { ...process.env, NANO_HOME: home },
+      stdio: ["ignore", "ignore", "pipe"],
+    })
+    let stderr = ""
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk })
+    child.on("error", reject)
+    child.on("close", (code) => resolve({ code, stderr }))
+  })
+  assert.equal(result.code, 0, result.stderr)
+  assert.equal(await fs.readFile(filePath, "utf8"), "Preface\n# Today\ncombined entry\nfinal entry\n")
+})
+
 test("memory patch mode edits successfully and enforces unique target presence", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-memory-patch-"))
   const home = path.join(root, "home")

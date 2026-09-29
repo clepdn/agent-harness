@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto"
 import { constants, type Stats } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
+import { applyHashlineEdits, computeLineHash, resolveEditAnchors, type HashlineToolEdit } from "@nano/harness-client-node"
 import { NANO_HOME } from "./agent-config"
 import { isDbInitialized } from "./db"
 import { syncMemoryIndex } from "./memory"
@@ -15,6 +16,8 @@ export type MemoryAccessOptions = {
   allowLocalCopy?: boolean
   /** Present memory://soul.md as a private patch over the main soul. */
   virtualizeSoul?: boolean
+  /** Include hashline anchors when displaying memory file contents. */
+  hashline?: boolean
 }
 
 function isSkillMemoryPath(filePath: string): boolean {
@@ -412,18 +415,14 @@ async function prepareExistingMemoryResource(resource: MemoryResource): Promise<
   if (!targetStat.isFile()) throw new Error("memory target must be a regular file")
 }
 
-/** Replace one exact source fragment in a server-owned memory resource. */
-export async function editMemoryResource(
+async function updateMemoryResource(
   uri: unknown,
-  oldText: unknown,
-  newText: unknown,
+  update: (existing: string, filePath: string) => string,
   expectedHash?: unknown,
   options?: MemoryAccessOptions,
 ): Promise<string> {
   const resource = memoryResourcePath(uri)
   assertMemoryAccess(resource.filePath, options)
-  if (typeof oldText !== "string" || !oldText) throw new Error("old_text is required")
-  if (typeof newText !== "string") throw new Error("new_text is required")
   if (expectedHash !== undefined && (typeof expectedHash !== "string" || !/^[a-f0-9]{40}$/i.test(expectedHash))) {
     throw new Error("expected_hash must be a SHA-1 document hash")
   }
@@ -436,12 +435,7 @@ export async function editMemoryResource(
       throw new Error(`memory document changed since search (${resource.filePath})`)
     }
   }
-  const index = existing.indexOf(oldText)
-  if (index === -1) throw new Error(`edit failed: old_text not found in ${resource.filePath}`)
-  if (existing.indexOf(oldText, index + oldText.length) !== -1) {
-    throw new Error(`edit failed: old_text is not unique in ${resource.filePath}`)
-  }
-  const content = existing.slice(0, index) + newText + existing.slice(index + oldText.length)
+  const content = update(existing, resource.filePath)
   validateContent(content, true)
   if (virtualSoul) {
     const result = await writeFrontendSoul(existing, content)
@@ -453,6 +447,48 @@ export async function editMemoryResource(
   if (resource.indexed) await syncMemoryAfterWrite()
   const warning = await getWarningForFile(resource.filePath)
   return `edited ${resource.filePath}${warning}`
+}
+
+/** Replace one exact source fragment, or initialize an existing empty memory file. */
+export async function editMemoryResource(
+  uri: unknown,
+  oldText: unknown,
+  newText: unknown,
+  expectedHash?: unknown,
+  options?: MemoryAccessOptions,
+): Promise<string> {
+  if (typeof oldText !== "string") throw new Error("old_text is required")
+  if (typeof newText !== "string") throw new Error("new_text is required")
+  return updateMemoryResource(uri, (existing, filePath) => {
+    if (oldText === "") {
+      if (existing !== "") throw new Error(`edit failed: empty old_text requires an empty file in ${filePath}`)
+      return newText
+    }
+    const index = existing.indexOf(oldText)
+    if (index === -1) throw new Error(`edit failed: old_text not found in ${filePath}`)
+    if (existing.indexOf(oldText, index + oldText.length) !== -1) {
+      throw new Error(`edit failed: old_text is not unique in ${filePath}`)
+    }
+    return existing.slice(0, index) + newText + existing.slice(index + oldText.length)
+  }, expectedHash, options)
+}
+
+/** Apply the same hashline edit engine used by attached client files. */
+export async function editMemoryResourceHashline(
+  uri: unknown,
+  edits: unknown,
+  expectedHash?: unknown,
+  options?: MemoryAccessOptions,
+): Promise<string> {
+  if (!Array.isArray(edits) || edits.length === 0) throw new Error("memory edits must be a non-empty array")
+  const parsed = resolveEditAnchors(edits as HashlineToolEdit[])
+  let warnings: string[] | undefined
+  const result = await updateMemoryResource(uri, (existing) => {
+    const applied = applyHashlineEdits(existing, parsed)
+    warnings = applied.warnings
+    return applied.content
+  }, expectedHash, options)
+  return warnings?.length ? `${result}\nWarnings: ${warnings.join("; ")}` : result
 }
 
 export async function writeSoul(content: unknown, mode: unknown, target?: unknown): Promise<string> {
@@ -620,7 +656,7 @@ export async function readMemory(relativePath: unknown, startLine?: unknown, end
   if (filePath === MEMORY_ROOT) await fs.mkdir(MEMORY_ROOT, { recursive: true, mode: 0o700 })
   const virtualSoul = options?.virtualizeSoul === true && filePath === path.join(NANO_HOME, "soul.md")
   if (virtualSoul) {
-    return formatMemoryRead(displayPath, await readFrontendSoul(), startLine, endLine)
+    return formatMemoryRead(displayPath, await readFrontendSoul(), startLine, endLine, options?.hashline)
   }
   const stat = await verifyMemoryReadTarget(filePath, root)
   if (stat.isDirectory()) {
@@ -646,10 +682,10 @@ export async function readMemory(relativePath: unknown, startLine?: unknown, end
     throw error
   }
 
-  return formatMemoryRead(displayPath, content, startLine, endLine)
+  return formatMemoryRead(displayPath, content, startLine, endLine, options?.hashline)
 }
 
-function formatMemoryRead(displayPath: string, content: string, startLine?: unknown, endLine?: unknown): string {
+function formatMemoryRead(displayPath: string, content: string, startLine?: unknown, endLine?: unknown, hashline = false): string {
   const start = Math.max(1, Math.trunc(Number(startLine)) || 1)
   const lines = content.split("\n")
   if (lines.at(-1) === "") lines.pop()
@@ -676,7 +712,9 @@ function formatMemoryRead(displayPath: string, content: string, startLine?: unkn
     effectiveEnd = Math.min(searchStartIdx, totalLines)
   }
 
-  let selected = lines.slice(startIdx, effectiveEnd).join("\n")
+  let selected = lines.slice(startIdx, effectiveEnd)
+    .map((line, index) => hashline ? `${startIdx + index + 1}#${computeLineHash(lines, startIdx + index)}: ${line}` : line)
+    .join("\n")
   if (effectiveEnd < totalLines) {
     if (foundHeaderIdx !== -1) {
       selected += `\n\n[Note: Content stopped before the next section header on line ${effectiveEnd + 1}. To read further, call 'read_file' with start_line=${effectiveEnd + 1}.]`

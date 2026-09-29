@@ -3,7 +3,7 @@ import { config } from "../config"
 import { normalizeTimeoutMs } from "../container/config"
 import type { ClientImageArtifact, ClientToolName } from "@nano/harness-protocol"
 import { AGENT_ID } from "../agent-config"
-import { grepMemory, listMemory, loadSkill, memoryFs, readMemory, editMemoryResource } from "../agent-state-tools"
+import { grepMemory, listMemory, loadSkill, memoryFs, readMemory, editMemoryResource, editMemoryResourceHashline } from "../agent-state-tools"
 import { clientTools } from "../client"
 import { logMessage } from "../db"
 import {
@@ -46,6 +46,10 @@ function memoryAccessFor(state: { runtimeKind?: string }): MemoryAccessOptions |
   return state.runtimeKind === "frontend"
     ? { excludeSkills: true, excludeMainSessionArchives: true, allowLocalCopy: false, virtualizeSoul: true }
     : undefined
+}
+
+function memoryReadAccessFor(state: { runtimeKind?: string }): MemoryAccessOptions {
+  return { ...memoryAccessFor(state), hashline: true }
 }
 
 function discordDeliveryToolResult(result: Record<string, unknown>): string {
@@ -306,7 +310,7 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
           name: "read_file",
           logArgKeys: ["path", "start_line", "end_line"] as const,
           runArgKeys: ["path", "start_line", "end_line"] as const,
-          run: (path, startLine, endLine) => readMemory(path, startLine, endLine, memoryAccessFor(ctx.state)),
+          run: (path, startLine, endLine) => readMemory(path, startLine, endLine, memoryReadAccessFor(ctx.state)),
         })
       }
       if (ctx.state.runtimeKind === "frontend") {
@@ -369,18 +373,19 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         })
       }
       if (pathArg.startsWith("memory://")) {
-        if (!exactValid) {
-          return runStandardTool(ctx, {
-            name: "edit_file", logArgKeys: ["path"] as const, runArgKeys: [] as const,
-            run: async () => { throw new Error("memory:// resources accept only old_text/new_text") }, emitArgKeys: ["path"] as const, previewChars: 0,
-          })
-        }
-        return runStandardTool(ctx, {
-          name: "edit_file", logArgKeys: ["path"] as const,
-          runArgKeys: ["path", "old_text", "new_text", "expected_hash"] as const,
-          run: (uri, oldText, newText, expectedHash) => editMemoryResource(uri, oldText, newText, expectedHash, memoryAccessFor(ctx.state)),
-          emitArgKeys: ["path"] as const, previewChars: 0,
-        })
+        return exactValid
+          ? runStandardTool(ctx, {
+              name: "edit_file", logArgKeys: ["path"] as const,
+              runArgKeys: ["path", "old_text", "new_text", "expected_hash"] as const,
+              run: (uri, oldText, newText, expectedHash) => editMemoryResource(uri, oldText, newText, expectedHash, memoryAccessFor(ctx.state)),
+              emitArgKeys: ["path"] as const, previewChars: 0,
+            })
+          : runStandardTool(ctx, {
+              name: "edit_file", logArgKeys: ["path"] as const,
+              runArgKeys: ["path", "edits", "expected_hash"] as const,
+              run: (uri, edits, expectedHash) => editMemoryResourceHashline(uri, edits, expectedHash, memoryAccessFor(ctx.state)),
+              emitArgKeys: ["path"] as const, previewChars: 0,
+            })
       }
       if (ctx.state.runtimeKind === "frontend") {
         return runStandardTool(ctx, {

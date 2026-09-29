@@ -557,6 +557,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
   let turnCount = 0
   let previousTurnSignature: string | null = null
   let consecutiveIdenticalToolTurns = 0
+  let postCompactionIdleRetryUsed = false
   const cacheWarmer = createCacheWarmer({
     target: () => {
       const modelState = modelStateFor(state.runtimeKind)
@@ -604,6 +605,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       return "rest"
     }
 
+    const fullContextCompactionDue = state.contextSize >= modelStateFor(state.runtimeKind).compactTriggerTokens
     const compacted = await applyCompaction(state, "pre-turn")
     if (compacted === "rewritten") hooks.refreshToolCatalog("post-compaction")
     if (state.discardRequested) {
@@ -715,6 +717,23 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       return "rest"
     }
 
+    // A full-context rewrite can make the first response look like the task
+    // ended, even though this loop was in the middle of working through it.
+    // Give that response one explicit continuation check before going idle.
+    // This check is one-shot until another tool turn or incoming event, so an
+    // intentional second wait still takes effect.
+    if (fullContextCompactionDue && compacted === "rewritten" && !postCompactionIdleRetryUsed && !deliveryNudged &&
+        (outcome === CycleOutcome.NoTools || outcome === CycleOutcome.Wait)) {
+      console.log("[runner] first post-compaction turn would idle; checking for unfinished work")
+      postCompactionIdleRetryUsed = true
+      state.context.append({
+        role: "user",
+        content: "[system] Context was just compacted during an active turn. Continue any unfinished work from before the compaction. If the work is complete, you may wait for the next event.",
+        timestamp: Date.now(),
+      })
+      continue
+    }
+
     if (outcome === CycleOutcome.NoTools) {
       if (deliveryNudged) continue
       if (modelStateFor(state.runtimeKind).primaryNudgeOnNoTool) {
@@ -729,6 +748,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       setWorking(false)
       setPromWorking(false)
       await waitForNextEvent(convId, state, hooks)
+      postCompactionIdleRetryUsed = false
       continue
     }
 
@@ -738,9 +758,11 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       setWorking(false)
       setPromWorking(false)
       await waitForNextEvent(convId, state, hooks)
+      postCompactionIdleRetryUsed = false
       continue
     }
 
+    postCompactionIdleRetryUsed = false
     if (turnCount >= RUNNER_MAX_TURNS) {
       await applyLoopGuardNudge(state, hooks, `loop guard tripped after ${turnCount} turns`)
       turnCount = 0
