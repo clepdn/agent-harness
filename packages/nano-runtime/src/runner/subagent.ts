@@ -55,14 +55,14 @@ function resolveSubagentModel(subagent: SubagentConfig): { model: Model; apiKey:
       const apiKey = typeof preset.api_key === "string" ? preset.api_key.trim() : undefined
       const contextWindow = typeof preset.context_window === "number" ? preset.context_window : undefined
       if (modelId) {
-        const built = buildModel(provider, modelId, baseUrl || undefined, undefined, contextWindow)
+        const built = buildModel(provider, modelId, baseUrl || undefined, undefined, contextWindow, preset.bridge === true, apiKey)
         if (built) {
           return { model: built, apiKey: apiKey ?? modelState.primaryApiKey, toolChoice: modelState.primaryToolChoice }
         }
       }
     }
     // Fallback: treat subagent.model as a raw model string (legacy behavior)
-    const built = buildModel(MODEL_PROVIDER, subagent.model, MODEL_BASE_URL || undefined)
+    const built = buildModel(MODEL_PROVIDER, subagent.model, MODEL_BASE_URL || undefined, undefined, undefined, config.model.bridge, config.model.api_key)
     if (built) {
       return { model: built, apiKey: modelState.primaryApiKey, toolChoice: modelState.primaryToolChoice }
     }

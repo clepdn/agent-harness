@@ -91,40 +91,34 @@ if (bridgeApiKey) merged.llm_bridge_api_key = bridgeApiKey
 // deep merge, so api_keys from the secrets file merge into presets naturally.
 
 function resolvePreset(section: ConfigValue | undefined, presets: ConfigObject): ConfigObject {
-  const t = table(section)
-  const presetName = t.preset
-  if (typeof presetName !== "string" || !presetName.trim()) return t
-  const preset = presets[presetName.trim()]
-  if (!isConfigObject(preset)) {
-    throw new Error(`model preset "${presetName}" not found in [models]`)
+  const tableValue = table(section)
+  const presetName = tableValue.preset
+  let preset: ConfigObject | undefined
+  let resolved: ConfigObject
+  if (typeof presetName === "string" && presetName.trim()) {
+    const value = presets[presetName.trim()]
+    if (!isConfigObject(value)) {
+      throw new Error(`model preset "${presetName}" not found in [models]`)
+    }
+    preset = value
+    resolved = deepMerge(value, tableValue)
+    delete resolved.preset
+  } else {
+    resolved = { ...tableValue }
   }
-  const resolved = deepMerge(preset, t)
-  delete resolved.preset
 
-  // If bridge = true on the preset, route through the llm_bridge_url
-  // as a standard OpenAI-compatible endpoint, using llm_bridge_api_key
-  // for authentication. A preset-level api_key wins if explicitly set on
-  // the preset itself; any section-level api_key (including one deep-merged
-  // from a stale secrets file) is discarded, since the bridge only accepts
-  // its own key and sending anything else guarantees a 401.
   if (resolved.bridge === true) {
     const bridgeUrl = str(merged.llm_bridge_url, "").trim()
     if (bridgeUrl) {
       resolved.provider = "openai"
       resolved.base_url = bridgeUrl
     }
-    const presetKey = str(preset.api_key, "").trim()
+    const presetKey = str(preset?.api_key ?? tableValue.api_key, "").trim()
     const bridgeKey = str(merged.llm_bridge_api_key, "").trim()
-    if (presetKey) {
-      resolved.api_key = presetKey
-    } else if (bridgeKey) {
-      resolved.api_key = bridgeKey
-    } else {
-      delete resolved.api_key
-    }
+    if (presetKey) resolved.api_key = presetKey
+    else if (bridgeKey) resolved.api_key = bridgeKey
+    else delete resolved.api_key
   }
-  delete resolved.bridge
-
   return resolved
 }
 
@@ -134,28 +128,7 @@ function resolvePreset(section: ConfigValue | undefined, presets: ConfigObject):
  */
 export function getModelPreset(name: string): Record<string, unknown> | null {
   const preset = modelsT[name.trim()]
-  if (!isConfigObject(preset)) return null
-  // Resolve bridge/provider/api_key just like resolvePreset does at startup,
-  // so runtime model swaps see the correct bridge url and key.
-  const resolved = { ...preset }
-  if (resolved.bridge === true) {
-    const bridgeUrl = str(merged.llm_bridge_url, "").trim()
-    if (bridgeUrl) {
-      resolved.provider = "openai"
-      resolved.base_url = bridgeUrl
-    }
-    const presetKey = str(preset.api_key, "").trim()
-    const bridgeKey = str(merged.llm_bridge_api_key, "").trim()
-    if (presetKey) {
-      resolved.api_key = presetKey
-    } else if (bridgeKey) {
-      resolved.api_key = bridgeKey
-    } else {
-      delete resolved.api_key
-    }
-  }
-  delete resolved.bridge
-  return resolved
+  return isConfigObject(preset) ? resolvePreset(preset, modelsT) : null
 }
 
 /**
@@ -261,7 +234,7 @@ const subagentConfigs: SubagentConfig[] = (() => {
 })()
 
 const toolChoices = ["required", "auto", "none"] as const
-const thinkingEfforts = ["minimal", "low", "medium", "high", "xhigh"] as const
+const thinkingEfforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const
 const compactionStrategies = ["companion", "context-full", "snapcompact", "remote", "off"] as const
 
 export type ToolChoice = (typeof toolChoices)[number]
@@ -282,6 +255,7 @@ const modelConfig = {
   model: str(modelT.model, "").trim(),
   base_url: str(modelT.base_url, "").trim(),
   api_key: str(modelT.api_key, "").trim(),
+  bridge: bool(modelT.bridge, false),
   tool_choice: pickEnum(modelT.tool_choice, toolChoices, "required"),
   fast: bool(modelT.fast, false),
   enable_thinking: bool(modelT.enable_thinking, true),
@@ -349,6 +323,7 @@ export const config = {
     model: str(fallbackT.model, "").trim() || "zai-org/glm-4.7-flash",
     base_url: str(fallbackT.base_url, "").trim(),
     api_key: str(fallbackT.api_key, "").trim(),
+    bridge: bool(fallbackT.bridge, false),
     tool_choice: pickEnum(fallbackT.tool_choice, toolChoices, "required"),
     referer: str(fallbackT.referer, "").trim(),
     title: str(fallbackT.title, "").trim(),
@@ -365,6 +340,7 @@ export const config = {
     model: str(summaryT.model, "").trim(),
     base_url: str(summaryT.base_url, "").trim(),
     api_key: str(summaryT.api_key, "").trim(),
+    bridge: bool(summaryT.bridge, false),
     referer: str(summaryT.referer, "").trim(),
     title: str(summaryT.title, "").trim(),
   },

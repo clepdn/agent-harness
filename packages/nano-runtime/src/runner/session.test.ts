@@ -58,7 +58,7 @@ test("runner persistence uses NANO_HOME when cwd is read-only", async (t) => {
       const toolCatalog = []
       const toolCatalogFingerprint = (await import("node:crypto")).createHash("sha256").update(JSON.stringify(toolCatalog)).digest("hex")
       const discordTargets = [{ position: 1, channelId: "hidden-channel", messageId: "hidden-message", itemId: "hidden-message", content: "hello" }]
-      await saveSession({ version: 1, messages, toolCatalog, toolCatalogEpoch: 1, toolCatalogFingerprint, discordTargets, contextId: "ctx-current", parentContextId: "ctx-parent", contextForkReason: "compaction", contextConfigurationFingerprint: "config-hash", contextModelId: "test-model" })
+      await saveSession({ version: 1, messages, toolCatalog, toolCatalogEpoch: 1, toolCatalogFingerprint, discordTargets, contextId: "ctx-current", parentContextId: "ctx-parent", contextForkReason: "compaction", contextConfigurationFingerprint: "config-hash", contextModelId: "test-model", contextEffortState: { initialEffort: "medium", updates: [{ beforeMessageIndex: 1, effort: "high" }] } })
       await saveRestSnapshot(messages, "checkpoint")
       initMetricsDb()
     `,
@@ -76,6 +76,7 @@ test("runner persistence uses NANO_HOME when cwd is read-only", async (t) => {
   assert.equal(savedSession.contextForkReason, "compaction")
   assert.equal(savedSession.contextConfigurationFingerprint, "config-hash")
   assert.equal(savedSession.contextModelId, "test-model")
+  assert.deepEqual(savedSession.contextEffortState, { initialEffort: "medium", updates: [{ beforeMessageIndex: 1, effort: "high" }] })
   assert.equal(savedRest.note, "checkpoint")
   assert.equal((await fs.stat(path.join(home, "session.json"))).mode & 0o777, 0o600)
   assert.equal((await fs.stat(path.join(home, ".nano-rest-snapshot.json"))).mode & 0o777, 0o600)
@@ -142,11 +143,8 @@ test("invalid nested session state is quarantined and restored from the last-kno
       await saveSession(snapshot("last good"))
       await saveSession(snapshot("newer"))
       await fs.writeFile(path.join(process.env.NANO_HOME, "session.json"), JSON.stringify({
-        version: 1,
-        messages: [{ role: "assistant", content: null, timestamp: 1 }],
-        toolCatalog,
-        toolCatalogEpoch: 1,
-        toolCatalogFingerprint,
+        ...snapshot("invalid timeline"),
+        contextEffortState: { initialEffort: "medium", updates: [{ beforeMessageIndex: 2, effort: "high" }] },
       }))
       const loaded = await loadSession()
       await fs.writeFile(path.join(process.env.NANO_HOME, "loaded-result.json"), JSON.stringify(loaded))

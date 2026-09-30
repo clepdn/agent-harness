@@ -157,3 +157,145 @@ test("streaming requests retain their prompt for warming, and prewarm errors nev
   assert.equal(context.lastCacheUseAt, lastUsed)
   assert.deepEqual(context.snapshot(), before)
 })
+
+type CapturedEffortRequest = {
+  stream?: boolean
+  reasoning_effort?: string
+  messages: Array<{ type?: string; role?: string; content?: unknown; reasoning?: { effort: string } }>
+}
+
+test("GPT-6 effort changes preserve the prefix and survive restore, truncation, and warming", async (t) => {
+  const bodies: CapturedEffortRequest[] = []
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    const body = JSON.parse(String(init.body))
+    bodies.push(body)
+    return body.stream ? streamResponse() : completionResponse()
+  })
+  const bridgeModel: Model = {
+    ...model,
+    id: "gpt-6-sol",
+    bridge: true,
+    effortCapabilities: { supportedEfforts: ["low", "high", "max"], defaultEffort: "low", changeMode: "configuration-update" },
+  }
+  const context = new Context({ model: bridgeModel, apiKey: "test", thinkingLevel: "low", items: [user("first")] })
+  await context.complete()
+  const fingerprint = context.configurationFingerprint
+  assert.equal(context.changeEffort("high"), context)
+  assert.equal(context.configurationFingerprint, fingerprint)
+  context.append(user("hard follow-up"))
+  await context.complete({ captureCacheWarmRequest: true, onEvent: () => {} })
+  assert.equal(bodies[1].reasoning_effort, "low")
+  assert.deepEqual(bodies[1].messages.slice(0, bodies[0].messages.length), bodies[0].messages)
+  assert.deepEqual(bodies[1].messages[2], { type: "configuration_update", reasoning: { effort: "high" } })
+  assert.equal(bodies[1].messages[3].content, "hard follow-up")
+  await context.warmCache({ mode: "prewarm" })
+  assert.deepEqual(bodies[2].messages, bodies[1].messages)
+
+  const restored = Context.restore({ model: bridgeModel, apiKey: "test", id: context.id, items: context.snapshot(), effortState: context.effortState })
+  assert.equal(restored.thinkingLevel, "high")
+  restored.changeEffort("max").append(user("harder"))
+  await restored.complete()
+  assert.equal(bodies[3].reasoning_effort, "low")
+  assert.deepEqual(bodies[3].messages.filter((item) => item.type === "configuration_update"), [
+    { type: "configuration_update", reasoning: { effort: "high" } },
+    { type: "configuration_update", reasoning: { effort: "max" } },
+  ])
+  assert.equal(restored.forkAt(1).thinkingLevel, "low")
+  assert.equal(restored.forkAt(3).thinkingLevel, "high")
+  const compacted = restored.fork({ items: [user("summary")], reason: "compaction" })
+  await compacted.complete()
+  assert.equal(bodies[4].reasoning_effort, "max")
+  assert.equal(bodies[4].messages.some((item) => item.type === "configuration_update"), false)
+  const unavailable = restored.fork({ model: { ...bridgeModel, effortCapabilities: undefined }, reason: "model-change" })
+  await unavailable.complete()
+  assert.equal(unavailable.thinkingLevel, "max")
+  assert.equal(bodies[5].reasoning_effort, "max")
+  assert.equal(bodies[5].messages.some((item) => item.type === "configuration_update"), false)
+})
+
+test("cache-reset effort changes need acceptance and unavailable metadata leaves configured inference intact", async (t) => {
+  const bodies: CapturedEffortRequest[] = []
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    bodies.push(JSON.parse(String(init.body)))
+    return completionResponse()
+  })
+  const context = new Context({ model: {
+    ...model, id: "gpt-5.6-sol", bridge: true,
+    effortCapabilities: { supportedEfforts: ["low", "high"], changeMode: "cache-reset" },
+  }, apiKey: "test", thinkingLevel: "low", items: [user("hello")] })
+  assert.throws(() => context.changeEffort("high"), /allowCacheReset/)
+  assert.throws(() => context.fork({ thinkingLevel: "high" }), /changeEffort/)
+  assert.throws(() => context.changeEffort("max", { allowCacheReset: true }), /does not support/)
+  assert.equal(context.thinkingLevel, "low")
+  const changed = context.changeEffort("high", { allowCacheReset: true })
+  assert.notEqual(changed.id, context.id)
+  assert.equal(changed.parentId, context.id)
+  await changed.complete()
+  assert.equal(bodies[0].reasoning_effort, "high")
+  assert.equal(bodies[0].messages.some((item) => item.type === "configuration_update"), false)
+
+  const unavailable = new Context({ model: { ...model, bridge: true }, apiKey: "test", thinkingLevel: "custom-configured", items: [user("hello")] })
+  assert.deepEqual(unavailable.availableEfforts, [])
+  assert.throws(() => unavailable.changeEffort("high"), /capability metadata/)
+  await unavailable.complete()
+  assert.equal(bodies[1].reasoning_effort, "custom-configured")
+  const direct = new Context({ model: { ...context.model, bridge: false }, thinkingLevel: "low" })
+  assert.deepEqual(direct.availableEfforts, [])
+  assert.throws(() => direct.changeEffort("high", { allowCacheReset: true }), /capability metadata/)
+})
+
+test("pending effort updates cannot become adjacent or silently follow a tool response", async () => {
+  const context = new Context({ model: {
+    ...model, bridge: true,
+    effortCapabilities: { supportedEfforts: ["low", "high", "max"], changeMode: "configuration-update" },
+  }, thinkingLevel: "low" })
+  context.changeEffort("high")
+  assert.equal(context.changeEffort("high"), context)
+  assert.throws(() => context.changeEffort("max"), /adjacent/)
+  assert.throws(() => context.append({ role: "toolResult", toolCallId: "call", toolName: "lookup", isError: false, content: [], timestamp: 0 }), /user message/)
+  await assert.rejects(context.complete(), /user message/)
+  context.append(user("continue"))
+  assert.equal(context.thinkingLevel, "high")
+})
+
+test("empty user content preserves a wire boundary between effort updates", async (t) => {
+  const bodies: CapturedEffortRequest[] = []
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    bodies.push(JSON.parse(String(init.body)))
+    return completionResponse()
+  })
+  const context = new Context({ model: {
+    ...model, bridge: true,
+    effortCapabilities: { supportedEfforts: ["low", "high", "max"], changeMode: "configuration-update" },
+  }, apiKey: "test", thinkingLevel: "low" })
+  context.changeEffort("high").append({ role: "user", content: [], timestamp: 0 })
+  context.changeEffort("max").append(user("continue"))
+  await context.complete()
+  assert.deepEqual(bodies[0].messages.slice(0, 3), [
+    { type: "configuration_update", reasoning: { effort: "high" } },
+    { role: "user", content: "" },
+    { type: "configuration_update", reasoning: { effort: "max" } },
+  ])
+})
+
+test("an effort change in flight rejects the old response without rewriting its request", async (t) => {
+  let release!: () => void
+  const blocked = new Promise<void>((resolve) => { release = resolve })
+  let body: CapturedEffortRequest | undefined
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
+    body = JSON.parse(String(init.body))
+    await blocked
+    return completionResponse()
+  })
+  const context = new Context({ model: {
+    ...model, bridge: true,
+    effortCapabilities: { supportedEfforts: ["low", "high"], changeMode: "configuration-update" },
+  }, apiKey: "test", thinkingLevel: "low", items: [user("hello")] })
+  const pending = context.complete()
+  context.changeEffort("high").append(user("new request"))
+  release()
+  await assert.rejects(pending, /changed while completion was in flight/)
+  assert.equal(body?.reasoning_effort, "low")
+  assert.equal(body?.messages.some((item) => item.type === "configuration_update"), false)
+  assert.deepEqual(context.snapshot().map((item) => item.role), ["user", "user"])
+})

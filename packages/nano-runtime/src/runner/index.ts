@@ -356,6 +356,7 @@ async function saveRuntimeSnapshot(): Promise<void> {
     contextForkReason: state.context.forkReason,
     contextConfigurationFingerprint: state.context.configurationFingerprint,
     contextModelId: state.context.model.id,
+    contextEffortState: state.context.effortState,
     toolCatalog: state.toolCatalog,
     toolCatalogEpoch: state.toolCatalogEpoch,
     toolCatalogFingerprint: state.toolCatalogFingerprint,
@@ -503,6 +504,7 @@ export async function wake(event: UserMessage): Promise<void> {
       forkReason: saved.contextForkReason,
       configurationFingerprint: saved.contextConfigurationFingerprint,
       modelId: saved.contextModelId,
+      effortState: saved.contextEffortState,
     })
     state.toolCatalog = saved.toolCatalog
     state.toolCatalogEpoch = saved.toolCatalogEpoch
@@ -564,6 +566,7 @@ export async function wake(event: UserMessage): Promise<void> {
         contextForkReason: state.context.forkReason,
         contextConfigurationFingerprint: state.context.configurationFingerprint,
         contextModelId: state.context.model.id,
+        contextEffortState: state.context.effortState,
         toolCatalog: state.toolCatalog,
         toolCatalogEpoch: state.toolCatalogEpoch,
         toolCatalogFingerprint: state.toolCatalogFingerprint,

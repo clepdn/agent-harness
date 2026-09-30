@@ -101,6 +101,24 @@ export type Message = UserMessage | AssistantMessage | ToolResultMessage
 
 // ── Model ──────────────────────────────────────────────────────────────────────
 
+export type ReasoningEffort = string
+
+export interface ModelEffortCapabilities {
+  supportedEfforts: readonly ReasoningEffort[]
+  defaultEffort?: ReasoningEffort
+  changeMode: "configuration-update" | "cache-reset"
+}
+
+export interface ContextEffortUpdate {
+  beforeMessageIndex: number
+  effort: ReasoningEffort
+}
+
+export interface ContextEffortState {
+  initialEffort?: ReasoningEffort
+  updates: readonly ContextEffortUpdate[]
+}
+
 export interface Model {
   id: string
   name: string
@@ -108,6 +126,8 @@ export interface Model {
   provider: string
   baseUrl: string
   reasoning: boolean
+  bridge?: boolean
+  effortCapabilities?: ModelEffortCapabilities
   input: ("text" | "image")[]
   cost: {
     input: number
@@ -137,6 +157,7 @@ export interface CompletionContext {
   systemPrompt?: string
   messages: Message[]
   tools?: Tool[]
+  effortUpdates?: readonly ContextEffortUpdate[]
 }
 
 // ── Stream options ─────────────────────────────────────────────────────────────
@@ -156,7 +177,7 @@ export type ProviderStreamOptions = StreamOptions & Record<string, unknown>
 
 export interface OpenAICompletionsOptions extends StreamOptions {
   toolChoice?: "auto" | "none" | "required" | { type: "function"; function: { name: string } }
-  reasoningEffort?: "minimal" | "low" | "medium" | "high" | "xhigh"
+  reasoningEffort?: ReasoningEffort
 }
 
 export type ContextForkReason =
@@ -178,6 +199,7 @@ export interface ContextOptions {
   tools?: Tool[]
   toolChoice?: OpenAICompletionsOptions["toolChoice"]
   thinkingLevel?: OpenAICompletionsOptions["reasoningEffort"]
+  effortState?: ContextEffortState
   includeContextImages?: boolean
   temperature?: number
   maxTokens?: number
@@ -201,6 +223,7 @@ export interface ContextCompletionOptions {
 export interface ContextForkOptions extends Partial<Omit<ContextOptions, "id" | "parentId" | "forkReason" | "model">> {
   model?: Model
   reason?: ContextForkReason
+  allowCacheReset?: boolean
 }
 
 export type ContextItem = Message & { readonly context: Context }
@@ -236,8 +259,8 @@ function contextItem(owner: Context, message: Message, index: number): ContextIt
 /**
  * One cache lineage of model-visible state.
  *
- * `append` is the only operation that changes an existing Context. Anything
- * that changes an earlier item or request configuration returns a new Context,
+ * `append` and cache-preserving effort updates extend an existing Context.
+ * Changes to earlier items or request configuration return a new Context,
  * making cache-invalidating operations explicit at the call site.
  */
 export class Context {
@@ -248,7 +271,7 @@ export class Context {
   readonly systemPrompt?: string
   readonly tools?: readonly Tool[]
   readonly toolChoice?: OpenAICompletionsOptions["toolChoice"]
-  readonly thinkingLevel?: OpenAICompletionsOptions["reasoningEffort"]
+  private _effortState: ContextEffortState
   readonly includeContextImages: boolean
   readonly temperature?: number
   readonly maxTokens?: number
@@ -277,17 +300,68 @@ export class Context {
     this.toolChoice = typeof options.toolChoice === "object"
       ? deepFreeze(structuredClone(options.toolChoice))
       : options.toolChoice
-    this.thinkingLevel = options.thinkingLevel
+    this._effortState = deepFreeze(structuredClone(options.effortState ?? {
+      initialEffort: options.thinkingLevel,
+      updates: [],
+    }))
     this.includeContextImages = options.includeContextImages ?? true
     this.temperature = options.temperature
     this.maxTokens = options.maxTokens
     this.headers = options.headers ? deepFreeze(structuredClone(options.headers)) : undefined
     this.apiKey = options.apiKey
     for (const item of options.items ?? []) this.append(item)
+    let previousIndex = -1
+    for (const update of this._effortState.updates) {
+      if (!Number.isSafeInteger(update.beforeMessageIndex) || update.beforeMessageIndex < 0 ||
+          update.beforeMessageIndex > this._items.length || update.beforeMessageIndex <= previousIndex ||
+          typeof update.effort !== "string" || !update.effort.trim()) {
+        throw new Error("Invalid Context effort update timeline")
+      }
+      if (update.beforeMessageIndex < this._items.length && this._items[update.beforeMessageIndex]?.role !== "user") {
+        throw new Error("Context effort updates must precede a user message")
+      }
+      previousIndex = update.beforeMessageIndex
+    }
   }
 
   get items(): readonly ContextItem[] {
     return this._items
+  }
+
+  get effortState(): ContextEffortState {
+    return this._effortState
+  }
+
+  get thinkingLevel(): ReasoningEffort | undefined {
+    return this._effortState.updates.at(-1)?.effort ?? this._effortState.initialEffort
+  }
+
+  get availableEfforts(): readonly ReasoningEffort[] {
+    return this.model.bridge ? this.model.effortCapabilities?.supportedEfforts ?? [] : []
+  }
+
+  get effortChangeMode(): ModelEffortCapabilities["changeMode"] | undefined {
+    return this.availableEfforts.length ? this.model.effortCapabilities?.changeMode : undefined
+  }
+
+  /** Append a GPT-6 update, or explicitly accept a new cache lineage. */
+  changeEffort(effort: ReasoningEffort, options: { allowCacheReset?: boolean } = {}): Context {
+    if (!this.effortChangeMode) throw new Error("Dynamic effort control requires bridge model capability metadata")
+    if (!this.availableEfforts.includes(effort)) throw new Error(`Model ${this.model.id} does not support effort ${JSON.stringify(effort)}`)
+    if (effort === this.thinkingLevel) return this
+    if (this.effortChangeMode === "cache-reset") {
+      if (!options.allowCacheReset) throw new Error("Changing this model's effort requires allowCacheReset: true")
+      return this.fork({ thinkingLevel: effort, allowCacheReset: true, reason: "settings-change" })
+    }
+    if (this._effortState.updates.at(-1)?.beforeMessageIndex === this._items.length) {
+      throw new Error("Append a user message before another effort update; adjacent updates are not supported")
+    }
+    this._effortState = deepFreeze({
+      ...this._effortState,
+      updates: [...this._effortState.updates, { beforeMessageIndex: this._items.length, effort }],
+    })
+    this.revision += 1
+    return this
   }
 
   get configurationFingerprint(): string {
@@ -296,7 +370,7 @@ export class Context {
       systemPrompt: this.systemPrompt,
       tools: this.tools,
       toolChoice: this.toolChoice,
-      thinkingLevel: this.thinkingLevel,
+      thinkingLevel: this._effortState.initialEffort,
       includeContextImages: this.includeContextImages,
       temperature: this.temperature,
       maxTokens: this.maxTokens,
@@ -319,6 +393,9 @@ export class Context {
   append(item: Message | readonly Message[], ...more: Message[]): this {
     const additions = Array.isArray(item) ? [...item, ...more] : [item as Message, ...more]
     if (additions.length === 0) return this
+    if (this._effortState.updates.at(-1)?.beforeMessageIndex === this._items.length && additions[0]?.role !== "user") {
+      throw new Error("An effort update must be followed by a user message")
+    }
     const start = this._items.length
     const next = additions.map((message, offset) => contextItem(this, message, start + offset))
     this._items = Object.freeze([...this._items, ...next])
@@ -328,18 +405,39 @@ export class Context {
 
   fork(options: ContextForkOptions = {}): Context {
     const has = (key: keyof ContextForkOptions) => Object.prototype.hasOwnProperty.call(options, key)
+    const model = has("model") ? options.model ?? this.model : this.model
+    const items = has("items") ? options.items ?? [] : this._items
+    const modelChanged = model.id !== this.model.id || model.baseUrl !== this.model.baseUrl || model.provider !== this.model.provider
+    const updatesUnavailable = this._effortState.updates.length > 0 &&
+      (!model.bridge || model.effortCapabilities?.changeMode !== "configuration-update" || !model.effortCapabilities.supportedEfforts.length)
+    const effortChanged = has("thinkingLevel") && options.thinkingLevel !== this.thinkingLevel
+    if (!modelChanged && effortChanged && this.effortChangeMode && !options.allowCacheReset) {
+      throw new Error("Use changeEffort() for dynamic effort changes, or explicitly allow a cache reset")
+    }
+    const preservedPrefix = !has("items") || (items.length <= this._items.length && items.every((item, index) =>
+      item === this._items[index] || JSON.stringify(item) === JSON.stringify(this._items[index])))
+    const effortState = has("effortState") ? options.effortState
+      : modelChanged || effortChanged || updatesUnavailable || !preservedPrefix || options.reason === "compaction" || options.reason === "reset"
+        ? { initialEffort: has("thinkingLevel") ? options.thinkingLevel : this.thinkingLevel, updates: [] }
+        : {
+            initialEffort: this._effortState.initialEffort,
+            updates: items.length === this._items.length && options.reason !== "truncate"
+              ? this._effortState.updates
+              : this._effortState.updates.filter((update) => update.beforeMessageIndex < items.length),
+          }
     return new Context({
-      model: has("model") ? options.model ?? this.model : this.model,
+      model,
       systemPrompt: has("systemPrompt") ? options.systemPrompt : this.systemPrompt,
       tools: has("tools") ? options.tools : this.tools ? [...this.tools] : undefined,
       toolChoice: has("toolChoice") ? options.toolChoice : this.toolChoice,
       thinkingLevel: has("thinkingLevel") ? options.thinkingLevel : this.thinkingLevel,
+      effortState,
       includeContextImages: (has("includeContextImages") ? options.includeContextImages : this.includeContextImages) ?? true,
       temperature: has("temperature") ? options.temperature : this.temperature,
       maxTokens: has("maxTokens") ? options.maxTokens : this.maxTokens,
       headers: has("headers") ? options.headers : this.headers ? { ...this.headers } : undefined,
       apiKey: has("apiKey") ? options.apiKey : this.apiKey,
-      items: has("items") ? options.items : this._items,
+      items,
       parentId: this.id,
       forkReason: options.reason ?? "fork",
     })
@@ -368,11 +466,12 @@ export class Context {
     return new Context({ ...options, forkReason: options.forkReason ?? "restore" })
   }
 
-  private requestContext(messages: Message[]): CompletionContext {
+  private requestContext(messages: Message[], effortState: ContextEffortState): CompletionContext {
     return {
       systemPrompt: this.systemPrompt,
       messages,
       tools: this.tools ? structuredClone([...this.tools]) : undefined,
+      effortUpdates: effortState.updates,
     }
   }
 
@@ -398,7 +497,7 @@ export class Context {
       includeContextImages: this.includeContextImages,
       ...(this.apiKey ? { apiKey: this.apiKey } : {}),
       ...(this.toolChoice ? { toolChoice: this.toolChoice } : {}),
-      ...(this.thinkingLevel ? { reasoningEffort: this.thinkingLevel } : {}),
+      ...(this._effortState.initialEffort ? { reasoningEffort: this._effortState.initialEffort } : {}),
       ...(this.temperature !== undefined ? { temperature: this.temperature } : {}),
       ...(this.maxTokens !== undefined ? { maxTokens: this.maxTokens } : {}),
       ...(this.headers ? { headers: { ...this.headers } } : {}),
@@ -410,18 +509,23 @@ export class Context {
 
   /** Complete this lineage and append the assistant response as one atomic step. */
   async complete(options: ContextCompletionOptions = {}): Promise<AssistantMessage> {
+    if (this._effortState.updates.at(-1)?.beforeMessageIndex === this._items.length) {
+      throw new Error("Append a user message after changing effort before completing")
+    }
     const expectedRevision = this.revision
+    const effortState = this._effortState
     const messages = await this.requestMessages()
     const { onEvent, captureCacheWarmRequest, ...requestOptions } = options
     const startedAt = Date.now()
+    const requestContext = this.requestContext(messages, effortState)
     const cacheParams = captureCacheWarmRequest
-      ? buildParams(this.model, this.requestContext(messages), this.completionOptions(requestOptions), false) as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming
+      ? buildParams(this.model, requestContext, this.completionOptions(requestOptions), false) as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming
       : undefined
     let result: AssistantMessage
     if (onEvent) {
       const events = stream(
         this.model,
-        this.requestContext(messages),
+        requestContext,
         this.completionOptions(requestOptions),
       )
       for await (const event of events) await onEvent(event)
@@ -429,7 +533,7 @@ export class Context {
     } else {
       result = await requestCompletion(
         this.model,
-        this.requestContext(messages),
+        requestContext,
         this.completionOptions(requestOptions),
       )
     }
@@ -631,7 +735,20 @@ function convertMessages(
     if (pendingToolImages.length) params.push({ role: "user", content: pendingToolImages })
     pendingToolImages = []
   }
-  for (const msg of context.messages) {
+  let updateIndex = 0
+  for (let messageIndex = 0; messageIndex < context.messages.length; messageIndex += 1) {
+    const msg = context.messages[messageIndex]!
+    const update = context.effortUpdates?.[updateIndex]
+    if (update?.beforeMessageIndex === messageIndex) {
+      if (!model.bridge || model.effortCapabilities?.changeMode !== "configuration-update") {
+        throw new Error("This model cannot transport cache-preserving effort updates")
+      }
+      flushToolImages()
+      // The bridge accepts native Responses controls interleaved with Chat messages.
+      const control = { type: "configuration_update", reasoning: { effort: update.effort } }
+      params.push(control as unknown as OpenAI.Chat.Completions.ChatCompletionMessageParam)
+      updateIndex += 1
+    }
     if (msg.role !== "toolResult") flushToolImages()
     const attached: OpenAI.Chat.Completions.ChatCompletionContentPart[] = []
     if (msg.role !== "assistant" && includeContextImages && model.input.includes("image") && !msg.imagesSuppressed) {
@@ -655,7 +772,8 @@ function convertMessages(
             }
           }
         })
-        if (content.length > 0 || attached.length > 0) params.push({ role: "user", content: [...content, ...attached] })
+        const parts = [...content, ...attached]
+        params.push({ role: "user", content: parts.length ? parts : "" })
       }
     } else if (msg.role === "assistant") {
       const assistantMsg: OpenAI.Chat.Completions.ChatCompletionAssistantMessageParam = {
@@ -728,6 +846,9 @@ function convertMessages(
   }
 
   flushToolImages()
+  if (updateIndex !== (context.effortUpdates?.length ?? 0)) {
+    throw new Error("Effort updates must precede a user message in the request history")
+  }
 
   return params
 }

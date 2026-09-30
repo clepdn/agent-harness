@@ -127,15 +127,16 @@ function frontendModelConfig(): RuntimeModelConfig | null {
     baseUrl || undefined,
     Object.keys(headers).length ? headers : undefined,
     contextWindow,
+    source.bridge === true,
+    apiKey,
   )
-  if (!primaryModel) throw new Error(`[frontend].preset ${JSON.stringify(configured)} could not be resolved`)
 
   const toolChoice: ToolChoice =
     typeof source.tool_choice === "string" && ["required", "auto", "none"].includes(source.tool_choice)
       ? source.tool_choice as ToolChoice
       : modelState.primaryToolChoice
   const thinkingEffort: ThinkingEffort =
-    typeof source.thinking_effort === "string" && ["minimal", "low", "medium", "high", "xhigh"].includes(source.thinking_effort)
+    typeof source.thinking_effort === "string" && ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(source.thinking_effort)
       ? source.thinking_effort as ThinkingEffort
       : modelState.thinkingEffort
   const compactionStrategy: CompactionStrategy =
@@ -255,8 +256,9 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
     baseUrl || undefined,
     Object.keys(headers).length ? headers : undefined,
     contextWindow !== 200_000 ? contextWindow : undefined,
+    preset.bridge === true,
+    apiKey,
   )
-
   if (!model) {
     throw new Error(`failed to build model from preset "${presetName}"`)
   }
@@ -296,8 +298,8 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
 
   const thinkingEffort: ThinkingEffort =
     typeof preset.thinking_effort === "string" &&
-    ["minimal", "low", "medium", "high", "xhigh"].includes(preset.thinking_effort as string)
-      ? (preset.thinking_effort as ThinkingEffort)
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(preset.thinking_effort as string)
+      ? preset.thinking_effort as ThinkingEffort
       : modelState.thinkingEffort
 
   const vision =

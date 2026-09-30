@@ -1,3 +1,4 @@
+import { initializeBridgeModelMetadata, type BridgeModelMetadataTarget } from "./bridge-model-metadata"
 import { spawn } from "node:child_process"
 import { tryShim, SHIM_FAILED_ENV } from "./shim"
 import { REPO_ROOT } from "./agent-config"
@@ -7,6 +8,7 @@ import { initMetricsDb } from "./metrics"
 import { initSnapcompactRenderer } from "./runner/compaction-companion"
 import { modelState, modelStateFor } from "./runner/model-state"
 import { REMOTE_COMPACTION_ENDPOINT } from "./runner/config"
+import { primaryModel, fallbackModel, summaryModel } from "./runner/config"
 import { shutdown, activate, startBoredomTimer } from "./runner/index"
 import { activateFrontend, shutdownFrontend, startFrontendBoredomTimer } from "./runner/frontend"
 import { configureAgentChannelDelivery } from "./runner/agent-channel"
@@ -56,6 +58,14 @@ async function main() {
   console.log("[nano] starting up...")
 
   await clientTools.start()
+  const frontendRuntime = config.frontend.enable ? modelStateFor("frontend") : null
+  const metadataTargets: BridgeModelMetadataTarget[] = [
+    ...(primaryModel ? [{ model: primaryModel, apiKey: config.model.api_key }] : []),
+    { model: fallbackModel, apiKey: config.fallback.api_key },
+    ...(summaryModel ? [{ model: summaryModel, apiKey: config.summary.api_key }] : []),
+    ...(frontendRuntime?.primaryModel ? [{ model: frontendRuntime.primaryModel, apiKey: frontendRuntime.primaryApiKey }] : []),
+  ]
+  await initializeBridgeModelMetadata(metadataTargets)
 
   await ensureSoulFilePlacement()
   let frontendSoulConflict = false

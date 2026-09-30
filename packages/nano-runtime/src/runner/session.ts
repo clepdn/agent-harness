@@ -2,7 +2,7 @@ import { createHash } from "node:crypto"
 import fs from "fs/promises"
 import path from "path"
 import type { DiscordMessageTarget, Message } from "../types"
-import type { ContextForkReason } from "../llm"
+import type { ContextEffortState, ContextForkReason } from "../llm"
 import { NANO_HOME } from "../agent-config"
 import { atomicWriteFile, isMissingFileError, quarantineFile } from "../durable-file"
 import type { ToolDefinition } from "@nano/harness-core"
@@ -118,6 +118,7 @@ export type SessionSnapshot = {
   contextForkReason?: ContextForkReason
   contextConfigurationFingerprint?: string
   contextModelId?: string
+  contextEffortState?: ContextEffortState
   discordTargets?: DiscordMessageTarget[]
 }
 
@@ -200,6 +201,27 @@ function validToolDefinition(value: unknown): value is ToolDefinition {
     typeof fn!.description === "string" && record(fn!.parameters) !== null
 }
 
+function validContextEffortState(value: unknown, messages: readonly Message[]): value is ContextEffortState {
+  const state = record(value)
+  if (!state || Object.keys(state).some((key) => key !== "initialEffort" && key !== "updates")) return false
+  if (state.initialEffort !== undefined && (typeof state.initialEffort !== "string" || !state.initialEffort.trim())) return false
+  if (!Array.isArray(state.updates)) return false
+
+  let previousIndex = -1
+  for (const value of state.updates) {
+    const update = record(value)
+    if (!update || Object.keys(update).some((key) => key !== "beforeMessageIndex" && key !== "effort") ||
+        !Number.isSafeInteger(update.beforeMessageIndex) || (update.beforeMessageIndex as number) < 0 ||
+        (update.beforeMessageIndex as number) > messages.length ||
+        typeof update.effort !== "string" || !update.effort.trim() ||
+        (update.beforeMessageIndex as number) <= previousIndex) return false
+    const index = update.beforeMessageIndex as number
+    if (index < messages.length && messages[index]?.role !== "user") return false
+    previousIndex = index
+  }
+  return true
+}
+
 function fingerprint(catalog: ToolDefinition[]): string {
   return createHash("sha256").update(JSON.stringify(catalog)).digest("hex")
 }
@@ -228,6 +250,9 @@ function parseSession(raw: string): SessionSnapshot {
     throw new Error("invalid context configuration fingerprint")
   }
   if (candidate.contextModelId !== undefined && typeof candidate.contextModelId !== "string") throw new Error("invalid context model id")
+  if (candidate.contextEffortState !== undefined && !validContextEffortState(candidate.contextEffortState, candidate.messages)) {
+    throw new Error("invalid context effort state")
+  }
   return candidate as unknown as SessionSnapshot
 }
 

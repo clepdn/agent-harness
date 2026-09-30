@@ -31,6 +31,7 @@ import type { Model } from "../llm"
 import { classifyApiError } from "../api-errors"
 import { reportApiError } from "../discord/owner-alerts"
 
+const configuredThinkingEfforts = new WeakMap<LoopState, string | undefined>()
 /** The currently active model pair (fallback when degraded, else primary). */
 export function activeModelProvider(state?: Pick<LoopState, "runtimeKind">): { model: Model | null; apiKey: string | undefined } {
   const modelState = modelStateFor(state?.runtimeKind)
@@ -193,24 +194,32 @@ async function createStreamedCompletion(
   const completionTools = getCompletionTools(tools, state.runtimeKind)
   const modelChanged = JSON.stringify(state.context.model) !== JSON.stringify(model)
   const toolsChanged = JSON.stringify(state.context.tools ?? []) !== JSON.stringify(completionTools)
-  const settingsChanged =
-    modelChanged ||
-    toolsChanged ||
+  const configuredThinkingLevel = modelState.enableThinking ? modelState.thinkingEffort : undefined
+  const previousConfiguredEffort = configuredThinkingEfforts.get(state)
+  const configuredEffortChanged = configuredThinkingEfforts.has(state) && previousConfiguredEffort !== configuredThinkingLevel
+  const effortSelectionChanged = modelChanged || configuredEffortChanged
+  const otherConfigChanged =
     state.context.apiKey !== apiKey ||
     state.context.toolChoice !== resolvedToolChoice ||
-    state.context.thinkingLevel !== (modelState.enableThinking ? modelState.thinkingEffort : undefined) ||
     state.context.includeContextImages !== modelState.primaryVision
+  const configSelectionChanged = effortSelectionChanged || otherConfigChanged
+  const settingsChanged = configSelectionChanged || toolsChanged
   if (settingsChanged) {
     state.context = state.context.fork({
       model,
       apiKey,
       tools: completionTools,
       toolChoice: resolvedToolChoice,
-      thinkingLevel: modelState.enableThinking ? modelState.thinkingEffort : undefined,
+      ...(effortSelectionChanged ? {
+        thinkingLevel: configuredThinkingLevel,
+        effortState: { initialEffort: configuredThinkingLevel, updates: [] },
+      } : {}),
       includeContextImages: modelState.primaryVision,
-      reason: modelChanged ? "model-change" : toolsChanged ? "tools-change" : "settings-change",
+      ...(configSelectionChanged && !modelChanged ? { allowCacheReset: true } : {}),
+      reason: modelChanged ? "model-change" : toolsChanged && !configSelectionChanged ? "tools-change" : "settings-change",
     })
   }
+  configuredThinkingEfforts.set(state, configuredThinkingLevel)
 
   let emittedText = false
   let emittedThinking = false

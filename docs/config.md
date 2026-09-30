@@ -113,13 +113,46 @@ Used for normal agent turns.
 | `tool_choice` | `"required"` | `"required"`, `"auto"`, or `"none"`. |
 | `fast` | `false` | Use OpenAI's priority service tier for GPT/Codex models. May also be set on a named model preset. |
 | `enable_thinking` | `true` | Extended reasoning on models that support it. |
-| `thinking_effort` | `"low"` | Reasoning budget: `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`. |
+| `thinking_effort` | `"low"` | Initial reasoning budget: `"none"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"`. Model support varies. |
 | `cache_warming` | `false` | Keep the primary session's prompt cache warm while waiting. Also supported on named presets and follows live model swaps. |
 | `cache_warming_minutes` | `0` | Quiet-time budget before compaction, rounded up to the next cache-refresh boundary. `0` keeps warming indefinitely. Requires warming enabled and compaction strategy other than `"off"`. Owns idle compaction timing while warming is enabled. |
 | `cache_warming_mode` | `"completion"` | `"completion"` replays with a one-token output cap, requiring an endpoint that honors it. `"prewarm"` uses llm-bridge's `prompt_cache_options.prewarm` extension for upstream Codex Responses; requires bridge forwarding and backend support. |
 | `cache_lifetime_minutes` | `30` | Assumed provider cache lifetime. Refresh or idle compaction runs three minutes early (27 minutes for a 30-minute lifetime). Values at or below `3` disable both timers. This does not change the provider's retention policy. |
 | `respect_prompt_cache` | `true` | Preserve the prompt prefix. When warming is disabled, compact after `cache_lifetime_minutes - 3` quiet minutes. Accepts the legacy `preserve_prompt_cache` name. |
 | `api_key` *(secret)* | *(required)* | API key for the primary endpoint. Place this in `secrets.json`. |
+
+### Dynamic effort on `Context`
+
+For presets with `bridge = true`, or endpoints matching `llm_bridge_url`, startup
+loads the bridge's authenticated `/v1/models` catalog. `Context.availableEfforts`
+contains that model's advertised efforts; `Context.effortChangeMode` identifies
+append-only updates (`"configuration-update"`) or a required cache reset
+(`"cache-reset"`). Missing metadata disables dynamic control without changing
+the configured initial effort or preventing normal inference.
+
+```typescript
+// GPT-6 Codex models: preserve the initial request-level effort and prefix.
+context = context.changeEffort("high")
+context.append({ role: "user", content: "Analyze the harder case", timestamp: Date.now() })
+await context.complete()
+
+// GPT-5.6 and other models: explicitly accept a new cache lineage.
+context = context.changeEffort("high", { allowCacheReset: true })
+```
+
+Always keep the returned Context: cache-reset changes return a fork. GPT-6
+changes return the same Context and append a configuration update before the
+next user message. Add that message before completing or making another change;
+adjacent updates are rejected. Session checkpoints retain the original effort
+and update timeline. Local compaction starts a new lineage using the active
+effort; prefix truncation restores the effort at the retained history boundary.
+
+Deploy the matching llm-bridge update with Coral: Chat Completions must preserve
+raw `configuration_update` items as ordered Responses input. Only GPT-6 Codex
+models use this path. Automatic bridge compaction/truncation must not rewrite
+update-bearing history; use Coral's explicit local compaction or a fresh context.
+Direct inference remains supported, but does not expose this dynamic API.
+
 
 Cache warming replays the last successful request's full messages, tools, and
 reasoning settings through the same Chat Completions endpoint with

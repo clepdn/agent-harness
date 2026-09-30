@@ -1,3 +1,4 @@
+import { bridgeEffortCapabilities } from "../bridge-model-metadata"
 import type { Model } from "../llm"
 import { config } from "../config"
 import { idleCacheCompactionMs } from "../cache-policy"
@@ -117,11 +118,16 @@ export function buildModel(
   baseUrlOverride?: string,
   headers?: Record<string, string>,
   contextWindowOverride?: number,
+  explicitlyBridge = false,
+  apiKey?: string,
 ): Model | null {
   if (!modelId) return null
 
-  const baseUrl = baseUrlOverride || "https://api.openai.com/v1"
+  const baseUrl = baseUrlOverride || (explicitlyBridge ? config.llm_bridge_url : "https://api.openai.com/v1")
   const resolvedProvider = provider || (isLikelyLocalBase(baseUrl) ? "lm-studio" : "openai")
+  const bridge = explicitlyBridge || (!!config.llm_bridge_url &&
+    baseUrl.replace(/\/+$/, "") === config.llm_bridge_url.replace(/\/+$/, ""))
+  const effortCapabilities = bridgeEffortCapabilities(modelId, baseUrl, explicitlyBridge, apiKey)
   return {
     id: modelId,
     name: modelId,
@@ -133,6 +139,8 @@ export function buildModel(
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: contextWindowOverride ?? 200_000,
     maxTokens: 8192,
+    ...(bridge ? { bridge: true } : {}),
+    ...(effortCapabilities ? { effortCapabilities } : {}),
     ...(headers && Object.keys(headers).length ? { headers } : {}),
   }
 }
@@ -156,7 +164,7 @@ if (!USE_FALLBACK && !config.model.api_key) {
 
 export const primaryModel: Model | null = USE_FALLBACK
   ? null
-  : buildModel(MODEL_PROVIDER, MODEL, MODEL_BASE_URL || undefined)!
+  : buildModel(MODEL_PROVIDER, MODEL, MODEL_BASE_URL || undefined, undefined, undefined, config.model.bridge, config.model.api_key)!
 
 export const fallbackModel: Model = (
   buildModel(
@@ -165,6 +173,8 @@ export const fallbackModel: Model = (
     FALLBACK_BASE_URL || undefined,
     Object.keys(fallbackHeaders).length ? fallbackHeaders : undefined,
     FALLBACK_BASE_URL ? FALLBACK_N_CTX : undefined,
+    config.fallback.bridge,
+    config.fallback.api_key
   ) ?? {
     id: FALLBACK_MODEL,
     name: FALLBACK_MODEL,
@@ -181,7 +191,7 @@ export const fallbackModel: Model = (
 
 export const summaryModel: Model | null =
   SUMMARY_MODEL
-    ? buildModel(SUMMARY_PROVIDER, SUMMARY_MODEL, SUMMARY_BASE_URL || undefined, Object.keys(summaryHeaders).length ? summaryHeaders : undefined) ?? null
+    ? buildModel(SUMMARY_PROVIDER, SUMMARY_MODEL, SUMMARY_BASE_URL || undefined, Object.keys(summaryHeaders).length ? summaryHeaders : undefined, undefined, config.summary.bridge, config.summary.api_key) ?? null
     : null
 
 // API keys come from the secrets JSON. Empty string means "not configured" and
@@ -189,8 +199,6 @@ export const summaryModel: Model | null =
 export const PRIMARY_API_KEY: string | undefined = config.model.api_key || undefined
 export const FALLBACK_API_KEY: string | undefined = config.fallback.api_key || undefined
 export const SUMMARY_API_KEY: string | undefined = config.summary.api_key || undefined
-
-console.log(`[config] primary=${MODEL} provider=${primaryModel?.provider ?? "none"} @ ${primaryModel?.baseUrl ?? "none"}`)
 console.log(`[config] fallback=${FALLBACK_MODEL} provider=${fallbackModel.provider} @ ${fallbackModel.baseUrl}`)
 if (summaryModel) console.log(`[config] summary=${SUMMARY_MODEL} provider=${summaryModel.provider} @ ${summaryModel.baseUrl}`)
 console.log(`[config] env=${config.agent.env} use_fallback=${USE_FALLBACK}`)
