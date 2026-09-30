@@ -23,6 +23,7 @@ import { webSearch } from "../web-search"
 import { emit } from "../stream"
 import { stopDiscordTyping } from "../discord/typing-lease"
 import type { ToolHandler } from "./loop-shared"
+import type { LoopState } from "./types"
 import { checkGitUpstream } from "./git-upstream-check"
 import { GIT_UPSTREAM_NAG } from "./config"
 import { pushToolMessage, recordToolResult, runStandardTool, toolError } from "./loop-tool-runtime"
@@ -48,8 +49,8 @@ function memoryAccessFor(state: { runtimeKind?: string }): MemoryAccessOptions |
     : undefined
 }
 
-function memoryReadAccessFor(state: { runtimeKind?: string }): MemoryAccessOptions {
-  return { ...memoryAccessFor(state), hashline: true }
+function memoryReadAccessFor(state: LoopState): MemoryAccessOptions {
+  return { ...memoryAccessFor(state), hashline: editContractForState(state) !== "exact" }
 }
 
 function discordDeliveryToolResult(result: Record<string, unknown>): string {
@@ -122,6 +123,18 @@ async function runClientImageTool(path: string, timeoutMs?: number, signal?: Abo
 /**
  * Builds the function-tool handler table for the runner loop.
  */
+function editContractForState(state: LoopState): "hashline" | "exact" | "legacy-both" {
+  const definition = state.toolCatalog.find((tool) => tool.function.name === "edit_file")
+  const properties = definition?.function.parameters.properties
+  if (!properties || typeof properties !== "object" || Array.isArray(properties)) return "exact"
+  const fields = properties as Record<string, unknown>
+  const hasEdits = Object.prototype.hasOwnProperty.call(fields, "edits")
+  const hasExact = Object.prototype.hasOwnProperty.call(fields, "old_text")
+  if (hasEdits && !hasExact) return "hashline"
+  if (hasExact && !hasEdits) return "exact"
+  return "legacy-both"
+}
+
 export function buildToolHandlers(): Record<string, ToolHandler> {
   return {
     agent_send: (ctx) =>
@@ -352,16 +365,28 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
     edit_file: async (ctx) => {
       const args = ctx.args
       const pathArg = args.path
+      const declaredContract = editContractForState(ctx.state)
       const hasExact = Object.prototype.hasOwnProperty.call(args, "old_text") || Object.prototype.hasOwnProperty.call(args, "new_text")
       const hasHashline = Object.prototype.hasOwnProperty.call(args, "edits")
       const exactValid = typeof args.old_text === "string" && typeof args.new_text === "string"
       const hashlineValid = Array.isArray(args.edits) && args.edits.length > 0
-      if ((hasExact && hasHashline) || (!hasExact && !hasHashline) || (hasExact && !exactValid) || (hasHashline && !hashlineValid)) {
+      const exactRequest = hasExact && exactValid && !hasHashline
+      const hashlineRequest = hasHashline && hashlineValid && !hasExact
+      const contractValid = declaredContract === "hashline"
+        ? hashlineRequest
+        : declaredContract === "exact"
+          ? exactRequest
+          : exactRequest || hashlineRequest
+      if (!contractValid) {
         return runStandardTool(ctx, {
           name: "edit_file",
           logArgKeys: ["path"] as const,
           runArgKeys: [] as const,
-          run: async () => { throw new Error("edit_file requires exactly one edit contract: old_text/new_text or a non-empty edits array") },
+          run: async () => { throw new Error(declaredContract === "hashline"
+            ? "edit_file requires a non-empty edits array while hashline mode is enabled"
+            : declaredContract === "exact"
+              ? "edit_file requires old_text/new_text while hashline mode is disabled"
+              : "edit_file requires exactly one edit contract: old_text/new_text or a non-empty edits array") },
           emitArgKeys: ["path"] as const,
           previewChars: 0,
         })

@@ -28,14 +28,19 @@ test("memory catalog exposes unified file tools", () => {
   assert.equal(names.includes("memory_read"), false)
   assert.equal(names.includes("memory_ls"), false)
   const edit = tools.find((tool) => tool.function.name === "edit_file")!
-  assert.deepEqual(edit.function.parameters.required, ["path"])
-  const editProperties = edit.function.parameters.properties as Record<string, { minLength?: number; description?: string }>
-  assert.equal(editProperties.old_text?.minLength, undefined)
-  assert.match(editProperties.old_text?.description ?? "", /Empty only when/)
-  assert.match(editProperties.edits?.description ?? "", /Hashline edits for memory:\/\//)
+  assert.deepEqual(edit.function.parameters.required, ["path", "old_text", "new_text"])
+  assert.ok((edit.function.parameters.properties as Record<string, unknown>).old_text)
+  assert.equal((edit.function.parameters.properties as Record<string, unknown>).edits, undefined)
+  const hashlineEdit = createNiriToolCatalog({ memory: true, workspace: { id: "client", root: "/client", hashline: true } })
+    .find((tool) => tool.function.name === "edit_file")!
+  assert.deepEqual(hashlineEdit.function.parameters.required, ["path", "edits"])
+  assert.ok((hashlineEdit.function.parameters.properties as Record<string, unknown>).edits)
+  assert.equal((hashlineEdit.function.parameters.properties as Record<string, unknown>).old_text, undefined)
   const read = tools.find((tool) => tool.function.name === "read_file")!
   assert.deepEqual(read.function.parameters.required, ["path"])
-  assert.match(read.function.description, /Memory:\/\/ file lines include LINE#HASH anchors/)
+  const hashlineRead = createNiriToolCatalog({ memory: true, workspace: { id: "client", root: "/client", hashline: true } })
+    .find((tool) => tool.function.name === "read_file")!
+  assert.match(hashlineRead.function.description, /Text file lines are prefixed/)
   const memoryFs = tools.find((tool) => tool.function.name === "memory_fs")!
   assert.deepEqual(memoryFs.function.parameters.required, ["file_name", "op"])
   assert.deepEqual(Object.keys(memoryFs.function.parameters.properties ?? {}).sort(), ["file_name", "op", "target"])
@@ -116,30 +121,6 @@ test("restored catalogs adopt URL image_tool without replacing other pinned tool
   assert.equal(reconcileImageToolDefinition(reconciled.catalog, current).changed, false)
 })
 
-test("restored catalogs adopt memory hashline read and edit contracts", () => {
-  const current = createNiriToolCatalog({ memory: true })
-  const saved = current.map((tool) => tool.function.name === "read_file"
-    ? { ...tool, function: { ...tool.function, description: "Read a memory file." } }
-    : tool.function.name === "edit_file" ? {
-        ...tool,
-        function: {
-          ...tool.function,
-          parameters: {
-            ...tool.function.parameters,
-            properties: {
-              ...(tool.function.parameters.properties as Record<string, unknown>),
-              old_text: { type: "string", minLength: 1 },
-            },
-          },
-        },
-      }
-    : tool)
-  const reconciled = reconcileMemoryFileToolDefinitions(saved, current)
-  assert.equal(reconciled.changed, true)
-  assert.deepEqual(reconciled.catalog, current)
-  assert.equal(reconcileMemoryFileToolDefinitions(reconciled.catalog, current).changed, false)
-})
-
 test("shell catalog exposes explicit per-command PTY allocation", () => {
   const shell = createNiriToolCatalog({
     clientCapabilities: ["shell"],
@@ -180,4 +161,63 @@ test("frontend catalog keeps server tools and bridge while hard-gating executor 
   assert.match(tools.find((tool) => tool.function.name === "read_file")!.function.description, /Ordinary.*unavailable/)
   assert.match(tools.find((tool) => tool.function.name === "image_tool")!.function.description, /public HTTP\(S\) URL/)
   assert.doesNotMatch(tools.find((tool) => tool.function.name === "image_tool")!.function.description, /client file/)
+})
+
+test("restored catalogs adopt memory hashline read and edit contracts", () => {
+  const current = createNiriToolCatalog({ memory: true })
+  const saved = current.map((tool) => tool.function.name === "read_file"
+    ? { ...tool, function: { ...tool.function, description: "Read a memory file." } }
+    : tool.function.name === "edit_file" ? {
+        ...tool,
+        function: {
+          ...tool.function,
+          parameters: {
+            ...tool.function.parameters,
+            properties: {
+              ...(tool.function.parameters.properties as Record<string, unknown>),
+              old_text: { type: "string", minLength: 1 },
+            },
+          },
+        },
+      }
+    : tool)
+  const reconciled = reconcileMemoryFileToolDefinitions(saved, current)
+  assert.equal(reconciled.changed, true)
+  assert.deepEqual(reconciled.catalog, current)
+  assert.equal(reconcileMemoryFileToolDefinitions(reconciled.catalog, current).changed, false)
+})
+
+test("edit schemas select one format for main, frontend, and unattached runtimes", () => {
+  for (const frontend of [false, true]) {
+    for (const hashline of [false, true]) {
+      const tools = createNiriToolCatalog({ frontend, workspace: { id: "test", root: "/test", hashline } })
+      const edit = tools.find((tool) => tool.function.name === "edit_file")!
+      const fields = edit.function.parameters.properties as Record<string, { minLength?: number }>
+      assert.equal("edits" in fields, hashline)
+      assert.equal("old_text" in fields, !hashline)
+      assert.equal("new_text" in fields, !hashline)
+      assert.equal(fields.old_text?.minLength, undefined, "empty memory files remain initializable")
+      const read = tools.find((tool) => tool.function.name === "read_file")!
+      assert.equal(read.function.description.includes("LINE#HASH"), hashline)
+    }
+    const unattached = createNiriToolCatalog({ frontend, workspace: null }).find((tool) => tool.function.name === "edit_file")!
+    assert.deepEqual(unattached.function.parameters.required, ["path", "old_text", "new_text"])
+  }
+})
+
+test("restored mixed edit schemas adopt the current mode without replacing unrelated tools", () => {
+  for (const hashline of [true, false]) {
+    const current = createNiriToolCatalog({ workspace: { id: "test", root: "/test", hashline } })
+    const saved = current.map((tool) => tool.function.name === "edit_file" ? {
+      ...tool,
+      function: { ...tool.function, parameters: { type: "object", properties: { path: {}, old_text: {}, new_text: {}, edits: {} }, required: ["path"] } },
+    } : tool)
+    const restored = reconcileMemoryFileToolDefinitions(saved, current)
+    assert.equal(restored.changed, true)
+    assert.deepEqual(restored.catalog, current)
+    for (const tool of saved.filter((tool) => !["read_file", "edit_file"].includes(tool.function.name))) {
+      assert.equal(restored.catalog.find((item) => item.function.name === tool.function.name), tool)
+    }
+    assert.equal(reconcileMemoryFileToolDefinitions(restored.catalog, current).changed, false)
+  }
 })

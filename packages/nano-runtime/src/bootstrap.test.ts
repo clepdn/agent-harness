@@ -36,6 +36,18 @@ test("bootstrap injects a skills index from frontmatter descriptions", async (t)
   assert.match(system, /`zzz-test-skill`: does a testable thing/)
   // files lacking frontmatter still appear, flagged
   assert.match(system, /`zzz-bare-skill`: \(no description/)
+  assert.match(system, /top-level `old_text`\/`new_text` exact replacement/)
+
+  const hashlineMessages = await buildBootstrap({
+    source: "chat",
+    triggeredAt: new Date().toISOString(),
+    content: "hello",
+    raw: null,
+  }, null, { workspace: { id: "client", root: "/client", hashline: true } })
+  const hashlineSystem = String(hashlineMessages[0]?.content)
+  assert.match(hashlineSystem, /structured `edits` using anchors from `read_file`/)
+  assert.match(hashlineSystem, /edits: \[\{ op: "replace_text"/)
+  assert.doesNotMatch(hashlineSystem, /exact `content` as `old_text`/)
 })
 
 test("bootstrap restores a rest summary as its own provenance-bearing message", async () => {

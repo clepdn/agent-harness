@@ -66,7 +66,7 @@ export function createReadFileToolDefinition(
     ? "Read a client file or directory, or a server-owned memory:// resource."
     : "Read a file or list a directory resolved by the attached client."
   const fileBehavior = options.hashline
-    ? "Client file lines are prefixed with `LINE#HASH: `, where HASH anchors that line for edit_file. The prefix is display only — never include it in edit payloads."
+    ? `${options.memory ? "Text file" : "Client file"} lines are prefixed with \`LINE#HASH: \`, where HASH anchors that line for edit_file. The prefix is display only — never include it in edit payloads.`
     : "File reads accept optional inclusive line bounds."
   const memoryBehavior = options.memory ? " memory:// reads work without an attached client." : ""
 

@@ -15,7 +15,7 @@ const {
   FRONTEND_SOUL_PATCH_PATH,
   FRONTEND_SOUL_VIEW_PATH,
 } = await import("./frontend-soul")
-const { editMemoryResource, readMemory } = await import("./agent-state-tools")
+const { editMemoryResource, editMemoryResourceHashline, readMemory } = await import("./agent-state-tools")
 
 const mainSoulPath = path.join(home, "soul.md")
 const frontendPolicy = { virtualizeSoul: true }
@@ -71,4 +71,24 @@ test("overlapping main/frontend edits expose merge markers until frontend resolv
   assert.equal(await readFrontendSoul(), resolved)
   assert.equal(await fs.readFile(mainSoulPath, "utf8"), newMain)
   assert.match(await fs.readFile(FRONTEND_SOUL_PATCH_PATH, "utf8"), /\+Reserved and playful\./)
+})
+
+test("frontend hashline soul edits remain virtual", async () => {
+  const mainBefore = await fs.readFile(mainSoulPath, "utf8")
+  const view = await readMemory("memory://soul.md", undefined, undefined, { ...frontendPolicy, hashline: true })
+  const current = await readFrontendSoul()
+  const currentLine = current.split("\n").find((line) => line.includes("Reserved and playful."))
+  assert.ok(currentLine)
+  const escaped = currentLine.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const anchor = view.match(new RegExp(`^(\\d+#[A-Z]+): ${escaped}$`, "m"))?.[1]
+  assert.ok(anchor)
+  const result = await editMemoryResourceHashline(
+    "memory://soul.md",
+    [{ op: "replace", pos: anchor, lines: ["Still reserved and playful."] }],
+    undefined,
+    frontendPolicy,
+  )
+  assert.match(result, /edited virtual memory:\/\/soul\.md/)
+  assert.equal(await fs.readFile(mainSoulPath, "utf8"), mainBefore)
+  assert.match(await readFrontendSoul(), /Still reserved and playful\./)
 })
