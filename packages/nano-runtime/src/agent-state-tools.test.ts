@@ -4,6 +4,7 @@ import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
+import { NodeToolHost, ToolClientHttpServer } from "@nano/harness-client-node"
 import { readMemory, writeMemory } from "./agent-state-tools"
 
 test("memory operations reject paths outside the memory directory", async () => {
@@ -47,35 +48,55 @@ test("memory writes reject symlinked directories and files", async (t) => {
   await assert.rejects(() => fs.access(path.join(outside, "escaped.md")))
 })
 
-test("memory_fs manages memory resources and copies container files", async (t) => {
+test("memory_fs copies executor files into server memory and manages resources", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-memory-fs-"))
   const home = path.join(root, "home")
-  const localDir = path.join(root, "local")
+  const executorDir = path.join(root, "executor")
+  const controlDir = path.join(root, "control")
   const memoriesDir = path.join(home, "memories")
   const imageBytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0x10])
-  await fs.mkdir(localDir, { recursive: true })
-  await fs.writeFile(path.join(localDir, "image.png"), imageBytes)
-  await fs.writeFile(path.join(localDir, "notes.txt"), "container notes\n", "utf8")
-  t.after(() => fs.rm(root, { recursive: true, force: true }))
+  await fs.mkdir(executorDir, { recursive: true })
+  await fs.mkdir(controlDir)
+  await fs.writeFile(path.join(executorDir, "image.png"), imageBytes)
+  await fs.writeFile(path.join(controlDir, "image.png"), "wrong machine")
+  await fs.writeFile(path.join(executorDir, "notes.txt"), "executor notes\n", "utf8")
+  await fs.writeFile(path.join(executorDir, "empty.txt"), "")
+  const executor = new ToolClientHttpServer({
+    host: new NodeToolHost({ capabilities: ["read_bytes"], workspace: { root: executorDir } }),
+    listenHost: "127.0.0.1",
+    port: 0,
+  })
+  t.after(async () => {
+    await executor.stop()
+    await fs.rm(root, { recursive: true, force: true })
+  })
+  const { url: executorUrl } = await executor.start()
 
   const moduleUrl = new URL("./agent-state-tools.ts", import.meta.url).href
+  const clientUrl = new URL("./client/index.ts", import.meta.url).href
   const script = `
     import assert from "node:assert/strict"
-    const { memoryFs } = await import(${JSON.stringify(moduleUrl)})
+    import { memoryFs } from ${JSON.stringify(moduleUrl)}
+    import { clientTools } from ${JSON.stringify(clientUrl)}
+    await clientTools.connect({ endpoint: ${JSON.stringify(executorUrl)} })
 
     assert.match(await memoryFs("assets/", "create"), /created directory/)
     assert.match(await memoryFs(
-      ${JSON.stringify(`local://${path.join(localDir, "image.png")}`)},
+      "local://image.png",
       "copy",
       "assets/image.png",
     ), /copied local:/)
     assert.match(await memoryFs("assets/image.png", "copy", "archive/image-copy.png"), /copied memory:/)
     assert.match(await memoryFs(
-      ${JSON.stringify(`local://${path.join(localDir, "notes.txt")}`)},
+      ${JSON.stringify(`local://${path.join(executorDir, "notes.txt")}`)},
       "copy",
       "notes/imported.txt",
     ), /copied local:/)
     assert.match(await memoryFs("notes/imported.txt", "move", "notes/renamed.txt"), /moved memory:/)
+    await memoryFs("local://empty.txt", "copy", "notes/empty.txt")
+    await assert.rejects(() => memoryFs("local://notes.txt", "copy", "assets/image.png"), /already exists/)
+    await assert.rejects(() => memoryFs("local://missing.txt", "copy", "notes/missing.txt"))
+    await assert.rejects(() => memoryFs("local://.", "copy", "notes/directory.txt"), /regular file/)
 
     await memoryFs("temporary/", "create")
     await memoryFs("temporary/empty.md", "create")
@@ -83,11 +104,19 @@ test("memory_fs manages memory resources and copies container files", async (t) 
     await memoryFs("temporary/empty.md", "delete")
     assert.match(await memoryFs("temporary", "delete"), /deleted memory:/)
     await assert.rejects(() => memoryFs("local:///tmp/nope", "move", "nope"), /memory-relative/)
+    await clientTools.stop()
   `
 
   const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
-      env: { ...process.env, NANO_HOME: home },
+    const child = spawn(process.execPath, ["--import", import.meta.resolve("tsx"), "--input-type=module", "-e", script], {
+      env: {
+        ...process.env,
+        NANO_CONFIG: path.resolve(process.env.NANO_CONFIG || "test-config.json"),
+        NANO_HOME: home,
+        NANO_CLIENT: "local",
+        NANO_CLIENT_WORKSPACE: controlDir,
+      },
+      cwd: controlDir,
       stdio: ["ignore", "pipe", "pipe"],
     })
     let stdout = ""
@@ -101,7 +130,11 @@ test("memory_fs manages memory resources and copies container files", async (t) 
   assert.equal(result.code, 0, [result.stdout, result.stderr].filter(Boolean).join("\n"))
   assert.deepEqual(await fs.readFile(path.join(memoriesDir, "assets", "image.png")), imageBytes)
   assert.deepEqual(await fs.readFile(path.join(memoriesDir, "archive", "image-copy.png")), imageBytes)
-  assert.equal(await fs.readFile(path.join(memoriesDir, "notes", "renamed.txt"), "utf8"), "container notes\n")
+  assert.equal(await fs.readFile(path.join(memoriesDir, "notes", "renamed.txt"), "utf8"), "executor notes\n")
+  assert.equal((await fs.stat(path.join(memoriesDir, "assets", "image.png"))).mode & 0o777, 0o600)
+  assert.deepEqual(await fs.readFile(path.join(memoriesDir, "notes", "empty.txt")), Buffer.alloc(0))
+  await assert.rejects(() => fs.access(path.join(memoriesDir, "notes", "missing.txt")))
+  await assert.rejects(() => fs.access(path.join(memoriesDir, "notes", "directory.txt")))
   await assert.rejects(() => fs.access(path.join(memoriesDir, "notes", "imported.txt")))
   await assert.rejects(() => fs.access(path.join(memoriesDir, "temporary")))
 })

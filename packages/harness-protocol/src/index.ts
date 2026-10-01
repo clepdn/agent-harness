@@ -93,14 +93,14 @@ export function parseToolInvocation(value: unknown): ToolInvocation | null {
   }
 }
 
-function validArtifact(value: Record<string, unknown>, mimePattern: RegExp, status: unknown): boolean {
+function validArtifact(value: Record<string, unknown>, mimePattern: RegExp, status: unknown, minBytes = 1): boolean {
   return (
     nonEmptyString(value.path) &&
     nonEmptyString(value.mime) &&
     mimePattern.test(value.mime) &&
     typeof value.bytes === "number" &&
     Number.isSafeInteger(value.bytes) &&
-    value.bytes > 0 &&
+    value.bytes >= minBytes &&
     nonEmptyString(value.dataUrl) &&
     value.dataUrl.startsWith(`data:${value.mime};base64,`) &&
     status === "ok"
@@ -136,7 +136,7 @@ export function parseClientToolResult(value: unknown): ClientToolResult | null {
 
   const file = input.file === undefined ? null : record(input.file)
   if (input.file !== undefined && !file) return null
-  if (file && !validArtifact(file, /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i, input.status)) return null
+  if (file && !validArtifact(file, /^[a-z0-9.+-]+\/[a-z0-9.+-]+$/i, input.status, 0)) return null
 
   return {
     type: "tool.result",

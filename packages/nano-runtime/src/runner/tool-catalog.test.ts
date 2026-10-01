@@ -163,10 +163,12 @@ test("frontend catalog keeps server tools and bridge while hard-gating executor 
   assert.doesNotMatch(tools.find((tool) => tool.function.name === "image_tool")!.function.description, /client file/)
 })
 
-test("restored catalogs adopt memory hashline read and edit contracts", () => {
+test("restored catalogs adopt current memory file contracts", () => {
   const current = createNiriToolCatalog({ memory: true })
   const saved = current.map((tool) => tool.function.name === "read_file"
     ? { ...tool, function: { ...tool.function, description: "Read a memory file." } }
+    : tool.function.name === "memory_fs"
+    ? { ...tool, function: { ...tool.function, description: "Copy a runtime container file into memory." } }
     : tool.function.name === "edit_file" ? {
         ...tool,
         function: {

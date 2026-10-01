@@ -118,13 +118,13 @@ export const clientTools: SwitchableToolClient = new SwitchableToolClient(AGENT_
  */
 export async function readClientFile(
   filePath: string,
-  maxBytes: number,
+  maxBytes?: number,
   timeoutMs = 120_000,
 ): Promise<{ path: string; name: string; mime: string; data: Buffer }> {
   const result = await clientTools.execute({
     agentId: AGENT_ID,
     tool: "read_bytes",
-    args: { path: filePath, max_bytes: maxBytes },
+    args: { path: filePath, ...(maxBytes === undefined ? {} : { max_bytes: maxBytes }) },
     timeoutMs,
   })
   if (result.status !== "ok" || !result.file) {

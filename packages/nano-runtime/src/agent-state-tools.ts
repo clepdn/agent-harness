@@ -4,6 +4,7 @@ import fs from "node:fs/promises"
 import path from "node:path"
 import { applyHashlineEdits, computeLineHash, resolveEditAnchors, type HashlineToolEdit } from "@nano/harness-client-node"
 import { NANO_HOME } from "./agent-config"
+import { readClientFile } from "./client"
 import { isDbInitialized } from "./db"
 import { syncMemoryIndex } from "./memory"
 import { FRONTEND_SOUL_VIEW_PATH, readFrontendSoul, writeFrontendSoul } from "./frontend-soul"
@@ -224,7 +225,7 @@ function localFsPath(input: string): string {
   if (!raw.startsWith("local://")) throw new Error("local copy sources must use local://")
   const resource = raw.slice("local://".length)
   if (!resource) throw new Error("local:// source must identify a file")
-  return path.isAbsolute(resource) ? path.normalize(resource) : path.resolve(process.cwd(), resource)
+  return resource
 }
 
 async function existingMemoryFsTarget(filePath: string): Promise<Stats> {
@@ -324,32 +325,30 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
     return `moved ${source.uri} -> ${destination.uri}`
   }
 
-  let sourcePath: string
-  let sourceLabel: string
-  let sourceStat: Stats
-  if (sourceIsLocal) {
-    sourceLabel = (fileName as string).trim()
-    sourcePath = localFsPath(sourceLabel)
-    sourceStat = await fs.stat(sourcePath).catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") throw new Error("local copy source does not exist")
-      throw error
-    })
-  } else {
-    const source = memoryFsPath(fileName)
-    assertMemoryAccess(source.filePath, options)
-    sourceLabel = source.uri
-    sourcePath = source.filePath
-    sourceStat = await existingMemoryFsTarget(sourcePath)
-  }
-  if (!sourceStat.isFile()) throw new Error("copy source must be a regular file")
   const destination = memoryFsPath(rawTarget)
   assertMemoryAccess(destination.filePath, options)
   await prepareMemoryFile(destination.filePath)
   await requireMissingMemoryFsTarget(destination.filePath)
-  await fs.copyFile(sourcePath, destination.filePath, constants.COPYFILE_EXCL)
-  await fs.chmod(destination.filePath, 0o600)
+
+  let sourceLabel: string
+  let sourceBytes: number
+  if (sourceIsLocal) {
+    sourceLabel = (fileName as string).trim()
+    const source = await readClientFile(localFsPath(sourceLabel))
+    await fs.writeFile(destination.filePath, source.data, { flag: "wx", mode: 0o600 })
+    sourceBytes = source.data.length
+  } else {
+    const source = memoryFsPath(fileName)
+    assertMemoryAccess(source.filePath, options)
+    const sourceStat = await existingMemoryFsTarget(source.filePath)
+    if (!sourceStat.isFile()) throw new Error("copy source must be a regular file")
+    sourceLabel = source.uri
+    sourceBytes = sourceStat.size
+    await fs.copyFile(source.filePath, destination.filePath, constants.COPYFILE_EXCL)
+    await fs.chmod(destination.filePath, 0o600)
+  }
   await syncMemoryAfterWrite()
-  return `copied ${sourceLabel} -> ${destination.uri} (${sourceStat.size} bytes)`
+  return `copied ${sourceLabel} -> ${destination.uri} (${sourceBytes} bytes)`
 }
 
 type MemoryResource = { filePath: string; indexed: boolean; backup: boolean; root: string }

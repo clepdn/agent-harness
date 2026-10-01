@@ -104,14 +104,14 @@ function editFileToolDefinition(hashline: boolean): ToolDefinition {
 
 export const MEMORY_FS_TOOL_DEFINITION = functionTool(
   "memory_fs",
-  "Manage files and directories in server-owned memory. Memory paths are relative to the memory root (memory:// is optional). op is create, delete, move, or copy. Move and copy require a memory-relative target. For copy, file_name may instead be local:// followed by an absolute or runtime-working-directory-relative container path. Copy accepts text or binary files, including images. Create makes an empty file, or a directory when file_name ends in '/'. Delete removes files or empty directories.",
+  "Manage files and directories in server-owned memory. Memory paths are relative to the memory root (memory:// is optional). op is create, delete, move, or copy. Move and copy require a memory-relative target. For copy, file_name may instead be local:// followed by an absolute or workspace-relative path on the attached executor; this requires its read_bytes capability and obeys its file-transfer size limit (25 MiB by default). Copy accepts text or binary files, including images and empty files. Create makes an empty file, or a directory when file_name ends in '/'. Delete removes files or empty directories.",
   {
     type: "object",
     additionalProperties: false,
     properties: {
       file_name: {
         type: "string",
-        description: "Memory source/target path, or a local:// container path when copying into memory.",
+        description: "Memory source/target path, or a local:// attached-executor path when copying into memory.",
       },
       op: { type: "string", enum: ["create", "delete", "move", "copy"] },
       target: { type: "string", description: "Memory-relative destination required for move and copy." },
@@ -613,14 +613,14 @@ export function reconcileImageToolDefinition(
   return { catalog, changed: true }
 }
 
-/** Refresh memory read/edit contracts in a restored session's pinned catalog. */
+/** Refresh memory file contracts in a restored session's pinned catalog. */
 export function reconcileMemoryFileToolDefinitions(
   saved: readonly ToolDefinition[],
   current: readonly ToolDefinition[],
 ): { catalog: ToolDefinition[]; changed: boolean } {
   const catalog = [...saved]
   let changed = false
-  for (const name of ["read_file", "edit_file"]) {
+  for (const name of ["read_file", "edit_file", "memory_fs"]) {
     const desired = current.find((tool) => tool.function.name === name)
     if (!desired) continue
     const existingIndex = catalog.findIndex((tool) => tool.function.name === name)

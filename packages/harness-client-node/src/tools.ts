@@ -585,7 +585,6 @@ export async function readFileBytes(filePath: string, maxBytes?: number, timeout
   const resolvedPath = await resolveLocalPath(filePath, opTimeoutMs)
   const st = await withTimeout(fs.stat(resolvedPath), opTimeoutMs, "file stat")
   if (!st.isFile()) throw new Error(`not a regular file: ${filePath}`)
-  if (st.size <= 0) throw new Error(`file is empty: ${filePath}`)
   if (st.size > limit) throw new Error(`file too large: ${st.size} bytes (max ${limit})`)
 
   const data = await fs.readFile(resolvedPath, { signal: AbortSignal.timeout(opTimeoutMs) })
