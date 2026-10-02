@@ -2,6 +2,8 @@ import { createHash } from "node:crypto"
 import { config } from "../config"
 import { recordMetric } from "../metrics"
 import { emit } from "../stream"
+import { CompletionRequestError } from "../llm"
+import { cancelRunningJobs } from "./jobs"
 import { setContextSize, setWorking } from "../discord/status-updater"
 import { dispatchDiscordTyping, stopDiscordTyping } from "../discord/typing-lease"
 import { recordLlmRequest, setPromWorking } from "../prometheus"
@@ -645,6 +647,13 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
         console.log("[runner] active turn interrupted by operator")
         state.interruptRequested = false
         interrupted = true
+      } else if (err instanceof CompletionRequestError) {
+        // Inference failed before committing output. Keep the intentional cache
+        // reset policy, but archive committed history through the /discard exit.
+        console.warn(`[runner] inference failed; discarding session: ${err.message}`)
+        state.discardRequested = true
+        cancelRunningJobs("session discarded after inference failure")
+        return "discard"
       } else {
         throw err
       }

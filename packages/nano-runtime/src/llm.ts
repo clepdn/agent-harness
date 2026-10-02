@@ -235,6 +235,14 @@ export class ContextChangedError extends Error {
   }
 }
 
+/** A provider failure before any assistant response was committed to Context. */
+export class CompletionRequestError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = "CompletionRequestError"
+  }
+}
+
 function cloneMessage(message: Message): Message {
   return structuredClone(message)
 }
@@ -537,8 +545,11 @@ export class Context {
         this.completionOptions(requestOptions),
       )
     }
-    if (result.stopReason === "error" || result.stopReason === "aborted") {
-      throw new Error(result.errorMessage ?? `Completion ${result.stopReason}`)
+    if (result.stopReason === "error") {
+      throw new CompletionRequestError(result.errorMessage ?? "Completion error")
+    }
+    if (result.stopReason === "aborted") {
+      throw new Error(result.errorMessage ?? "Completion aborted")
     }
     if (this.revision !== expectedRevision) {
       throw new ContextChangedError("Context changed while completion was in flight; refusing to append a stale assistant response")
