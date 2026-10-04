@@ -44,6 +44,14 @@ test("memory catalog exposes unified file tools", () => {
   const memoryFs = tools.find((tool) => tool.function.name === "memory_fs")!
   assert.deepEqual(memoryFs.function.parameters.required, ["file_name", "op"])
   assert.deepEqual(Object.keys(memoryFs.function.parameters.properties ?? {}).sort(), ["file_name", "op", "target"])
+  const memoryFsProperties = memoryFs.function.parameters.properties as Record<string, { enum?: string[] }>
+  assert.deepEqual(memoryFsProperties.op.enum, ["ls", "create", "delete", "move", "copy"])
+  assert.match(memoryFs.function.description, /ls[\s\S]*list/i)
+  assert.match(memoryFs.function.description, /memory:\/\/[\s\S]*relative directory/i)
+  assert.match(memoryFs.function.description, /immediate[\s\S]*sort/i)
+  assert.match(memoryFs.function.description, /directories.*\//i)
+  assert.match(memoryFs.function.description, /ls.*not.*target.*local:\/\//i)
+
 })
 
 test("memory catalog exposes guarded Discord vector pruning", () => {

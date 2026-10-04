@@ -580,3 +580,108 @@ test("frontend memory policy hides skills and blocks local copy escape hatches",
   })
   assert.equal(result.code, 0, result.stderr)
 })
+
+test("memory_fs ls lists only immediate memory children and enforces listing scope", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-memory-fs-ls-"))
+  const home = path.join(root, "home")
+  const memories = path.join(home, "memories")
+  const outside = path.join(root, "outside")
+  await fs.mkdir(path.join(memories, "nested", "branch"), { recursive: true })
+  await fs.mkdir(path.join(memories, "skills"))
+  await fs.mkdir(path.join(memories, "soul.md"))
+  await fs.mkdir(path.join(memories, "empty"))
+  await fs.mkdir(path.join(memories, "empty-filtered"))
+  await fs.mkdir(path.join(outside, "subdir"), { recursive: true })
+  await fs.writeFile(path.join(home, "soul.md"), "server soul must stay outside memories", "utf8")
+  await fs.writeFile(path.join(home, "sibling.md"), "NANO_HOME sibling must stay outside memories", "utf8")
+  await fs.writeFile(path.join(memories, "Alpha.md"), "file content must not be returned by ls", "utf8")
+  await fs.writeFile(path.join(memories, "zeta.md"), "zeta content", "utf8")
+  await fs.writeFile(path.join(memories, "middle.md"), "middle content", "utf8")
+  await fs.writeFile(path.join(memories, "discarded-2026-09-11.JSON"), "archive content", "utf8")
+  await fs.writeFile(path.join(memories, "DISCARDED-2026-09-12.json"), "archive content", "utf8")
+  await fs.writeFile(path.join(memories, "frontend-discarded-2026-09-13.json"), "frontend archive content", "utf8")
+  await fs.writeFile(path.join(memories, "nested", "a.md"), "a content", "utf8")
+  await fs.writeFile(path.join(memories, "nested", "z.md"), "z content", "utf8")
+  await fs.writeFile(path.join(memories, "nested", "branch", "deep.md"), "deep content", "utf8")
+  await fs.writeFile(path.join(memories, "skills", "hidden.md"), "skill content", "utf8")
+  await fs.writeFile(path.join(memories, "soul.md", "inside.md"), "memory soul directory", "utf8")
+  await fs.writeFile(path.join(memories, "empty-filtered", ".hidden"), "hidden content", "utf8")
+  await fs.writeFile(path.join(outside, "outside.md"), "outside symlink content", "utf8")
+  await fs.writeFile(path.join(outside, "subdir", "outside-child.md"), "outside parent content", "utf8")
+  await fs.symlink(outside, path.join(memories, "linked-dir"))
+  await fs.symlink(path.join(outside, "outside.md"), path.join(memories, "linked-file.md"))
+  t.after(() => fs.rm(root, { recursive: true, force: true }))
+
+  const moduleUrl = new URL("./agent-state-tools.ts", import.meta.url).href
+  const script = `
+    import assert from "node:assert/strict"
+    import fs from "node:fs/promises"
+    import path from "node:path"
+    const { memoryFs } = await import(${JSON.stringify(moduleUrl)})
+    const memories = path.join(process.env.NANO_HOME, "memories")
+    const policy = { excludeSkills: true, excludeMainSessionArchives: true, allowLocalCopy: false }
+
+    const rootListing = "memory:// is a dir\\nAlpha.md\\nDISCARDED-2026-09-12.json\\ndiscarded-2026-09-11.JSON\\nempty/\\nempty-filtered/\\nfrontend-discarded-2026-09-13.json\\nlinked-dir\\nlinked-file.md\\nmiddle.md\\nnested/\\nskills/\\nsoul.md/\\nzeta.md"
+    const actualRootListing = await memoryFs("memory://", "ls")
+    assert.equal(actualRootListing, rootListing)
+    assert.equal(await memoryFs(".", "ls"), rootListing)
+    assert.equal(await memoryFs("nested", "ls"), "memory://nested is a dir\\na.md\\nbranch/\\nz.md")
+    assert.equal(await memoryFs("nested/", "ls"), "memory://nested is a dir\\na.md\\nbranch/\\nz.md")
+    assert.equal(await memoryFs("memory://nested/", "ls"), "memory://nested is a dir\\na.md\\nbranch/\\nz.md")
+    assert.equal(await memoryFs("memory://nested/branch", "ls"), "memory://nested/branch is a dir\\ndeep.md")
+    assert.equal(await memoryFs("memory://soul.md", "ls"), "memory://soul.md is a dir\\ninside.md")
+    assert.doesNotMatch(actualRootListing, /file content|zeta content|server soul|NANO_HOME sibling|outside symlink/)
+    assert.doesNotMatch(await memoryFs("memory://soul.md", "ls"), /server soul|NANO_HOME sibling/)
+    assert.doesNotMatch(await memoryFs("nested", "ls"), /deep.md/)
+    assert.match(await memoryFs("nested/branch", "ls"), /deep.md/)
+    await assert.rejects(() => memoryFs("sibling.md", "ls"))
+    await assert.rejects(() => memoryFs("memory://sibling.md", "ls"))
+    assert.match(await memoryFs("empty", "ls"), /\\(empty directory\\)$/)
+    assert.match(await memoryFs("empty-filtered", "ls"), /\\(empty directory\\)$/)
+
+    const frontendListing = await memoryFs("memory://", "ls", undefined, policy)
+    assert.match(frontendListing, /frontend-discarded-2026-09-13\\.json/)
+    assert.doesNotMatch(frontendListing, /skills|discarded-2026-09-11|DISCARDED-2026-09-12/)
+    await assert.rejects(() => memoryFs("skills/", "ls", undefined, policy), /skill memories are unavailable/)
+    await assert.rejects(() => memoryFs("skills/hidden.md", "ls", undefined, policy), /skill memories are unavailable/)
+    await assert.rejects(() => memoryFs("discarded-2026-09-11.JSON", "ls", undefined, policy), /main session archives are unavailable/)
+    await assert.rejects(() => memoryFs("DISCARDED-2026-09-12.json", "ls", undefined, policy), /main session archives are unavailable/)
+
+    for (const target of [null, "", "nested"]) {
+      await assert.rejects(() => memoryFs("memory://", "ls", target))
+    }
+    for (const fileName of [
+      undefined, null, "",
+      "/", ${JSON.stringify(path.join(outside, "outside.md"))}, "memory:///", "../sibling.md", "memory://../sibling.md",
+      "memory://nested?query=1", "memory://nested#fragment", "local:///tmp/file.md",
+    ]) {
+      await assert.rejects(() => memoryFs(fileName, "ls"))
+    }
+    await assert.rejects(() => memoryFs("missing", "ls"))
+    await assert.rejects(() => memoryFs("Alpha.md", "ls"))
+    await assert.rejects(() => memoryFs("linked-dir", "ls"))
+    await assert.rejects(() => memoryFs("linked-dir/subdir", "ls"))
+    await assert.rejects(() => memoryFs("linked-file.md", "ls"))
+
+    await fs.rm(memories, { recursive: true })
+    await assert.rejects(() => memoryFs(".", "ls"))
+    await assert.rejects(() => fs.access(memories))
+    await fs.mkdir(path.join(memories, "skills"), { recursive: true })
+    await fs.writeFile(path.join(memories, "discarded-private.json"), "private main archive")
+    assert.match(await memoryFs("memory://", "ls", undefined, policy), /\\(empty directory\\)$/)
+    await fs.rm(memories, { recursive: true })
+    await fs.symlink(${JSON.stringify(outside)}, memories)
+    await assert.rejects(() => memoryFs("memory://", "ls"))
+  `
+  const result = await new Promise<{ code: number | null; stderr: string }>((resolve, reject) => {
+    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      env: { ...process.env, NANO_HOME: home },
+      stdio: ["ignore", "ignore", "pipe"],
+    })
+    let stderr = ""
+    child.stderr.setEncoding("utf8").on("data", (chunk) => { stderr += chunk })
+    child.on("error", reject)
+    child.on("close", (code) => resolve({ code, stderr }))
+  })
+  assert.equal(result.code, 0, result.stderr)
+})

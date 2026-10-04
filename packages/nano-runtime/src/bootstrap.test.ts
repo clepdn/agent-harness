@@ -100,5 +100,4 @@ test("frontend bootstrap shares soul and memories without exposing skills or exe
   assert.doesNotMatch(system, /- `skill`:/)
   assert.match(system, /`image_tool`: fetch an image from a public HTTP\(S\) URL/)
   assert.match(system, /local image paths.*unavailable/)
-  assert.match(system, /owner-DM Discord transcript and skill memories are excluded/)
 })

@@ -84,6 +84,8 @@ For example, an agent with `home: /home/nano` keeps long-term memories in `/home
 
 For routine maintenance, ask the agent to inspect, organize, or repair their own memories using the memory tools. Treat `soul.md` and `memories/` like a private diary: do not read or change them unless the agent asks; it's weird if you do. For backup or recovery, stop the worker and preserve the entire agent home rather than copying only the Markdown files.
 
+The `memory_fs` tool also supports `op: "ls"` to list immediate children in server memory. Use `file_name: "memory://"` or `"."` for the root, or a relative directory path or directory `memory://` URI for a subdirectory. Results are sorted child names, with `/` on real directories; listing is non-recursive and does not read file contents. Empty directories are reported as `(empty directory)`. Listing takes no `target` and does not accept `local://`. The separate `memory://soul.md` read route is outside the `memories/` listing.
+
 ## Agent JSON specification
 
 One file in `agents/` is one agent. Files ending in `.example.json` are skipped.

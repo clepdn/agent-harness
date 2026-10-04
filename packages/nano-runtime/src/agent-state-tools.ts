@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
-import { constants, type Stats } from "node:fs"
+import { constants, type Dirent, type Stats } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { applyHashlineEdits, computeLineHash, resolveEditAnchors, type HashlineToolEdit } from "@nano/harness-client-node"
@@ -191,30 +191,31 @@ async function syncMemoryAfterWrite(): Promise<void> {
   if (isDbInitialized()) await syncMemoryIndex()
 }
 
-type MemoryFsOperation = "create" | "delete" | "move" | "copy"
+type MemoryFsOperation = "create" | "delete" | "move" | "copy" | "ls"
 
 function parseMemoryFsOperation(input: unknown): MemoryFsOperation {
-  if (typeof input !== "string" || !["create", "delete", "move", "copy"].includes(input)) {
-    throw new Error("op must be create, delete, move, or copy")
+  if (typeof input !== "string" || !["create", "delete", "move", "copy", "ls"].includes(input)) {
+    throw new Error("op must be create, delete, move, copy, or ls")
   }
   return input as MemoryFsOperation
 }
 
-function memoryFsPath(input: unknown): { filePath: string; uri: string } {
+function memoryFsPath(input: unknown, allowRoot = false): { filePath: string; uri: string } {
   if (typeof input !== "string" || !input.trim()) throw new Error("file_name is required")
   const raw = input.trim()
   if (raw.startsWith("local://")) throw new Error("local:// is allowed only as a copy source")
   const resource = raw.startsWith("memory://") ? raw.slice("memory://".length) : raw
-  if (!resource || resource.includes("?") || resource.includes("#")) {
+  if (resource.includes("?") || resource.includes("#")) {
     throw new Error("memory filesystem path must identify a resource without a query or fragment")
   }
-  const normalized = resource.replace(/\\/g, "/").replace(/\/+$/, "")
-  if (!normalized || path.posix.isAbsolute(normalized)) {
+  const slashNormalized = resource.replace(/\\/g, "/")
+  const normalized = slashNormalized.replace(/\/+$/, "")
+  if ((!normalized && !allowRoot) || path.posix.isAbsolute(slashNormalized)) {
     throw new Error("memory filesystem path must be relative")
   }
-  const filePath = path.resolve(MEMORY_ROOT, normalized)
+  const filePath = normalized ? path.resolve(MEMORY_ROOT, normalized) : MEMORY_ROOT
   const relative = path.relative(MEMORY_ROOT, filePath)
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+  if ((!relative && !allowRoot) || relative.startsWith("..") || path.isAbsolute(relative)) {
     throw new Error("memory filesystem path escapes the agent memory directory")
   }
   return { filePath, uri: `memory://${relative.split(path.sep).join("/")}` }
@@ -237,6 +238,7 @@ async function existingMemoryFsTarget(filePath: string): Promise<Stats> {
     throw error
   }
   if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) throw new Error("agent memory root must be a real directory")
+  if (filePath === MEMORY_ROOT) return rootStat
 
   const parent = path.dirname(filePath)
   let current = MEMORY_ROOT
@@ -269,12 +271,25 @@ async function requireMissingMemoryFsTarget(filePath: string): Promise<void> {
   throw new Error("memory filesystem destination already exists")
 }
 
-/** Create, delete, move, or copy a server-owned memory filesystem resource. */
+/** Create, delete, move, copy, or list a server-owned memory filesystem resource. */
 export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarget?: unknown, options?: MemoryAccessOptions): Promise<string> {
   const operation = parseMemoryFsOperation(rawOperation)
   const sourceIsLocal = typeof fileName === "string" && fileName.trim().startsWith("local://")
-  if (sourceIsLocal && options?.allowLocalCopy === false) throw new Error("local:// copies are unavailable to the frontend agent")
   const targetProvided = rawTarget !== undefined
+
+  if (operation === "ls") {
+    if (targetProvided) throw new Error("ls does not accept target")
+    if (sourceIsLocal) throw new Error("ls requires a memory-relative directory")
+    const target = memoryFsPath(fileName, true)
+    assertMemoryAccess(target.filePath, options)
+    const stat = await existingMemoryFsTarget(target.filePath)
+    if (!stat.isDirectory()) throw new Error("ls requires a directory")
+    const entries = await getMemoryDirectoryEntries(target.filePath, options)
+    const names = entries.map((entry) => `${entry.name}${entry.isDirectory() ? "/" : ""}`)
+    return `${target.uri} is a dir\n${names.length ? names.join("\n") : "(empty directory)"}`
+  }
+
+  if (sourceIsLocal && options?.allowLocalCopy === false) throw new Error("local:// copies are unavailable to the frontend agent")
 
   if (operation === "create") {
     if (sourceIsLocal) throw new Error("create requires a memory-relative file_name")
@@ -649,6 +664,15 @@ async function getFilesRecursively(dir: string): Promise<string[]> {
   return files.flat()
 }
 
+async function getMemoryDirectoryEntries(dir: string, options?: MemoryAccessOptions): Promise<Dirent[]> {
+  const entries = await fs.readdir(dir, { withFileTypes: true })
+  return entries
+    .filter((entry) => !entry.name.startsWith("."))
+    .filter((entry) => !(options?.excludeSkills && dir === MEMORY_ROOT && entry.name.toLowerCase() === "skills"))
+    .filter((entry) => memoryVisible(path.join(dir, entry.name), options))
+    .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
+}
+
 export async function readMemory(relativePath: unknown, startLine?: unknown, endLine?: unknown, options?: MemoryAccessOptions): Promise<string> {
   const { filePath, displayPath, root } = memoryReadTarget(relativePath)
   assertMemoryAccess(filePath, options)
@@ -659,12 +683,8 @@ export async function readMemory(relativePath: unknown, startLine?: unknown, end
   }
   const stat = await verifyMemoryReadTarget(filePath, root)
   if (stat.isDirectory()) {
-    const entries = (await fs.readdir(filePath))
-      .filter((entry) => !entry.startsWith("."))
-      .filter((entry) => !(options?.excludeSkills && filePath === MEMORY_ROOT && entry.toLowerCase() === "skills"))
-      .filter((entry) => memoryVisible(path.join(filePath, entry), options))
-      .sort()
-    return `${displayPath} is a dir\n${entries.join("\n")}`
+    const entries = await getMemoryDirectoryEntries(filePath, options)
+    return `${displayPath} is a dir\n${entries.map((entry) => entry.name).join("\n")}`
   }
   const extension = path.extname(filePath).toLowerCase()
   if (!stat.isFile() || (extension !== ".md" && extension !== ".json")) {
