@@ -6,6 +6,7 @@ import { CompletionRequestError } from "../llm"
 import { cancelRunningJobs } from "./jobs"
 import { setContextSize, setWorking } from "../discord/status-updater"
 import { dispatchDiscordTyping, stopDiscordTyping } from "../discord/typing-lease"
+import { logMessage } from "../db"
 import { recordLlmRequest, setPromWorking } from "../prometheus"
 import { cacheRefreshIntervalMs, cacheWarmingCompactionAt, createCacheWarmer } from "./cache-warmer"
 import type { Message } from "../types"
@@ -67,6 +68,7 @@ async function waitForNextEvent(
   // event — or a rest/shutdown request — breaks out immediately. Even when the
   // timer is disabled, an interrupted plain wait can carry a manual /compact.
   while (true) {
+    if (state.modelSwap) return
     if (state.restRequested || hooks.shouldShutdown()) return
 
     // A /compact can be queued while a model or tool call is still in flight.
@@ -76,14 +78,19 @@ async function waitForNextEvent(
     if (state.compactionRequest) {
       const request = state.compactionRequest
       state.compactionRequest = undefined
-      const compacted = await compact(state, request)
-      if (compacted === "rewritten") {
-        hooks.refreshToolCatalog("post-compaction")
-        console.log("[runner] manual /compact rewrote context at the idle boundary; reactivating immediately")
-        return
+      state.compactionInFlight = true
+      try {
+        const compacted = await compact(state, request)
+        if (compacted === "rewritten") {
+          hooks.refreshToolCatalog("post-compaction")
+          console.log("[runner] manual /compact rewrote context at the idle boundary; reactivating immediately")
+          return
+        }
+        if (compacted === "suppressed") console.log("[runner] idle compaction suppressed after no tool result reduction")
+        console.log("[runner] manual /compact requested but nothing to compact (summary not smaller)")
+      } finally {
+        state.compactionInFlight = false
       }
-      if (compacted === "suppressed") console.log("[runner] idle compaction suppressed after no tool result reduction")
-      console.log("[runner] manual /compact requested but nothing to compact (summary not smaller)")
       continue
     }
 
@@ -111,7 +118,7 @@ async function waitForNextEvent(
     // Null means the timeout fired or the wait was interrupted for rest/
     // shutdown or a manual compaction request. Bail out on rest/shutdown so
     // the loop can handle it.
-    if (state.restRequested || hooks.shouldShutdown()) return
+    if (state.modelSwap || state.restRequested || hooks.shouldShutdown()) return
 
     // A manual request that interrupted this wait is consumed at the top of
     // the next iteration. Keeping that path in one place also closes the race
@@ -122,11 +129,18 @@ async function waitForNextEvent(
     if (idleCompactionMs <= 0) continue
     if (cacheWaitUntil !== undefined && Date.now() < cacheWaitUntil) continue
 
-    const compacted = await compact(state)
+    state.compactionInFlight = true
+    let compacted: CompactionResult
+    try {
+      compacted = await compact(state)
+    } finally {
+      state.compactionInFlight = false
+    }
     if (cacheDeadline !== undefined) {
       // Failed/suppressed compaction retries after a refresh interval, not a spin.
       cacheCompactionRetryAt = Date.now() + cacheRefreshIntervalMs(modelState.cacheLifetimeMs)
     }
+    if (state.modelSwap) return
     if (compacted === "rewritten") {
       hooks.refreshToolCatalog("post-compaction")
       console.log("[runner] idle compaction rewrote context while waiting for the next event")
@@ -568,10 +582,10 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
         lifetimeMs: modelState.cacheLifetimeMs,
         durationMs: modelState.compactionStrategy === "off" ? 0 : modelState.cacheWarmingDurationMs,
         mode: modelState.cacheWarmingMode,
-        enabled: modelState.cacheWarming && !modelState.useFallback &&
+        enabled: modelState.cacheWarming && !modelState.useFallback && !state.modelSwap &&
           !state.restRequested && !state.discardRequested && !hooks.shouldShutdown() &&
           state.context.model.id === modelState.primaryModel?.id,
-        busy: state.turnInFlight || state.toolInFlight,
+        busy: state.turnInFlight || state.toolInFlight || Boolean(state.compactionInFlight),
       }
     },
     onUsage: (target, usage) => {
@@ -586,8 +600,34 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
 
   try {
   while (true) {
+    if (hooks.shouldShutdown() && !state.discardRequested) {
+      await hooks.saveShutdownSnapshot()
+      clearDiscordTypingScope(state)
+      setWorking(false)
+      setPromWorking(false)
+      hooks.resolveShutdown()
+      return "rest"
+    }
     cacheWarmer.activity()
     hooks.onTurnStart?.()
+    if (state.modelSwap && !state.modelSwap.started) {
+      state.context.append({ role: "user", content: state.modelSwap.prompt, timestamp: Date.now() })
+      logMessage(convId, "user", state.modelSwap.prompt)
+      emit({ type: "user", source: "system", text: state.modelSwap.prompt, triggeredAt: new Date().toISOString() })
+      state.modelSwap.started = true
+      state.modelSwap.onStarted?.()
+    }
+    if (state.modelSwap?.started) {
+      state.modelSwap.turns += 1
+      if (Date.now() >= state.modelSwap.deadlineAt || state.modelSwap.turns > state.modelSwap.turnLimit) {
+        state.modelSwap.fallbackRequested = true
+        state.modelSwap.fallbackReason = state.modelSwap.turns > state.modelSwap.turnLimit
+          ? `journal/end handoff exceeded ${state.modelSwap.turnLimit} turns`
+          : "journal/end handoff exceeded its deadline"
+        state.restRequested = true
+        state.restReason = `model swap fallback: ${state.modelSwap.fallbackReason}`
+      }
+    }
     if (state.discardRequested) {
       console.log("[runner] session discard requested")
       clearDiscordTypingScope(state)
@@ -596,8 +636,6 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       return "discard"
     }
     // Check for programmatic rest at the top of each iteration.
-    // This catches rest requested during event wait (waitForNextEvent returns
-    // null, loop continues here) and during tool processing.
     if (state.restRequested) {
       console.log(`[runner] programmatic rest requested: ${state.restReason}`)
       await saveRestSnapshot(state.context.items, state.restReason, state.runtimeKind)
@@ -606,15 +644,26 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       setPromWorking(false)
       return "rest"
     }
-
-    const fullContextCompactionDue = state.contextSize >= modelStateFor(state.runtimeKind).compactTriggerTokens
-    const compacted = await applyCompaction(state, "pre-turn")
+    const fullContextCompactionDue = !state.modelSwap && state.contextSize >= modelStateFor(state.runtimeKind).compactTriggerTokens
+    let compacted: CompactionResult = "none"
+    if (!state.modelSwap) {
+      state.compactionInFlight = true
+      try {
+        compacted = await applyCompaction(state, "pre-turn")
+      } finally {
+        state.compactionInFlight = false
+      }
+    }
     if (compacted === "rewritten") hooks.refreshToolCatalog("post-compaction")
     if (state.discardRequested) {
       clearDiscordTypingScope(state)
       setWorking(false)
       setPromWorking(false)
       return "discard"
+    }
+    if (state.modelSwap && !state.modelSwap.started) {
+      state.modelSwap.onCheckpoint?.()
+      continue
     }
 
     const turnStart = state.context.items.length
@@ -648,12 +697,18 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
         state.interruptRequested = false
         interrupted = true
       } else if (err instanceof CompletionRequestError) {
-        // Inference failed before committing output. Keep the intentional cache
-        // reset policy, but archive committed history through the /discard exit.
-        console.warn(`[runner] inference failed; discarding session: ${err.message}`)
-        state.discardRequested = true
-        cancelRunningJobs("session discarded after inference failure")
-        return "discard"
+        if (state.modelSwap) {
+          state.modelSwap.fallbackRequested = true
+          state.modelSwap.fallbackReason = `handoff generation failed: ${err.message}`
+          state.restRequested = true
+          state.restReason = `model swap fallback: ${state.modelSwap.fallbackReason}`
+          outcome = CycleOutcome.NoTools
+        } else {
+          console.warn(`[runner] inference failed; discarding session: ${err.message}`)
+          state.discardRequested = true
+          cancelRunningJobs("session discarded after inference failure")
+          return "discard"
+        }
       } else {
         throw err
       }
@@ -668,6 +723,9 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     }
     if (!outcome) throw new Error("assistant turn completed without an outcome")
     turnCount += 1
+    if (state.modelSwap?.started && outcome === CycleOutcome.ToolsDone) {
+      state.modelSwap.onCheckpoint?.()
+    }
 
     if (state.discardRequested) {
       clearDiscordTypingScope(state)
@@ -727,11 +785,8 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     }
 
     // A full-context rewrite can make the first response look like the task
-    // ended, even though this loop was in the middle of working through it.
-    // Give that response one explicit continuation check before going idle.
-    // This check is one-shot until another tool turn or incoming event, so an
-    // intentional second wait still takes effect.
-    if (fullContextCompactionDue && compacted === "rewritten" && !postCompactionIdleRetryUsed && !deliveryNudged &&
+    // ended; only ordinary sessions receive the continuation nudge.
+    if (!state.modelSwap && fullContextCompactionDue && compacted === "rewritten" && !postCompactionIdleRetryUsed && !deliveryNudged &&
         (outcome === CycleOutcome.NoTools || outcome === CycleOutcome.Wait)) {
       console.log("[runner] first post-compaction turn would idle; checking for unfinished work")
       postCompactionIdleRetryUsed = true
@@ -744,6 +799,14 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     }
 
     if (outcome === CycleOutcome.NoTools) {
+      if (state.modelSwap) {
+        state.context.append({
+          role: "user",
+          content: "[model swap handoff] Continue journaling pending work, then call end_session now.",
+          timestamp: Date.now(),
+        })
+        continue
+      }
       if (deliveryNudged) continue
       if (modelStateFor(state.runtimeKind).primaryNudgeOnNoTool) {
         state.context.append({
@@ -762,6 +825,14 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     }
 
     if (outcome === CycleOutcome.Wait) {
+      if (state.modelSwap) {
+        state.context.append({
+          role: "user",
+          content: "[model swap handoff] Do not wait. Finish journal now and call end_session.",
+          timestamp: Date.now(),
+        })
+        continue
+      }
       if (deliveryNudged) continue
       clearDiscordTypingScope(state)
       setWorking(false)

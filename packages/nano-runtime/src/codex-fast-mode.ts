@@ -1,7 +1,7 @@
 import type { Model } from "./llm"
 import { config } from "./config"
 
-// Process-local, like runtime model swaps. Applies to subsequent requests.
+// Restored from the selected preset at process start; updates affect subsequent requests.
 let enabled = config.model.fast
 
 export function getCodexFastMode(): boolean {

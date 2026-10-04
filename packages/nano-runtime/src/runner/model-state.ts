@@ -6,14 +6,18 @@
  * mutable singleton so it can be swapped at runtime via the model-swap feature.
  *
  * All code that makes LLM API calls reads from `modelState` rather than the
- * const exports in `config.ts`. This allows `POST /awp/swap-model` to swap
- * the primary model mid-session.
+ * const exports in `config.ts`. Runtime selection is durably recorded by preset
+ * name and restored from the current config at startup.
  */
 
 import type { Model } from "../llm"
 import { config, getModelPreset, type ToolChoice, type ThinkingEffort, type CompactionStrategy } from "../config"
 import { setCodexFastMode } from "../codex-fast-mode"
 import { cacheLifetimeMinutes, idleCacheCompactionMs, respectPromptCache } from "../cache-policy"
+import { NANO_HOME } from "../agent-config"
+import { atomicWriteFile, isMissingFileError } from "../durable-file"
+import fs from "node:fs/promises"
+import path from "node:path"
 import type { RuntimeKind } from "./types"
 import {
   buildModel,
@@ -102,6 +106,20 @@ export const modelState: RuntimeModelConfig = {
   useFallback: initUseFallback,
 }
 
+// Preset omissions inherit the configured startup defaults, never a prior swap.
+// Preserving this boundary makes a stored preset name resolve identically after restart.
+const startupModelDefaults = {
+  primaryToolChoice: modelState.primaryToolChoice,
+  primaryVision: modelState.primaryVision,
+  primaryNudgeOnNoTool: modelState.primaryNudgeOnNoTool,
+  enableThinking: modelState.enableThinking,
+  thinkingEffort: modelState.thinkingEffort,
+  respectPromptCache: modelState.respectPromptCache,
+  compactionStrategy: modelState.compactionStrategy,
+  compactTriggerTokens: modelState.compactTriggerTokens,
+  deepArchive: modelState.deepArchive,
+}
+
 function frontendModelConfig(): RuntimeModelConfig | null {
   const configured = config.frontend.preset
   if (configured === undefined) return null
@@ -134,28 +152,28 @@ function frontendModelConfig(): RuntimeModelConfig | null {
   const toolChoice: ToolChoice =
     typeof source.tool_choice === "string" && ["required", "auto", "none"].includes(source.tool_choice)
       ? source.tool_choice as ToolChoice
-      : modelState.primaryToolChoice
+      : startupModelDefaults.primaryToolChoice
   const thinkingEffort: ThinkingEffort =
     typeof source.thinking_effort === "string" && ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(source.thinking_effort)
       ? source.thinking_effort as ThinkingEffort
-      : modelState.thinkingEffort
+      : startupModelDefaults.thinkingEffort
   const compactionStrategy: CompactionStrategy =
     typeof source.compaction_strategy === "string" && ["companion", "context-full", "snapcompact", "remote", "off"].includes(source.compaction_strategy)
       ? source.compaction_strategy as CompactionStrategy
-      : modelState.compactionStrategy
+      : startupModelDefaults.compactionStrategy
 
   const cacheWarming = typeof source.cache_warming === "boolean" ? source.cache_warming : false
   const cacheLifetimeMs = cacheLifetimeMinutes(source) * 60_000
-  const respectCache = respectPromptCache(source, modelState.respectPromptCache)
+  const respectCache = respectPromptCache(source, startupModelDefaults.respectPromptCache)
 
   return {
     ...modelState,
     primaryModel,
     primaryApiKey: apiKey,
     primaryToolChoice: toolChoice,
-    primaryVision: typeof source.vision === "boolean" ? source.vision : modelState.primaryVision,
-    primaryNudgeOnNoTool: typeof source.nudge_on_no_tool === "boolean" ? source.nudge_on_no_tool : modelState.primaryNudgeOnNoTool,
-    enableThinking: typeof source.enable_thinking === "boolean" ? source.enable_thinking : modelState.enableThinking,
+    primaryVision: typeof source.vision === "boolean" ? source.vision : startupModelDefaults.primaryVision,
+    primaryNudgeOnNoTool: typeof source.nudge_on_no_tool === "boolean" ? source.nudge_on_no_tool : startupModelDefaults.primaryNudgeOnNoTool,
+    enableThinking: typeof source.enable_thinking === "boolean" ? source.enable_thinking : startupModelDefaults.enableThinking,
     thinkingEffort,
     idleCompactionMs: idleCacheCompactionMs(cacheLifetimeMs, respectCache, cacheWarming),
     cacheWarming,
@@ -168,8 +186,8 @@ function frontendModelConfig(): RuntimeModelConfig | null {
     compactionStrategy,
     compactTriggerTokens: typeof source.compact_trigger_tokens === "number" && source.compact_trigger_tokens > 0
       ? Math.trunc(source.compact_trigger_tokens)
-      : modelState.compactTriggerTokens,
-    deepArchive: typeof source.deep_archive === "boolean" ? source.deep_archive : modelState.deepArchive,
+      : startupModelDefaults.compactTriggerTokens,
+    deepArchive: typeof source.deep_archive === "boolean" ? source.deep_archive : startupModelDefaults.deepArchive,
     respectPromptCache: respectCache,
     useFallback: false,
   }
@@ -184,49 +202,38 @@ export function modelStateFor(kind: RuntimeKind | undefined): RuntimeModelConfig
   return fixedFrontendModelState ?? modelState
 }
 
-// ── Swap logic ────────────────────────────────────────────────────────────────
+// ── Named model selection ─────────────────────────────────────────────────────
 
-export type SwapDecision =
-  | {
-      action: "swap"
-      preset: string
-      model: Model
-      apiKey: string | undefined
-      toolChoice: ToolChoice
-      fast: boolean
-      enableThinking: boolean
-      thinkingEffort: ThinkingEffort
-      vision: boolean
-      nudgeOnNoTool: boolean
-      idleCompactionMs: number
-      cacheWarming: boolean
-      cacheWarmingDurationMs: number
-      cacheWarmingMode: "completion" | "prewarm"
-      cacheLifetimeMs: number
-      compactionStrategy: CompactionStrategy
-      compactTriggerTokens: number
-      deepArchive: boolean
-      respectPromptCache: boolean
-    }
-  | { action: "rest"; preset: string; reason: string }
+/** Fully resolved primary-model settings for a named preset. */
+export interface ModelSwapSelection {
+  preset: string
+  model: Model
+  apiKey: string | undefined
+  toolChoice: ToolChoice
+  fast: boolean
+  enableThinking: boolean
+  thinkingEffort: ThinkingEffort
+  vision: boolean
+  nudgeOnNoTool: boolean
+  idleCompactionMs: number
+  cacheWarming: boolean
+  cacheWarmingDurationMs: number
+  cacheWarmingMode: "completion" | "prewarm"
+  cacheLifetimeMs: number
+  compactionStrategy: CompactionStrategy
+  compactTriggerTokens: number
+  deepArchive: boolean
+  respectPromptCache: boolean
+}
 
-/**
- * Evaluates whether swapping to a named preset is compatible with the current
- * session context.
- *
- * Rest is triggered when:
- *   - The current session preserves its prompt cache (model swaps invalidate it)
- *   - The new model's context window is smaller than the current context size
- *
- * Otherwise the swap is compatible and the context carries over.
- *
- * @param presetName  Name of the preset defined under [models.<name>]
- * @param currentContextSize  Current prompt token count (state.contextSize)
- */
-export function evaluateModelSwap(presetName: string, currentContextSize: number): SwapDecision {
-  const preset = getModelPreset(presetName)
+const MODEL_SELECTION_PATH = path.join(NANO_HOME, "model-selection.json")
+
+/** Resolve all settings for a named preset, independent of current session state. */
+export function resolveModelSwap(presetName: string): ModelSwapSelection {
+  const name = presetName.trim()
+  const preset = getModelPreset(name)
   if (!preset) {
-    throw new Error(`model preset "${presetName}" not found in [models]`)
+    throw new Error(`model preset "${name}" not found in [models]`)
   }
 
   const provider = typeof preset.provider === "string" ? preset.provider.trim() : ""
@@ -235,15 +242,10 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
   const apiKey = typeof preset.api_key === "string" ? preset.api_key.trim() : undefined
 
   if (!modelId) {
-    throw new Error(`preset "${presetName}" has no model field`)
+    throw new Error(`preset "${name}" has no model field`)
   }
 
-  // Presets can optionally specify context_window for compatibility checking.
-  // Defaults to 200_000 (same as buildModel).
-  const contextWindow =
-    typeof preset.context_window === "number" ? preset.context_window : 200_000
-
-  // Build headers from optional referer/title fields
+  const contextWindow = typeof preset.context_window === "number" ? preset.context_window : 200_000
   const headers: Record<string, string> = {}
   const referer = typeof preset.referer === "string" ? preset.referer.trim() : ""
   const title = typeof preset.title === "string" ? preset.title.trim() : ""
@@ -260,78 +262,41 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
     apiKey,
   )
   if (!model) {
-    throw new Error(`failed to build model from preset "${presetName}"`)
+    throw new Error(`failed to build model from preset "${name}"`)
   }
 
-  // Compatibility check 1: respecting the CURRENT model's prompt cache means a
-  // model swap would invalidate its tokenizer/prefix. Must rest. This reads the
-  // current runtime value (not the target preset) on purpose — it's the session
-  // we're protecting, not the model we're moving to.
-  if (modelState.respectPromptCache) {
-    return {
-      action: "rest",
-      preset: presetName,
-      reason: `respecting the prompt cache requires a rest before swapping to "${presetName}"`,
-    }
-  }
-
-  // Compatibility check 2: if the new model's context window is smaller than
-  // the current context size, the conversation won't fit. Must rest.
-  if (contextWindow < currentContextSize) {
-    return {
-      action: "rest",
-      preset: presetName,
-      reason: `new model context window (${contextWindow}) < current context size (${currentContextSize})`,
-    }
-  }
-
-  // Resolve remaining primary model settings from the preset
   const toolChoice: ToolChoice =
-    typeof preset.tool_choice === "string" && ["required", "auto", "none"].includes(preset.tool_choice as string)
-      ? (preset.tool_choice as ToolChoice)
-      : modelState.primaryToolChoice
+    typeof preset.tool_choice === "string" && ["required", "auto", "none"].includes(preset.tool_choice)
+      ? preset.tool_choice as ToolChoice
+      : startupModelDefaults.primaryToolChoice
 
   const enableThinking =
-    typeof preset.enable_thinking === "boolean" ? preset.enable_thinking : modelState.enableThinking
-
+    typeof preset.enable_thinking === "boolean" ? preset.enable_thinking : startupModelDefaults.enableThinking
   const fast = typeof preset.fast === "boolean" ? preset.fast : false
-
   const thinkingEffort: ThinkingEffort =
     typeof preset.thinking_effort === "string" &&
-    ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(preset.thinking_effort as string)
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max"].includes(preset.thinking_effort)
       ? preset.thinking_effort as ThinkingEffort
-      : modelState.thinkingEffort
-
-  const vision =
-    typeof preset.vision === "boolean" ? preset.vision : modelState.primaryVision
-
+      : startupModelDefaults.thinkingEffort
+  const vision = typeof preset.vision === "boolean" ? preset.vision : startupModelDefaults.primaryVision
   const nudgeOnNoTool =
-    typeof preset.nudge_on_no_tool === "boolean" ? preset.nudge_on_no_tool : modelState.primaryNudgeOnNoTool
-
-  // Per-model context behavior. Each falls back to the current runtime value
-  // when the target preset doesn't specify it, so a swap never silently resets
-  // a knob the new preset was quiet about.
+    typeof preset.nudge_on_no_tool === "boolean" ? preset.nudge_on_no_tool : startupModelDefaults.primaryNudgeOnNoTool
   const compactionStrategy: CompactionStrategy =
     typeof preset.compaction_strategy === "string" &&
-    ["companion", "context-full", "snapcompact", "remote", "off"].includes(preset.compaction_strategy as string)
-      ? (preset.compaction_strategy as CompactionStrategy)
-      : modelState.compactionStrategy
-
+    ["companion", "context-full", "snapcompact", "remote", "off"].includes(preset.compaction_strategy)
+      ? preset.compaction_strategy as CompactionStrategy
+      : startupModelDefaults.compactionStrategy
   const compactTriggerTokens =
     typeof preset.compact_trigger_tokens === "number" && preset.compact_trigger_tokens > 0
       ? preset.compact_trigger_tokens
-      : modelState.compactTriggerTokens
-
+      : startupModelDefaults.compactTriggerTokens
   const deepArchive =
-    typeof preset.deep_archive === "boolean" ? preset.deep_archive : modelState.deepArchive
-
-  const respectCache = respectPromptCache(preset, modelState.respectPromptCache)
+    typeof preset.deep_archive === "boolean" ? preset.deep_archive : startupModelDefaults.deepArchive
+  const respectCache = respectPromptCache(preset, startupModelDefaults.respectPromptCache)
   const cacheWarming = typeof preset.cache_warming === "boolean" ? preset.cache_warming : false
   const cacheLifetimeMs = cacheLifetimeMinutes(preset) * 60_000
-
   return {
-    action: "swap",
-    preset: presetName,
+    preset: name,
     model,
     apiKey: apiKey || undefined,
     toolChoice,
@@ -342,11 +307,13 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
     nudgeOnNoTool,
     idleCompactionMs: idleCacheCompactionMs(cacheLifetimeMs, respectCache, cacheWarming),
     cacheWarming,
-    cacheWarmingDurationMs: typeof preset.cache_warming_minutes === "number" && Number.isFinite(preset.cache_warming_minutes)
-      ? Math.max(0, preset.cache_warming_minutes * 60_000)
-      : 0,
+    cacheWarmingDurationMs:
+      typeof preset.cache_warming_minutes === "number" && Number.isFinite(preset.cache_warming_minutes)
+        ? Math.max(0, preset.cache_warming_minutes * 60_000)
+        : 0,
     cacheWarmingMode: preset.cache_warming_mode === "prewarm" || preset.cache_warming_mode === "completion"
-      ? preset.cache_warming_mode : "completion",
+      ? preset.cache_warming_mode
+      : "completion",
     cacheLifetimeMs,
     compactionStrategy,
     compactTriggerTokens,
@@ -355,31 +322,73 @@ export function evaluateModelSwap(presetName: string, currentContextSize: number
   }
 }
 
-/**
- * Applies a compatible model swap to the runtime model state.
- * Only call this after `evaluateModelSwap` returns `{ action: "swap" }`.
- */
-export function applyModelSwap(decision: Extract<SwapDecision, { action: "swap" }>): void {
-  modelState.primaryModel = decision.model
-  modelState.primaryApiKey = decision.apiKey
-  modelState.primaryToolChoice = decision.toolChoice
-  setCodexFastMode(decision.fast)
-  modelState.primaryVision = decision.vision
-  modelState.primaryNudgeOnNoTool = decision.nudgeOnNoTool
-  modelState.idleCompactionMs = decision.idleCompactionMs
-  modelState.cacheWarming = decision.cacheWarming
-  modelState.cacheWarmingDurationMs = decision.cacheWarmingDurationMs
-  modelState.cacheWarmingMode = decision.cacheWarmingMode
-  modelState.cacheLifetimeMs = decision.cacheLifetimeMs
-  modelState.compactionStrategy = decision.compactionStrategy
-  modelState.compactTriggerTokens = decision.compactTriggerTokens
-  modelState.deepArchive = decision.deepArchive
-  modelState.respectPromptCache = decision.respectPromptCache
-  modelState.enableThinking = decision.enableThinking
-  modelState.thinkingEffort = decision.thinkingEffort
+/** Install the resolved primary model and all associated runtime settings. */
+export function applyModelSwap(selection: ModelSwapSelection): void {
+  modelState.primaryModel = selection.model
+  modelState.primaryApiKey = selection.apiKey
+  modelState.primaryToolChoice = selection.toolChoice
+  modelState.useFallback = false
+  setCodexFastMode(selection.fast)
+  modelState.primaryVision = selection.vision
+  modelState.primaryNudgeOnNoTool = selection.nudgeOnNoTool
+  modelState.idleCompactionMs = selection.idleCompactionMs
+  modelState.cacheWarming = selection.cacheWarming
+  modelState.cacheWarmingDurationMs = selection.cacheWarmingDurationMs
+  modelState.cacheWarmingMode = selection.cacheWarmingMode
+  modelState.cacheLifetimeMs = selection.cacheLifetimeMs
+  modelState.compactionStrategy = selection.compactionStrategy
+  modelState.compactTriggerTokens = selection.compactTriggerTokens
+  modelState.deepArchive = selection.deepArchive
+  modelState.respectPromptCache = selection.respectPromptCache
+  modelState.enableThinking = selection.enableThinking
+  modelState.thinkingEffort = selection.thinkingEffort
 
   console.log(
-    `[model-swap] swapped primary model to ${decision.model.id} ` +
-      `(provider=${decision.model.provider}, base=${decision.model.baseUrl}, vision=${decision.vision})`,
+    `[model-swap] swapped primary model to ${selection.model.id} ` +
+      `(provider=${selection.model.provider}, base=${selection.model.baseUrl}, vision=${selection.vision})`,
   )
 }
+
+/** The selected preset persisted for restoration on the next process start. */
+export let persistedModelPreset: string | undefined
+
+/** Persist only the selected preset name; credentials and runtime config stay in their source files. */
+export async function persistModelSwap(selection: ModelSwapSelection): Promise<void> {
+  // Validate the durable name against the current config before committing it.
+  resolveModelSwap(selection.preset)
+  await atomicWriteFile(MODEL_SELECTION_PATH, `${JSON.stringify({ preset: selection.preset })}\n`, 0o600)
+  persistedModelPreset = selection.preset
+}
+
+async function restorePersistedModelSwap(): Promise<void> {
+  let contents: string
+  try {
+    contents = await fs.readFile(MODEL_SELECTION_PATH, "utf8")
+  } catch (error) {
+    if (isMissingFileError(error)) return
+    throw new Error(`failed to read persisted model selection at ${MODEL_SELECTION_PATH}: ${String(error)}`, { cause: error })
+  }
+
+  let value: unknown
+  try {
+    value = JSON.parse(contents)
+  } catch (error) {
+    throw new Error(`malformed persisted model selection at ${MODEL_SELECTION_PATH}: invalid JSON`, { cause: error })
+  }
+  if (!value || typeof value !== "object" || !("preset" in value) || typeof value.preset !== "string" || !value.preset.trim() || Object.keys(value).length !== 1) {
+    throw new Error(`malformed persisted model selection at ${MODEL_SELECTION_PATH}: expected only a non-empty preset name`)
+  }
+
+  const preset = value.preset.trim()
+  let selection: ModelSwapSelection
+  try {
+    selection = resolveModelSwap(preset)
+  } catch (error) {
+    throw new Error(`cannot restore persisted model preset "${preset}": ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+  }
+  persistedModelPreset = preset
+  applyModelSwap(selection)
+}
+
+// Ensure every first Context observes restored settings, including importers of this module.
+await restorePersistedModelSwap()

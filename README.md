@@ -43,7 +43,37 @@ Codex models, or `/fast enabled:true` and `/fast enabled:false` to set it
 explicitly. `/model info` shows the current setting. Changes apply to subsequent
 Codex requests (including subagents and summaries); off uses the default service
 tier. The setting is local to the agent runtime and resets on restart to the
-active model or preset's `fast` value (`false` by default).
+startup configuration's `fast` value (`false` by default).
+
+`/model swap preset:<name>` changes presets through a fresh-session handoff. Discord
+acknowledges the request first, then reports the completed result or an error. The
+outgoing session keeps its current model settings while it receives an explicit
+journal-now instruction and request to call `end_session`; normal memory and session
+tools perform that work. A graceful result requires a successful `edit_file` write
+to a file under `memory://journal/` before `end_session` completes.
+Events arriving during the handoff are durably held in order, not injected into the outgoing context, and replayed into the fresh bootstrap before the handoff marker is cleared. The selected
+preset name is persisted before that bootstrap and re-resolved against current
+configuration after restart; per-preset settings come from configured values, not
+mutated settings inherited from a previous runtime swap. If the saved preset no
+longer resolves, startup fails rather than restoring the old selection. Credentials
+and the config file are not rewritten.
+
+For an active turn, the runner waits up to 15 seconds for a safe boundary. If a
+mutating tool or compaction is still active at that boundary, the swap fails closed
+and keeps the old selection. Background jobs or tools must actually unwind; cancelling
+a synthetic job does not make a still-running mutation safe to overlap. Active
+inference can be cancelled, with up to 5 more seconds for it to settle. Journaling
+and `end_session` are limited to eight turns or 90 seconds. If generation fails,
+the end is not reached, a journal write is not confirmed, or a wait blocks, the
+runner reports a non-graceful result and archives raw message history in the existing
+rest-context provenance snapshot before clearing session checkpoints; the fresh
+bootstrap receives that archived state. Swap end skips shutdown compaction and any
+secondary summary request. The overall transition is bounded to about 110 seconds
+plus persistence, including any inherited frontend lane.
+If the frontend inherits the main preset, both lanes are held and must reach the
+safe close/archive barrier before the global selection is installed; an explicit
+frontend preset is left unchanged.
+
 
 `/interrupt` stops the active model generation or foreground blocking job while
 keeping the session. `/discard` stops all session work, archives the raw snapshot

@@ -101,6 +101,57 @@ Its Discord reads/searches also exclude the owner's DM channel.
 
 ---
 
+## Runtime model swaps
+
+The Discord owner can use `/model swap preset:<name>` to perform an immediate
+fresh-session transition. The `POST /awp/swap-model` endpoint accepts
+`{ "preset": "<name>" }` and runs the same lifecycle; it waits for completion
+and returns `{ ok, action: "swapped", preset, model, provider, graceful }`, with
+`fallbackReason` when the handoff had to archive rather than journal/end. A successful
+response means the outgoing session closed, the selection was persisted/applied, and
+a fresh bootstrap was scheduled; it does not wait for the new provider's first request.
+The reported model/provider describe the runtime selection, not verified remote
+backend identity. Missing/invalid presets return 400, an overlapping swap returns
+409, and a lifecycle failure returns 503 with an `error` message.
+
+The selected preset is validated before lifecycle changes. Outgoing lanes retain
+their current model settings through handoff. The runner issues an
+explicit journal-now instruction, then asks it to call `end_session`; a graceful
+result requires a successful `edit_file` write to a file under `memory://journal/`
+before that tool completes.
+External events arriving during the transition are held in order outside the
+outgoing context, then replayed as work for the new bootstrap.
+That queue and handoff marker are persisted before the swap and cleared only after
+replay succeeds, preserving pending work across restart. The selected preset is
+persisted before new-context bootstrap as a preset name only; restart resolves that
+name against current merged config and uses configured per-preset values, not mutable
+settings inherited from an earlier runtime swap. If that preset no longer resolves,
+startup fails explicitly rather than restoring the prior model selection. It does not
+rewrite config or credentials.
+
+The runner waits up to 15 seconds for an active turn to reach a safe boundary. If a
+mutating tool or compaction remains active, the swap fails closed and leaves the old
+selection in place. Background jobs or tools must actually unwind; cancelling a
+synthetic job does not make a still-running mutation safe to overlap. Active inference
+can be cancelled, with up to 5 seconds to settle. The graceful journal/end phase
+allows at most eight turns or 90 seconds. If generation fails, the end is not reached,
+a journal write is unconfirmed, or a wait blocks, the runner reports a non-graceful
+result, records raw messages in the existing rest-context
+provenance forest, saves its rest snapshot, clears session checkpoints, and supplies
+the archived state to the fresh bootstrap. Swap end skips shutdown compaction and its
+secondary summary request. The overall handoff is bounded to about 110 seconds
+plus persistence, including any inherited frontend lane.
+
+When the frontend inherits the main preset (omit `frontend.preset`), its lane is
+held with the main lane and both must reach the safe close/archive barrier before
+the global selection is installed. This remains within the overall ~110-second
+handoff bound, plus persistence. An explicit frontend preset is unaffected.
+`/model info`, `/model presets`, and `/fast` do not trigger session swaps.
+
+
+
+---
+
 ## `model` — primary
 
 Used for normal agent turns.
@@ -265,7 +316,7 @@ Token / compaction thresholds.
 | `compact_recent_messages` | `80` | Recent messages retained verbatim during compaction. |
 | `compact_chunk_messages` | `32` | Messages summarized per compaction chunk. |
 | `compact_summary_max_chars` | `16000` | Hard cap on generated summary length. |
-| `preserve_prompt_cache` | `true` | Keep the conversation prefix stable for prompt caching. Disables LLM compaction and requires a rest before switching models. |
+| `preserve_prompt_cache` | `true` | Keep the conversation prefix stable for prompt caching. Disables LLM compaction; model swaps always use a fresh-session handoff. |
 | `tool_result_compaction_min_age_turns` | `5` | Minimum later assistant turns before a tool result is eligible for proactive compaction. |
 | `tool_result_compaction_min_chars` | `2000` | Minimum tool-result length eligible for proactive compaction. |
 | `tool_result_compaction_min_context_percent` | `50` | Minimum percentage of the active generation model's context window that must be used before proactive tool-result compaction runs. |

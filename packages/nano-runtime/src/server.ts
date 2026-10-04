@@ -4,9 +4,9 @@ import { config } from "./config"
 import { clientTools } from "./client"
 import { listWorkerEvents, publishWorkerEvent, subscribeWorkerEvents } from "./awp/outbox"
 import type { ControlCommand } from "./awp/types"
-import { wake, isRunning, isWaitingForEvent, enqueueEvent, getRunnerStatus, requestRest } from "./runner/index"
+import { wake, isRunning, isWaitingForEvent, enqueueEvent, getRunnerStatus, requestModelSwap } from "./runner/index"
 import { enqueueFrontendEvent, isFrontendRunning, isFrontendWaitingForEvent } from "./runner/frontend"
-import { modelState, evaluateModelSwap, applyModelSwap } from "./runner/model-state"
+import { modelState } from "./runner/model-state"
 import { buildDiscordBatchDigest, scanDiscordChannels } from "./discord/state"
 import { handleDiscordIngress } from "./discord/pipeline"
 import { fromBsky } from "./triggers/bsky"
@@ -396,10 +396,9 @@ export function createServer(options: {
   })
 
   // ── Model swap ──────────────────────────────────────────────────────────────
-  // Swaps the primary model to a named preset defined under [models.<name>].
-  // If the current session preserves its prompt cache or the new model's context window is
-  // smaller than the current context size, triggers a programmatic rest so the
-  // next session starts fresh with the new model. Otherwise swaps in place.
+  // The endpoint below always uses the runner's bounded fresh-session handoff:
+  // validate, journal/end or archive raw provenance, persist the preset, then
+  // schedule a new bootstrap. It never mutates an active Context in place.
 
   app.get("/awp/model", async () => ({
     primary: modelState.primaryModel
@@ -421,39 +420,25 @@ export function createServer(options: {
       return reply.code(400).send({ error: "preset is required" })
     }
 
-    const currentContextSize = getRunnerStatus().contextSize
-
-    let decision
     try {
-      decision = evaluateModelSwap(presetName, currentContextSize)
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return reply.code(400).send({ error: msg })
-    }
-
-    if (decision.action === "swap") {
-      applyModelSwap(decision)
+      const result = await requestModelSwap(presetName)
       return reply.send({
         ok: true,
         action: "swapped",
-        preset: decision.preset,
-        model: decision.model.id,
-        contextSize: currentContextSize,
+        preset: result.preset,
+        model: result.model,
+        provider: result.provider,
+        graceful: result.graceful,
+        ...(result.fallbackReason ? { fallbackReason: result.fallbackReason } : {}),
       })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (/model swap already in progress|overlapping model swap/i.test(message)) {
+        return reply.code(409).send({ error: message })
+      }
+      const invalidPreset = /model preset .* not found|preset .* has no model field|failed to build model from preset|preset is required/i.test(message)
+      return reply.code(invalidPreset ? 400 : 503).send({ error: message })
     }
-
-    // action === "rest" — trigger programmatic rest
-    const restReason = `model swap to "${presetName}" requires rest: ${decision.reason}`
-    const restAccepted = requestRest(restReason)
-
-    return reply.send({
-      ok: true,
-      action: "rest",
-      preset: presetName,
-      reason: decision.reason,
-      restRequested: restAccepted,
-      contextSize: currentContextSize,
-    })
   })
 
   app.post("/trigger/cron", async (_req, reply) => {

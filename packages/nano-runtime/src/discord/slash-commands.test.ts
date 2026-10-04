@@ -32,6 +32,19 @@ test("/interrupt and /discard are registered as top-level commands", async () =>
   assert.ok(commands.some((entry) => entry.name === "interrupt"))
   assert.ok(commands.some((entry) => entry.name === "discard"))
 })
+test("/model swap registers its required preset option", async () => {
+  type Option = { name: string; required?: boolean; options?: Option[] }
+  type Command = { name: string; options?: Option[] }
+  let commands: Command[] = []
+  await registerSlashCommands({
+    application: { commands: { set: async (value: Command[]) => { commands = value } } },
+  } as unknown as Client)
+  const model = commands.find((entry) => entry.name === "model")
+  const swap = model?.options?.find((option) => option.name === "swap")
+  assert.ok(swap)
+  assert.equal(swap.options?.[0]?.name, "preset")
+  assert.equal(swap.options?.[0]?.required, true)
+})
 
 test("/compact registers force and snapcompact boolean options", async () => {
   let commands: any[] = []

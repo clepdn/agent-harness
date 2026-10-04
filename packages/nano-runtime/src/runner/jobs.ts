@@ -48,6 +48,12 @@ type DeliverFn = (event: UserMessage) => void
 let deliver: DeliverFn | null = null
 const jobs = new Map<string, Job>()
 const controllers = new Map<string, AbortController>()
+const executingJobs = new Set<string>()
+
+/** Cancellation status is not proof that a task stopped mutating state. */
+export function hasExecutingJobs(): boolean {
+  return executingJobs.size > 0
+}
 const completions = new Map<string, Promise<Job>>()
 const completionResolvers = new Map<string, (job: Job) => void>()
 const notificationEnabled = new Set<string>()
@@ -109,6 +115,7 @@ export function startJob(
   }
   jobs.set(id, job)
   controllers.set(id, controller)
+  executingJobs.add(id)
   completions.set(id, new Promise<Job>((resolve) => completionResolvers.set(id, resolve)))
   if (options.notifyOnCompletion !== false) notificationEnabled.add(id)
 
@@ -131,6 +138,7 @@ export function startJob(
       const message = err instanceof Error ? err.message : String(err)
       settleJob(job, "failed", message)
     })
+    .finally(() => executingJobs.delete(id))
 
   return id
 }

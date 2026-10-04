@@ -45,7 +45,7 @@ function resolveSubagentModel(subagent: SubagentConfig): { model: Model; apiKey:
 
   if (subagent.model) {
     // Treat subagent.model as a preset key and resolve it the same way
-    // evaluateModelSwap does — extract provider/model/base_url/api_key from
+    // resolveModelSwap does — extract provider/model/base_url/api_key from
     // the [models.<name>] table rather than passing it as a raw model ID.
     const preset = getModelPreset(subagent.model)
     if (preset) {

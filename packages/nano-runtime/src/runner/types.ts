@@ -44,6 +44,8 @@ export interface LoopState {
   operationSignal?: AbortSignal
   /** Controller retained by the root runner so slash commands can abort it. */
   activeTurnController?: AbortController
+  /** Compaction is also a lifecycle mutation, even outside an assistant turn. */
+  compactionInFlight?: boolean
   /** Set by /interrupt until the current generation/tool chain unwinds. */
   interruptRequested?: boolean
   /** Set by /discard until the active session has been archived and removed. */
@@ -52,6 +54,22 @@ export interface LoopState {
   restRequested: boolean
   /** Reason for the programmatic rest (e.g. model swap). */
   restReason: string
+  /** Active operator-requested model handoff, completed only at a loop boundary. */
+  modelSwap?: {
+    prompt: string
+    started?: boolean
+    onStarted?: () => void
+    onCheckpoint?: () => void
+    preset: string
+    turns: number
+    journaled?: boolean
+    turnLimit: number
+    deadlineAt: number
+    promptId: string
+    completed?: boolean
+    fallbackReason?: string
+    fallbackRequested?: boolean
+  }
   /** Pending operator-requested compaction, always run regardless of token count. */
   compactionRequest?: ManualCompactionRequest
   /** Stable outbound Discord response scope across tool-producing iterations. */
@@ -92,11 +110,13 @@ export interface RunnerStateInternal extends RunnerState {
   turnInFlight: boolean
   activeTurnController?: AbortController
   operationSignal?: AbortSignal
+  compactionInFlight?: boolean
   interruptRequested?: boolean
   discardRequested?: boolean
   deferredEvents: Array<{ event: UserMessage; priority: boolean }>
   restRequested: boolean
   restReason: string
+  modelSwap?: LoopState["modelSwap"]
   compactionRequest?: ManualCompactionRequest
   discordTypingTurnId?: string
   discordTypingChannelId?: string

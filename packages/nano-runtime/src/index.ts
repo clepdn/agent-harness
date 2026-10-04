@@ -8,8 +8,7 @@ import { initMetricsDb } from "./metrics"
 import { initSnapcompactRenderer } from "./runner/compaction-companion"
 import { modelState, modelStateFor } from "./runner/model-state"
 import { REMOTE_COMPACTION_ENDPOINT } from "./runner/config"
-import { primaryModel, fallbackModel, summaryModel } from "./runner/config"
-import { shutdown, activate, startBoredomTimer } from "./runner/index"
+import { shutdown, activate, startBoredomTimer, recoverModelSwapHandoff } from "./runner/index"
 import { activateFrontend, shutdownFrontend, startFrontendBoredomTimer } from "./runner/frontend"
 import { configureAgentChannelDelivery } from "./runner/agent-channel"
 import { initJobManager } from "./runner/jobs"
@@ -60,9 +59,9 @@ async function main() {
   await clientTools.start()
   const frontendRuntime = config.frontend.enable ? modelStateFor("frontend") : null
   const metadataTargets: BridgeModelMetadataTarget[] = [
-    ...(primaryModel ? [{ model: primaryModel, apiKey: config.model.api_key }] : []),
-    { model: fallbackModel, apiKey: config.fallback.api_key },
-    ...(summaryModel ? [{ model: summaryModel, apiKey: config.summary.api_key }] : []),
+    ...(modelState.primaryModel ? [{ model: modelState.primaryModel, apiKey: modelState.primaryApiKey }] : []),
+    { model: modelState.fallbackModel, apiKey: modelState.fallbackApiKey },
+    ...(modelState.summaryModel ? [{ model: modelState.summaryModel, apiKey: modelState.summaryApiKey }] : []),
     ...(frontendRuntime?.primaryModel ? [{ model: frontendRuntime.primaryModel, apiKey: frontendRuntime.primaryApiKey }] : []),
   ]
   await initializeBridgeModelMetadata(metadataTargets)
@@ -115,6 +114,7 @@ async function main() {
     console.warn("[discord gateway] startup failed:", err)
   }
   setDiscordToolsAvailable(Boolean(discordGateway))
+  await recoverModelSwapHandoff()
 
   if (frontendSoulConflict) {
     activateFrontend({

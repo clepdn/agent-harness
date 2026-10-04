@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto"
+import { createHash, randomUUID } from "node:crypto"
 import { buildBootstrap } from "../bootstrap"
 import { config } from "../config"
 import { clientTools } from "../client"
@@ -11,7 +11,7 @@ import { clearDiscordTypingScope } from "../discord/typing-lease"
 import { runLoop } from "./loop"
 import { setRunnerPresence } from "./presence"
 import { createNiriToolCatalog, reconcileImageToolDefinition, reconcileMemoryFileToolDefinitions } from "./tool-catalog"
-import { archiveContextMessages } from "./context-store"
+import { archiveContextMessages, recordRestContextSnapshot } from "./context-store"
 import type { ManualCompactionRequest, RunnerStateInternal } from "./types"
 import { archiveDiscardedSession, BOREDOM_WAKE_MS, clearSession, loadRestSnapshot, loadSession, quarantineSession, saveRestSnapshot, saveSession } from "./util"
 import type { UserMessage, Message } from "../types"
@@ -20,12 +20,281 @@ import { fromBoredom } from "../triggers/boredom"
 import { createBoredomTimer } from "./boredom-timer"
 import { discordEventImageReferences } from "../discord/context-avatars"
 import { registerDiscordTargets, rewriteDiscordTargetLabels } from "../discord/targets"
-import { cancelRunningJobs } from "./jobs"
+import { cancelRunningJobs, hasExecutingJobs } from "./jobs"
 import { createRuntimeContext } from "./context"
 import { getCompletionTools } from "./tools"
-import { modelStateFor } from "./model-state"
+import { applyModelSwap, persistModelSwap, resolveModelSwap, modelStateFor, type ModelSwapSelection } from "./model-state"
+import { clearModelSwapHandoff, loadModelSwapHandoff, saveModelSwapHandoff } from "./session"
+import { beginFrontendModelSwap, resumeFrontendAfterModelSwap, frontendModelSwapSnapshot, setFrontendModelSwapCheckpoint, checkpointFrontendModelSwapReplay } from "./frontend"
 
 let shutdownResolvers: Array<() => void> = []
+export type ModelSwapResult = {
+  preset: string
+  model: string
+  provider: string
+  graceful: boolean
+  fallbackReason?: string
+}
+
+export type ModelSwapTestOptions = Partial<SwapOptions>
+export interface SwapOptions {
+  boundaryWaitMs: number
+  toolSettleMs: number
+  gracefulDeadlineMs: number
+  gracefulTurnLimit: number
+}
+const MODEL_SWAP_DEFAULTS: SwapOptions = {
+  boundaryWaitMs: 15_000,
+  toolSettleMs: 5_000,
+  gracefulDeadlineMs: 90_000,
+  gracefulTurnLimit: 8,
+}
+
+type PendingModelSwap = {
+  selection: ModelSwapSelection
+  id: string
+  eventIds: Map<UserMessage, string>
+  deliveredIds: string[]
+  deliveredEvents: UserMessage[]
+  options: SwapOptions
+  phase: "closing" | "selected"
+  messages: Message[]
+  close: (result: { graceful: boolean; fallbackReason?: string }) => void
+  fail: (error: Error) => void
+  timers: Set<NodeJS.Timeout>
+  checkpoint: Promise<void>
+  checkpointError?: unknown
+  bootstrapReady?: () => void
+  releaseBootstrap?: () => void
+  bootstrapFailed?: (error: unknown) => void
+  wakeEvent?: UserMessage
+}
+let pendingModelSwap: PendingModelSwap | undefined
+let heldSwapEvents: UserMessage[] = []
+let recoveryChecked = false
+
+function swapPrompt(preset: string): UserMessage {
+  return {
+    source: "system", triggeredAt: new Date().toISOString(), raw: null,
+    content: `[model swap handoff] The operator is switching to preset "${preset}". Journal durable lessons and pending work now using memory_fs and edit_file. Then call end_session with a concise handoff note. Do not continue ordinary work or call unrelated mutating tools.`,
+  }
+}
+
+function checkpointModelSwap(): Promise<void> {
+  const swap = pendingModelSwap
+  if (!swap) return Promise.resolve()
+  const frontend = frontendModelSwapSnapshot()
+  const events = [...swap.deliveredEvents, ...heldSwapEvents]
+  const snapshot = {
+    version: 1 as const, id: swap.id, preset: swap.selection.preset, phase: swap.phase,
+    eventIds: events.map(event => swap.eventIds.get(event)!),
+    messages: swap.phase === "closing" && state.running ? state.context.snapshot() : swap.messages,
+    events, note: "operator-requested model swap",
+    ...(frontend ? { frontendMessages: frontend.messages, frontendEvents: frontend.events, frontendId: frontend.id, frontendEventIds: frontend.eventIds } : {}),
+  }
+  swap.checkpoint = swap.checkpoint.then(() => saveModelSwapHandoff(snapshot))
+  swap.checkpoint.catch(error => { swap.checkpointError = error })
+  return swap.checkpoint
+}
+
+function holdSwapEvent(event: UserMessage, options: { priority?: boolean } = {}): boolean {
+  if (!pendingModelSwap) return false
+  pendingModelSwap.eventIds.set(event, randomUUID())
+  if (options.priority) heldSwapEvents.unshift(event)
+  else heldSwapEvents.push(event)
+  void checkpointModelSwap()
+  return true
+}
+
+function armSwapTimer(swap: PendingModelSwap, delay: number, action: () => void): void {
+  const timer = setTimeout(() => {
+    swap.timers.delete(timer)
+    if (pendingModelSwap === swap) action()
+  }, delay)
+  swap.timers.add(timer)
+}
+
+function failBlockedSwap(swap: PendingModelSwap, reason: string): void {
+  swap.fail(new Error(`model swap failed safely: ${reason}; selected settings were not applied`))
+}
+
+function startGracefulDeadline(swap: PendingModelSwap): void {
+  for (const timer of swap.timers) clearTimeout(timer)
+  swap.timers.clear()
+  state.modelSwap!.deadlineAt = Date.now() + swap.options.gracefulDeadlineMs
+  armSwapTimer(swap, swap.options.gracefulDeadlineMs, () => {
+    if (state.toolInFlight || state.compactionInFlight) {
+      failBlockedSwap(swap, "journal/end deadline reached while a tool or compaction is still executing")
+      return
+    }
+    state.modelSwap!.fallbackRequested = true
+    state.modelSwap!.fallbackReason = "journal/end handoff exceeded its deadline"
+    state.restRequested = true
+    state.restReason = state.modelSwap!.fallbackReason
+    state.activeTurnController?.abort(new Error(state.restReason))
+    interruptEventWaiters()
+    armSwapTimer(swap, swap.options.toolSettleMs, () => {
+      if (state.running) failBlockedSwap(swap, "cancelled generation did not settle")
+    })
+  })
+}
+
+/** Close outgoing sessions before installing a preset and scheduling a fresh session. */
+export async function requestModelSwap(presetName: string): Promise<ModelSwapResult> {
+  return requestModelSwapInternal(presetName)
+}
+
+async function requestModelSwapInternal(presetName: string, overrides?: ModelSwapTestOptions): Promise<ModelSwapResult> {
+  if (pendingModelSwap) throw new Error("model swap already in progress")
+  if (hasExecutingJobs()) throw new Error("model swap failed safely: background tasks are still executing; wait for them to finish")
+  const selection = resolveModelSwap(presetName)
+  const options = { ...MODEL_SWAP_DEFAULTS, ...overrides }
+  let close!: PendingModelSwap["close"]
+  let fail!: PendingModelSwap["fail"]
+  const closed = new Promise<{ graceful: boolean; fallbackReason?: string }>((resolve, reject) => { close = resolve; fail = reject })
+  const swap: PendingModelSwap = {
+    selection, id: randomUUID(), eventIds: new Map(), deliveredIds: [], deliveredEvents: [], options, phase: "closing", messages: state.context.snapshot(), close, fail,
+    timers: new Set(), checkpoint: Promise.resolve(),
+  }
+  pendingModelSwap = swap
+  heldSwapEvents = state.pendingInputs.splice(0)
+  heldSwapEvents.push(...state.deferredEvents.splice(0).map(item => item.event))
+  for (const event of heldSwapEvents) swap.eventIds.set(event, randomUUID())
+  boredomTimer.pause()
+  state.modelSwap = {
+    preset: selection.preset, prompt: swapPrompt(selection.preset).content,
+    turns: 0, turnLimit: options.gracefulTurnLimit, deadlineAt: Number.POSITIVE_INFINITY,
+    promptId: randomUUID(), onStarted: () => startGracefulDeadline(swap),
+    onCheckpoint: () => { void checkpointModelSwap() },
+  }
+  const frontendClosing = config.frontend.enable && config.frontend.preset === undefined
+    ? beginFrontendModelSwap(selection.preset, options)
+    : Promise.resolve({ graceful: true } as { graceful: boolean; fallbackReason?: string })
+  frontendClosing.catch(error => fail(error instanceof Error ? error : new Error(String(error))))
+  setFrontendModelSwapCheckpoint(() => { void checkpointModelSwap() })
+  try {
+    await checkpointModelSwap()
+    if (state.running) interruptEventWaiters()
+    else {
+      swap.wakeEvent = swapPrompt(selection.preset)
+      void wake(swap.wakeEvent).catch(error => fail(error instanceof Error ? error : new Error(String(error))))
+    }
+    armSwapTimer(swap, options.boundaryWaitMs, () => {
+      if (state.modelSwap?.started || !state.running) return
+      if (state.toolInFlight || state.compactionInFlight || !state.activeTurnController) {
+        failBlockedSwap(swap, "outgoing tool or compaction did not reach a safe boundary")
+        return
+      }
+      state.activeTurnController.abort(new Error("model swap boundary deadline"))
+      armSwapTimer(swap, options.toolSettleMs, () => {
+        if (!state.modelSwap?.started && state.running) failBlockedSwap(swap, "outgoing generation did not settle")
+      })
+    })
+    const [mainResult, frontendResult] = await Promise.all([closed, frontendClosing])
+    if (swap.checkpointError) throw swap.checkpointError
+    await checkpointModelSwap()
+    if (hasExecutingJobs()) throw new Error("background task has not stopped; selected settings were not applied")
+    await persistModelSwap(selection)
+    applyModelSwap(selection)
+    swap.phase = "selected"
+    await checkpointModelSwap()
+    const ready = new Promise<void>((resolve, reject) => { swap.bootstrapReady = resolve; swap.bootstrapFailed = reject })
+    swap.wakeEvent = { source: "system", raw: null, triggeredAt: new Date().toISOString(), content: `[model swap complete] Fresh session using preset "${selection.preset}". Resume preserved pending work from the handoff.` }
+    void wake(swap.wakeEvent).catch(error => swap.bootstrapFailed?.(error))
+    await ready
+    await resumeFrontendAfterModelSwap()
+    await swap.checkpoint
+    while (true) {
+      while (heldSwapEvents.length) {
+        for (const event of heldSwapEvents.splice(0)) {
+          injectIncomingEvent(activeSwapConversation!, event)
+          swap.deliveredIds.push(swap.eventIds.get(event)!)
+          swap.deliveredEvents.push(event)
+        }
+        await saveRuntimeSnapshot()
+      }
+      await checkpointFrontendModelSwapReplay()
+      await swap.checkpoint
+      await clearModelSwapHandoff()
+      const frontend = frontendModelSwapSnapshot()
+      if (!heldSwapEvents.length && (!frontend || frontend.eventIds.every(id => frontend.deliveredEventIds.includes(id)))) break
+      await checkpointModelSwap()
+    }
+    pendingModelSwap = undefined
+    recoveryChecked = true
+    setFrontendModelSwapCheckpoint(undefined)
+    swap.releaseBootstrap?.()
+    const fallbackReason = [mainResult.fallbackReason, frontendResult.fallbackReason].filter(Boolean).join("; ")
+    return { preset: selection.preset, model: selection.model.id, provider: selection.model.provider,
+      graceful: mainResult.graceful && frontendResult.graceful, ...(fallbackReason ? { fallbackReason } : {}) }
+  } catch (error) {
+    const selected = swap.phase === "selected"
+    state.modelSwap = undefined
+    pendingModelSwap = undefined
+    setFrontendModelSwapCheckpoint(undefined)
+    state.pendingInputs.push(...heldSwapEvents.splice(0))
+    swap.releaseBootstrap?.()
+    await swap.checkpoint.catch(() => {})
+    if (!selected && !swap.checkpointError) await clearModelSwapHandoff().catch(() => {})
+    await resumeFrontendAfterModelSwap().catch(() => {})
+    throw new Error(`model swap failed safely: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+  } finally {
+    for (const timer of swap.timers) clearTimeout(timer)
+  }
+}
+
+let activeSwapConversation: number | undefined
+/** Recover a crashed handoff before any external event can restore its old context. */
+export async function recoverModelSwapHandoff(): Promise<void> {
+  if (recoveryChecked) return
+  const handoff = await loadModelSwapHandoff()
+  if (!handoff) {
+    recoveryChecked = true
+    return
+  }
+  const selection = resolveModelSwap(handoff.preset)
+  const archiveLane = async (messages: Message[], kind: "main" | "frontend") => {
+    const saved = await loadSession(kind)
+    const retained = [...messages, ...(saved?.messages ?? [])]
+    const archived = recordRestContextSnapshot(retained, "model swap recovered after worker restart", kind)
+    await saveRestSnapshot(retained, "model swap recovered after worker restart", kind, archived.forest)
+    await clearSession(kind)
+  }
+  if (handoff.phase !== "selected") {
+    await archiveLane(handoff.messages, "main")
+    if (handoff.frontendMessages) await archiveLane(handoff.frontendMessages, "frontend")
+    await persistModelSwap(selection)
+    applyModelSwap(selection)
+  }
+  const saveQueued = async (kind: "main" | "frontend", events: UserMessage[], eventIds?: string[], handoffId = handoff.id) => {
+    const existing = await loadSession(kind)
+    const messages = existing?.messages ?? []
+    const replayed = new Set(existing?.modelSwapHandoffId === handoffId ? existing?.modelSwapEventIds ?? [] : [])
+    for (let index = 0; index < events.length; index++) {
+      const event = events[index]!
+      const id = eventIds?.[index]
+      if (id && replayed.has(id)) continue
+      messages.push({ role: "user", content: formatIncomingEvent(event), timestamp: Date.now(), imageReferences: discordEventImageReferences(event) })
+      if (id) replayed.add(id)
+    }
+    if (!existing) {
+      const rest = await loadRestSnapshot(kind)
+      const event: UserMessage = { source: "system", raw: null, triggeredAt: new Date().toISOString(), content: "[model swap recovered] Start fresh and resume the preserved pending work." }
+      const catalog = kind === "main" ? buildCurrentCatalog() : createNiriToolCatalog({ frontend: true, memory: true, discord: areDiscordToolsAvailable(), agentChannel: true, vision: modelStateFor("frontend").primaryVision })
+      const bootstrap = await buildBootstrap(event, rest ? { restedAt: rest.restedAt, note: rest.note, forest: rest.summary } : null, { frontend: kind === "frontend", vision: modelStateFor(kind).primaryVision, agentChannel: config.frontend.enable })
+      const context = createRuntimeContext(kind, [...bootstrap, ...messages], catalog)
+      await saveSession({ version: 1, messages: context.snapshot(), contextId: context.id, contextModelId: context.model.id, contextConfigurationFingerprint: context.configurationFingerprint, toolCatalog: catalog, toolCatalogEpoch: 1, toolCatalogFingerprint: catalogFingerprint(catalog), modelSwapHandoffId: handoffId, modelSwapEventIds: [...replayed] }, kind)
+    } else {
+      await saveSession({ ...existing, messages, modelSwapHandoffId: handoffId, modelSwapEventIds: [...replayed] }, kind)
+    }
+  }
+  await saveQueued("main", handoff.events, handoff.eventIds)
+  if (handoff.frontendMessages || handoff.frontendEvents?.length) await saveQueued("frontend", handoff.frontendEvents ?? [], handoff.frontendEventIds, handoff.frontendId)
+  await clearModelSwapHandoff()
+  recoveryChecked = true
+  console.warn("[model-swap] recovered interrupted handoff using archived history; model-driven journaling was not verified")
+}
+export const __test = { requestModelSwap: requestModelSwapInternal }
 const PROCESS_STARTED_AT = new Date().toISOString()
 let eventResolvers: Array<(event: UserMessage | null) => void> = []
 function catalogFingerprint(catalog: ToolDefinition[]): string {
@@ -217,39 +486,23 @@ type EnqueueOptions = {
 
 /** Push an event into the live session, resolving the loop's wait if it's idle. */
 function deliverEvent(event: UserMessage, options: EnqueueOptions = {}): boolean {
+  if (holdSwapEvent(event, options)) return true
   if (state.shutdownRequested) {
     console.log("[runner] dropping event during shutdown from", event.source)
     return false
   }
-
-  if (options.onlyIfWaiting && eventResolvers.length === 0) {
-    return false
-  }
-
+  if (options.onlyIfWaiting && eventResolvers.length === 0) return false
   console.log("[runner] queued event from", event.source)
   if (state.toolInFlight) {
-    // Defer external steering until the currently running tool settles.
     const deferred = { event, priority: Boolean(options.priority) }
-    if (options.priority) {
-      state.deferredEvents.unshift(deferred)
-    } else {
-      state.deferredEvents.push(deferred)
-    }
+    if (options.priority) state.deferredEvents.unshift(deferred)
+    else state.deferredEvents.push(deferred)
     return true
   }
-
-  // Never push directly into conversation as the loop adds the user message at
-  // waitForEvent() time, which is only reached when no tool calls are in flight.
   const resolver = eventResolvers.shift()
-  if (resolver) {
-    resolver(event)
-  } else {
-    if (options.priority) {
-      state.pendingInputs.unshift(event)
-    } else {
-      state.pendingInputs.push(event)
-    }
-  }
+  if (resolver) resolver(event)
+  else if (options.priority) state.pendingInputs.unshift(event)
+  else state.pendingInputs.push(event)
   return true
 }
 
@@ -270,6 +523,7 @@ function flushDeferredEvents(): void {
  * @returns `true` when the event was accepted for delivery.
  */
 export function enqueueEvent(event: UserMessage, options: EnqueueOptions = {}): boolean {
+  if (holdSwapEvent(event, options)) return true
   if (state.running) {
     const accepted = deliverEvent(event, options)
     if (accepted) boredomTimer.active()
@@ -292,6 +546,7 @@ export function enqueueEvent(event: UserMessage, options: EnqueueOptions = {}): 
  * use; boredom activations go through it too rather than calling wake() raw.
  */
 export function activate(event: UserMessage): void {
+  if (holdSwapEvent(event)) return
   if (isRunning()) enqueueEvent(event)
   else void wake(event)
 }
@@ -361,26 +616,31 @@ async function saveRuntimeSnapshot(): Promise<void> {
     toolCatalogEpoch: state.toolCatalogEpoch,
     toolCatalogFingerprint: state.toolCatalogFingerprint,
     ...(state.discordTargets?.length ? { discordTargets: state.discordTargets } : {}),
+    ...(pendingModelSwap?.phase === "selected" ? { modelSwapHandoffId: pendingModelSwap.id, modelSwapEventIds: [...pendingModelSwap.deliveredIds] } : {}),
   })
   await saveRestSnapshot(state.context.items, "runtime checkpoint")
+}
+
+function holdResolvedSwapEvent(event: UserMessage | null): UserMessage | null {
+  return event && holdSwapEvent(event) ? null : event
 }
 
 /** Wait until the next event arrives (or return immediately if one is pending). */
 function waitForEvent(): Promise<UserMessage | null> {
   if (state.shutdownRequested || state.restRequested) return Promise.resolve(null)
-  if (state.pendingInputs.length > 0) return Promise.resolve(state.pendingInputs.shift()!)
+  if (state.pendingInputs.length > 0) return Promise.resolve(state.pendingInputs.shift()!).then(holdResolvedSwapEvent)
   const waiting = new Promise<UserMessage | null>((resolve) => {
     eventResolvers.push(resolve)
   })
   boredomTimer.idle()
-  return waiting.finally(() => boredomTimer.pause())
+  return waiting.finally(() => boredomTimer.pause()).then(holdResolvedSwapEvent)
 }
 
 /** Wait up to timeoutMs for the next event; resolves null if the timer fires first. */
 function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null> {
   if (state.shutdownRequested || state.restRequested) return Promise.resolve(null)
   if (state.pendingInputs.length > 0) {
-    return Promise.resolve(state.pendingInputs.shift()!)
+    return Promise.resolve(state.pendingInputs.shift()!).then(holdResolvedSwapEvent)
   }
   const waiting = new Promise<UserMessage | null>((resolve) => {
     let settled = false
@@ -403,7 +663,7 @@ function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null>
     eventResolvers.push(resolver)
   })
   boredomTimer.idle()
-  return waiting.finally(() => boredomTimer.pause())
+  return waiting.finally(() => boredomTimer.pause()).then(holdResolvedSwapEvent)
 }
 
 function formatIncomingEvent(event: UserMessage): string {
@@ -474,6 +734,11 @@ function injectIncomingEvent(convId: number, event: UserMessage): void {
  * @returns A promise that resolves once this wake cycle fully completes.
  */
 export async function wake(event: UserMessage): Promise<void> {
+  if (pendingModelSwap && event !== pendingModelSwap.wakeEvent) {
+    holdSwapEvent(event)
+    return
+  }
+  if (!pendingModelSwap) await recoverModelSwapHandoff()
   // Any wake cancels a pending boredom timer — a real (or synthetic) activation
   // is now in flight, so we don't want the idle timer firing on top of it.
   boredomTimer.active()
@@ -495,6 +760,8 @@ export async function wake(event: UserMessage): Promise<void> {
   state.restReason = ""
   state.interruptRequested = false
   state.discardRequested = false
+  let convId: number
+  try {
 
   const saved = await loadSession()
   if (saved) {
@@ -537,9 +804,34 @@ export async function wake(event: UserMessage): Promise<void> {
     refreshToolCatalog("new-session")
     state.context = createRuntimeContext("main", bootstrap, state.toolCatalog)
   }
-  const convId = startConversation(event.source, event.triggeredAt)
+  convId = startConversation(event.source, event.triggeredAt)
   console.log("[runner] nano is awake")
 
+  if (pendingModelSwap?.phase === "selected") {
+    activeSwapConversation = convId
+    for (const queued of heldSwapEvents.splice(0)) {
+      injectIncomingEvent(convId, queued)
+      pendingModelSwap.deliveredIds.push(pendingModelSwap.eventIds.get(queued)!)
+      pendingModelSwap.deliveredEvents.push(queued)
+    }
+    await saveRuntimeSnapshot()
+    await new Promise<void>(resolve => {
+      pendingModelSwap!.releaseBootstrap = resolve
+      pendingModelSwap!.bootstrapReady?.()
+    })
+  }
+  } catch (error) {
+    state.running = false
+    state.modelSwap = undefined
+    state.toolInFlight = false
+    state.turnInFlight = false
+    state.activeTurnController = undefined
+    state.operationSignal = undefined
+    resolveShutdown()
+    pendingModelSwap?.bootstrapFailed?.(error)
+    pendingModelSwap?.fail(error instanceof Error ? error : new Error(String(error)))
+    throw error
+  }
   let discarded = false
   try {
     const exit = await runLoop(convId, state, {
@@ -576,6 +868,9 @@ export async function wake(event: UserMessage): Promise<void> {
     setRunnerPresence("resting")
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    if (pendingModelSwap?.phase === "closing") {
+      state.modelSwap!.fallbackReason = `outgoing session failed: ${message}`
+    } else {
     console.error(`[runner] loop aborted: ${message}`)
     if (err instanceof Error && err.stack) console.error(err.stack)
     try {
@@ -584,10 +879,27 @@ export async function wake(event: UserMessage): Promise<void> {
     } catch (quarantineErr) {
       console.warn(`[runner] failed to quarantine session after abort: ${quarantineErr instanceof Error ? quarantineErr.message : String(quarantineErr)}`)
     }
+    }
   } finally {
     const wasShutdownRequested = state.shutdownRequested
+    const closingSwap = pendingModelSwap?.phase === "closing" ? pendingModelSwap : undefined
+    if (closingSwap) {
+      try {
+        closingSwap.messages = state.context.snapshot()
+        const graceful = state.modelSwap?.completed === true && state.modelSwap.journaled === true
+        const fallbackReason = graceful ? undefined : state.modelSwap?.fallbackReason ?? "outgoing model did not complete end_session"
+        const archived = recordRestContextSnapshot(closingSwap.messages, fallbackReason ?? "model swap", "main")
+        await saveRestSnapshot(closingSwap.messages, fallbackReason ?? "model swap", "main", archived.forest)
+        await checkpointModelSwap()
+        await clearSession("main")
+        closingSwap.close({ graceful, ...(fallbackReason ? { fallbackReason } : {}) })
+      } catch (error) {
+        closingSwap.fail(error instanceof Error ? error : new Error(String(error)))
+      }
+    }
     endConversation(convId, state.tokenCount)
     state.running = false
+    state.modelSwap = undefined
     state.context = state.context.fork({ items: [], reason: "reset" })
     state.toolInFlight = false
     state.memoryRecallCooldowns = {}
@@ -603,12 +915,13 @@ export async function wake(event: UserMessage): Promise<void> {
     state.restReason = ""
     state.compactionRequest = undefined
     state.discordTargets = []
-    if (!wasShutdownRequested && !discarded) flushDeferredEvents()
-    state.deferredEvents = []
+    if (!pendingModelSwap && !wasShutdownRequested && !discarded) flushDeferredEvents()
+    if (!pendingModelSwap) state.deferredEvents = []
     eventResolvers = []
     resolveShutdown()
     setRunnerPresence("resting")
     console.log("[runner] nano is resting")
+    if (closingSwap) return
 
     if (discarded) state.pendingInputs = []
     if (!wasShutdownRequested && !discarded && state.pendingInputs.length > 0) {

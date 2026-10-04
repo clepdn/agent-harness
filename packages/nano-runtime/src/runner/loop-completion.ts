@@ -1,5 +1,5 @@
 import { ContextChangedError } from "../llm"
-import type { AssistantMessage, AssistantMessageEvent, TextContent, ThinkingContent, Usage } from "../llm"
+import type { AssistantMessage, AssistantMessageEvent, TextContent, ThinkingContent, Usage, OpenAICompletionsOptions } from "../llm"
 import type { ToolDefinition } from "@nano/harness-core"
 import { logMessage } from "../db"
 import { setContextSize } from "../discord/status-updater"
@@ -183,28 +183,31 @@ async function interruptibleSleep(ms: number, signal?: AbortSignal): Promise<voi
 async function createStreamedCompletion(
   model: Model,
   apiKey: string | undefined,
-  toolChoice: "required" | "auto" | "none",
+  toolChoice: OpenAICompletionsOptions["toolChoice"],
   state: LoopState,
   tools?: ToolDefinition[],
   signal?: AbortSignal,
 ): Promise<CompletionTurnResult> {
   const modelState = modelStateFor(state.runtimeKind)
+  const handoff = state.modelSwap !== undefined
   const startedAt = Date.now()
-  const resolvedToolChoice = modelState.enableThinking && toolChoice === "required" ? "auto" : toolChoice
+  const resolvedToolChoice = handoff
+    ? toolChoice
+    : modelState.enableThinking && toolChoice === "required" ? "auto" : toolChoice
   const completionTools = getCompletionTools(tools, state.runtimeKind)
   const modelChanged = JSON.stringify(state.context.model) !== JSON.stringify(model)
   const toolsChanged = JSON.stringify(state.context.tools ?? []) !== JSON.stringify(completionTools)
-  const configuredThinkingLevel = modelState.enableThinking ? modelState.thinkingEffort : undefined
+  const configuredThinkingLevel = handoff ? state.context.thinkingLevel : modelState.enableThinking ? modelState.thinkingEffort : undefined
   const previousConfiguredEffort = configuredThinkingEfforts.get(state)
   const configuredEffortChanged = configuredThinkingEfforts.has(state) && previousConfiguredEffort !== configuredThinkingLevel
   const effortSelectionChanged = modelChanged || configuredEffortChanged
   const otherConfigChanged =
     state.context.apiKey !== apiKey ||
     state.context.toolChoice !== resolvedToolChoice ||
-    state.context.includeContextImages !== modelState.primaryVision
+    !handoff && state.context.includeContextImages !== modelState.primaryVision
   const configSelectionChanged = effortSelectionChanged || otherConfigChanged
   const settingsChanged = configSelectionChanged || toolsChanged
-  if (settingsChanged) {
+  if (!handoff && settingsChanged) {
     state.context = state.context.fork({
       model,
       apiKey,
@@ -238,9 +241,9 @@ async function createStreamedCompletion(
         bufferedThinking = ""
       } else if (event.type === "thinking_delta") {
         notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
-        if (modelState.enableThinking) bufferedThinking += event.delta
+        if (handoff || modelState.enableThinking) bufferedThinking += event.delta
       } else if (event.type === "thinking_end") {
-        if (modelState.enableThinking && bufferedThinking) {
+        if ((handoff || modelState.enableThinking) && bufferedThinking) {
           emit({ type: "thinking", text: bufferedThinking })
           emittedThinking = true
         }
@@ -257,17 +260,24 @@ async function createStreamedCompletion(
 
   recordLlmRequest(model.id, "success", usage, tokensPerSecond)
 
-  recordPromptResponse(model.id, toolChoice, state, { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond })
+  recordPromptResponse(model.id, typeof toolChoice === "string" ? toolChoice : undefined, state, { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond })
 
   return { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond }
 }
+
 async function createFallbackCompletion(state: LoopState, tools?: ToolDefinition[], signal?: AbortSignal): Promise<CompletionTurnResult> {
   const modelState = modelStateFor(state.runtimeKind)
   return createStreamedCompletion(modelState.fallbackModel, modelState.fallbackApiKey, modelState.fallbackToolChoice, state, tools, signal)
 }
+
 async function createPrimaryCompletion(state: LoopState, tools?: ToolDefinition[], signal?: AbortSignal): Promise<CompletionTurnResult> {
   const modelState = modelStateFor(state.runtimeKind)
   return createStreamedCompletion(modelState.primaryModel!, modelState.primaryApiKey, modelState.primaryToolChoice, state, tools, signal)
+}
+
+/** Handoff turns stay on the model/key/tool choice already owning the context. */
+async function createHandoffCompletion(state: LoopState, tools?: ToolDefinition[], signal?: AbortSignal): Promise<CompletionTurnResult> {
+  return createStreamedCompletion(state.context.model, state.context.apiKey, state.context.toolChoice, state, tools, signal)
 }
 
 function logPromptSizeDebug(state: LoopState, errMsg: string, label: string): void {
@@ -384,7 +394,7 @@ export async function fetchCompletion(
       recallPrepared = true
     }
 
-    if (modelState.useFallback) {
+    if (modelState.useFallback && !state.modelSwap) {
       const fallbackWindow = fallbackContextWindow(state.context.items)
       if (fallbackWindow.nearLimit) {
         console.warn(`[fallback] prompt estimate ${fallbackWindow.estimate} nearing fallback limit ${fallbackWindow.softLimit} (${modelState.fallbackModel.id})`)
@@ -427,7 +437,9 @@ export async function fetchCompletion(
     }
 
     try {
-      const completion = await createPrimaryCompletion(state, tools, signal)
+      const completion = state.modelSwap
+        ? await createHandoffCompletion(state, tools, signal)
+        : await createPrimaryCompletion(state, tools, signal)
       state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
       state.memoryRecallPending = false
       return completion
@@ -438,6 +450,7 @@ export async function fetchCompletion(
         continue
       }
       const errMsg = errorSummary(primaryErr)
+      if (state.modelSwap) throw primaryErr
       const primaryFailure = noteApiError(errMsg, "primary", modelState.primaryModel!)
       if (isPromptTooLargeError(errMsg) && promptTooLargeAttempts < 2) {
         logPromptSizeDebug(state, errMsg, `primary rejected prompt (attempt ${promptTooLargeAttempts + 1}/2)`)

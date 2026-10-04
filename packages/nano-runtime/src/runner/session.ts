@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import fs from "fs/promises"
 import path from "path"
-import type { DiscordMessageTarget, Message } from "../types"
+import type { DiscordMessageTarget, Message, UserMessage } from "../types"
 import type { ContextEffortState, ContextForkReason } from "../llm"
 import { NANO_HOME } from "../agent-config"
 import { atomicWriteFile, isMissingFileError, quarantineFile } from "../durable-file"
@@ -9,10 +9,70 @@ import type { ToolDefinition } from "@nano/harness-core"
 import { findSummaryMessageIndex, messageStringContent } from "./messages"
 import type { RuntimeKind } from "./types"
 
+export type ModelSwapHandoff = {
+  version: 1
+  preset: string
+  id?: string
+  eventIds?: string[]
+  messages: Message[]
+  events: UserMessage[]
+  note: string
+  phase?: "closing" | "selected"
+  frontendMessages?: Message[]
+  frontendEvents?: UserMessage[]
+  frontendId?: string
+  frontendEventIds?: string[]
+}
+
+export async function saveModelSwapHandoff(handoff: ModelSwapHandoff): Promise<void> {
+  await ensureDataDir()
+  await atomicWriteFile(MODEL_SWAP_HANDOFF_FILE, JSON.stringify(handoff), 0o600)
+}
+
+export async function loadModelSwapHandoff(): Promise<ModelSwapHandoff | null> {
+  let raw: string
+  try {
+    raw = await fs.readFile(MODEL_SWAP_HANDOFF_FILE, "utf8")
+  } catch (error) {
+    if (isMissingFileError(error)) return null
+    throw error
+  }
+  const value = record(JSON.parse(raw))
+  const validEvent = (event: unknown): event is UserMessage => {
+    const item = record(event)
+    return Boolean(item && typeof item.source === "string" && typeof item.content === "string" &&
+      typeof item.triggeredAt === "string" && Number.isFinite(Date.parse(item.triggeredAt)))
+  }
+  if (!value || value.version !== 1 || typeof value.preset !== "string" || !value.preset.trim() ||
+      !Array.isArray(value.messages) || !value.messages.every(validMessage) ||
+      !Array.isArray(value.events) || !value.events.every(validEvent) || typeof value.note !== "string" ||
+      (value.id !== undefined && typeof value.id !== "string") ||
+      (value.eventIds !== undefined && (!Array.isArray(value.eventIds) || value.eventIds.length !== value.events.length || !value.eventIds.every(id => typeof id === "string"))) ||
+      (value.phase !== undefined && value.phase !== "closing" && value.phase !== "selected") ||
+      (value.frontendMessages !== undefined && (!Array.isArray(value.frontendMessages) || !value.frontendMessages.every(validMessage))) ||
+      (value.frontendId !== undefined && typeof value.frontendId !== "string") ||
+      (value.frontendEventIds !== undefined && (!Array.isArray(value.frontendEventIds) || !Array.isArray(value.frontendEvents) || value.frontendEventIds.length !== value.frontendEvents.length || !value.frontendEventIds.every(id => typeof id === "string"))) ||
+      (value.frontendEvents !== undefined && (!Array.isArray(value.frontendEvents) || !value.frontendEvents.every(validEvent)))) {
+    throw new Error("invalid durable model-swap handoff")
+  }
+  return value as ModelSwapHandoff
+}
+
+export async function clearModelSwapHandoff(): Promise<void> {
+  try {
+    await fs.unlink(MODEL_SWAP_HANDOFF_FILE)
+  } catch (error) {
+    if (!isMissingFileError(error)) throw error
+  }
+}
+
 // Session state belongs to the agent's durable home, never the executable or
 // source directory (which may be an immutable Nix store path).
 const DATA_DIR = NANO_HOME
 const MEMORY_DIR = path.join(DATA_DIR, "memories")
+// Durable handoff marker. It intentionally lives outside per-lane checkpoints
+// so a crash cannot make a fresh preset resume the old full transcript.
+const MODEL_SWAP_HANDOFF_FILE = path.join(DATA_DIR, "model-swap-handoff.json")
 
 function persistencePaths(kind: RuntimeKind = "main") {
   const prefix = kind === "frontend" ? "frontend-" : ""
@@ -41,13 +101,17 @@ export function restSummaryFromMessages(messages: readonly Message[]): string {
   const summaryIndex = findSummaryMessageIndex(messages)
   return summaryIndex >= 0 ? messageStringContent(messages[summaryIndex]!) : "(no llm context summary yet)"
 }
-
-export async function saveRestSnapshot(messages: readonly Message[], note?: string, kind: RuntimeKind = "main"): Promise<void> {
+export async function saveRestSnapshot(
+  messages: readonly Message[],
+  note?: string,
+  kind: RuntimeKind = "main",
+  summaryOverride?: string,
+): Promise<void> {
   const trimmedNote = typeof note === "string" ? note.trim() : ""
   const snapshot: RestSnapshot = {
     restedAt: new Date().toISOString(),
     ...(trimmedNote ? { note: trimmedNote } : {}),
-    summary: restSummaryFromMessages(messages),
+    summary: summaryOverride ?? restSummaryFromMessages(messages),
   }
   await atomicWriteFile(persistencePaths(kind).restSnapshotFile, JSON.stringify(snapshot, null, 2))
 }
@@ -120,6 +184,8 @@ export type SessionSnapshot = {
   contextModelId?: string
   contextEffortState?: ContextEffortState
   discordTargets?: DiscordMessageTarget[]
+  modelSwapHandoffId?: string
+  modelSwapEventIds?: string[]
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -250,6 +316,8 @@ function parseSession(raw: string): SessionSnapshot {
     throw new Error("invalid context configuration fingerprint")
   }
   if (candidate.contextModelId !== undefined && typeof candidate.contextModelId !== "string") throw new Error("invalid context model id")
+  if (candidate.modelSwapHandoffId !== undefined && typeof candidate.modelSwapHandoffId !== "string") throw new Error("invalid model swap handoff id")
+  if (candidate.modelSwapEventIds !== undefined && (!Array.isArray(candidate.modelSwapEventIds) || !candidate.modelSwapEventIds.every(id => typeof id === "string"))) throw new Error("invalid model swap event ids")
   if (candidate.contextEffortState !== undefined && !validContextEffortState(candidate.contextEffortState, candidate.messages)) {
     throw new Error("invalid context effort state")
   }

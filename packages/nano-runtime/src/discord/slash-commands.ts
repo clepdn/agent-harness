@@ -9,9 +9,9 @@ import type { Client, ChatInputCommandInteraction, AutocompleteInteraction } fro
 import { SlashCommandBuilder } from "discord.js"
 import { config, listModelPresets } from "../config"
 import { getCodexFastMode, setCodexFastMode } from "../codex-fast-mode"
-import { getRunnerStatus, isRunning, isWaitingForEvent, requestRest, requestCompaction, requestDiscard, requestInterrupt } from "../runner/index"
+import { getRunnerStatus, isRunning, isWaitingForEvent, requestModelSwap, requestCompaction, requestDiscard, requestInterrupt } from "../runner/index"
 import { getFrontendRunnerStatus } from "../runner/frontend"
-import { modelState, modelStateFor, evaluateModelSwap, applyModelSwap } from "../runner/model-state"
+import { modelState, modelStateFor } from "../runner/model-state"
 import { startActivityTrace, getRecentActivity, formatActivityTrace } from "./activity-trace"
 import { getVoiceSessionStatus, joinOwnerVoice, leaveVoice, setVoice, SUPPORTED_VOICES } from "./voice"
 
@@ -392,36 +392,26 @@ async function handleModelInfo(interaction: ChatInputCommandInteraction): Promis
 
 async function handleModelSwap(interaction: ChatInputCommandInteraction): Promise<void> {
   const presetName = interaction.options.getString("preset", true).trim()
+  await interaction.deferReply({ ephemeral: true })
 
-  const status = getRunnerStatus()
-  const currentContextSize = status.contextSize
-
-  let decision
   try {
-    decision = evaluateModelSwap(presetName, currentContextSize)
+    const result = await requestModelSwap(presetName)
+    const disposition = result.graceful
+      ? "The previous session completed its graceful end path; a fresh bootstrap is scheduled."
+      : `The previous session was archived without a graceful journal/end: ${result.fallbackReason ?? "graceful handoff unavailable"}. A fresh bootstrap is scheduled.`
+    await interaction.editReply(
+      `Runtime selection is now preset **${result.preset}** (${result.model} via ${result.provider}). ${disposition} Remote backend identity is not verified.`,
+    )
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    await interaction.reply({ content: `error: ${msg}`, ephemeral: true })
-    return
+    if (/model swap already in progress|overlapping model swap/i.test(msg)) {
+      await interaction.editReply(`A model swap is already in progress: ${msg}`)
+    } else if (/model preset .* not found|preset .* has no model field|failed to build model from preset|preset is required/i.test(msg)) {
+      await interaction.editReply(`Invalid model preset: ${msg}`)
+    } else {
+      await interaction.editReply(`Model swap failed: ${msg}`)
+    }
   }
-
-  if (decision.action === "swap") {
-    applyModelSwap(decision)
-    await interaction.reply({
-      content: `swapped primary model to **${decision.model.id}** (preset: ${decision.preset})\ncontext carried over: ${currentContextSize.toLocaleString()} tokens`,
-      ephemeral: true,
-    })
-    return
-  }
-
-  // action === "rest"
-  const restReason = `model swap to "${presetName}" requires rest: ${decision.reason}`
-  const restAccepted = requestRest(restReason)
-
-  await interaction.reply({
-    content: `model swap to **${presetName}** requires rest.\nreason: ${decision.reason}\nrest triggered: ${restAccepted}\nthe new model will be active on next wake`,
-    ephemeral: true,
-  })
 }
 
 async function handleModelPresets(interaction: ChatInputCommandInteraction): Promise<void> {

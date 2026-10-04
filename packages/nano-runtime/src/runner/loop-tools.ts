@@ -6,6 +6,14 @@ import type { FunctionToolCall } from "./loop-shared"
 import type { LoopHooks, LoopState } from "./types"
 
 export type ToolCallsOutcome = "continue" | "rest" | "wait"
+const MODEL_SWAP_ALLOWED_TOOLS: Record<string, true> = {
+  memory_fs: true,
+  edit_file: true,
+  read_file: true,
+  end_session: true,
+  wait: true,
+  wait_then_continue: true,
+}
 
 function skipRemainingToolCalls(
   convId: number,
@@ -28,6 +36,7 @@ function maybeInterruptAfterTool(
   calls: readonly FunctionToolCall[],
   nextIndex: number,
 ): boolean {
+  if (state.modelSwap) return false
   if (state.pendingInputs.length === 0) return false
 
   const incoming = state.pendingInputs.shift()!
@@ -50,14 +59,23 @@ export async function processToolCalls(
 ): Promise<ToolCallsOutcome> {
   const handlers = buildToolHandlers()
   let shouldWaitForEvent = false
-
   for (let i = 0; i < calls.length; i++) {
     if (state.interruptRequested || state.discardRequested || state.operationSignal?.aborted) {
       skipRemainingToolCalls(convId, state, calls, i, "operator interrupt")
       return "continue"
     }
     const call = calls[i]!
+    if (state.modelSwap && !MODEL_SWAP_ALLOWED_TOOLS[call.name]) {
+      const skippedContent = "skipped: model swap handoff permits only journaling and end_session tools."
+      const result = pushToolMessage(convId, state, call, skippedContent)
+      emit({ type: "tool", name: call.name, args: { _skipped: true }, result })
+      continue
+    }
     const outcome = await executeToolCall(convId, state, hooks, handlers, call)
+    if (state.interruptRequested || state.discardRequested || state.operationSignal?.aborted) {
+      skipRemainingToolCalls(convId, state, calls, i + 1, "operator interrupt")
+      return "continue"
+    }
 
     if (outcome.shouldRest) return "rest"
     if (outcome.shouldWaitForEvent) {

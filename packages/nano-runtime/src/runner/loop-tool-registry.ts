@@ -1,5 +1,6 @@
 import type { UserMessage as PiUserMessage } from "../llm"
 import { config } from "../config"
+import path from "path"
 import { normalizeTimeoutMs } from "../container/config"
 import type { ClientImageArtifact, ClientToolName } from "@nano/harness-protocol"
 import { AGENT_ID } from "../agent-config"
@@ -29,7 +30,7 @@ import { GIT_UPSTREAM_NAG } from "./config"
 import { pushToolMessage, recordToolResult, runStandardTool, toolError } from "./loop-tool-runtime"
 import { findSubagent, runSubagent } from "./subagent"
 import { cancelJob, forgetJob, getJob, listJobs, readJobStdout, runJobUntilDetached, startJob, type Job } from "./jobs"
-import { describeContextSummary, expandContextSummary, grepContext } from "./context-store"
+import { describeContextSummary, expandContextSummary, grepContext, recordRestContextSnapshot } from "./context-store"
 import { clearSession, saveRestSnapshot } from "./util"
 import { compactForShutdown } from "./loop"
 import { sendVoiceReply } from "../discord/voice"
@@ -202,13 +203,19 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
     end_session: async ({ convId, state, call, args }) => {
       if (args.note) console.log("[runner] end_session note:", args.note)
       recordToolResult(convId, state, call, "end_session", args, "Session ended.")
-      // Save the raw snapshot FIRST as a guaranteed-continuity fallback, so if
-      // the rich summary compaction is slow or fails, next boot still rehydrates
-      // from the raw conversation instead of waking clean with nothing.
       const note = args.note as string | undefined
+      if (state.modelSwap) {
+        if (!state.modelSwap.journaled) {
+          state.modelSwap.fallbackReason = "outgoing session ended without a successful journal edit"
+        }
+        const rest = recordRestContextSnapshot(state.context.snapshot(), note ?? "model swap handoff", state.runtimeKind)
+        await saveRestSnapshot(state.context.items, note, state.runtimeKind, rest.forest)
+        await clearSession(state.runtimeKind)
+        state.modelSwap.completed = true
+        console.log("[runner] model swap end_session archived raw provenance and cleared session")
+        return { shouldRest: true }
+      }
       await saveRestSnapshot(state.context.items, note, state.runtimeKind)
-      // Then compact-and-resave so a clean goodbye leaves a real rich summary
-      // behind. Best-effort: the raw snapshot above already guarantees continuity.
       try {
         const compacted = await compactForShutdown(state)
         if (compacted === "rewritten") {
@@ -218,12 +225,6 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
       } catch (err) {
         console.warn(`[runner] end_session compaction failed: ${err instanceof Error ? err.message : String(err)}`)
       }
-      // Actually END the session: delete the full-conversation session.json so
-      // the next wake does NOT rehydrate verbatim via loadSession(). Without
-      // this, end_session was indistinguishable from wait — the runtime
-      // snapshot persisted and the next event restored the entire prior
-      // context. Clearing it makes the next wake bootstrap fresh from just the
-      // rest-snapshot summary.
       await clearSession(state.runtimeKind)
       console.log("[runner] end_session cleared session.json — next wake starts fresh")
       return { shouldRest: true }
@@ -398,17 +399,23 @@ export function buildToolHandlers(): Record<string, ToolHandler> {
         })
       }
       if (pathArg.startsWith("memory://")) {
+        const normalizedJournalPath = path.posix.normalize(pathArg.slice("memory://".length).replace(/\\/g, "/"))
+        const isJournal = normalizedJournalPath.startsWith("journal/")
+        const markJournaled = (result: string): string => {
+          if (ctx.state.modelSwap && isJournal && !result.startsWith("error:")) ctx.state.modelSwap.journaled = true
+          return result
+        }
         return exactValid
           ? runStandardTool(ctx, {
               name: "edit_file", logArgKeys: ["path"] as const,
               runArgKeys: ["path", "old_text", "new_text", "expected_hash"] as const,
-              run: (uri, oldText, newText, expectedHash) => editMemoryResource(uri, oldText, newText, expectedHash, memoryAccessFor(ctx.state)),
+              run: async (uri, oldText, newText, expectedHash) => markJournaled(await editMemoryResource(uri, oldText, newText, expectedHash, memoryAccessFor(ctx.state))),
               emitArgKeys: ["path"] as const, previewChars: 0,
             })
           : runStandardTool(ctx, {
               name: "edit_file", logArgKeys: ["path"] as const,
               runArgKeys: ["path", "edits", "expected_hash"] as const,
-              run: (uri, edits, expectedHash) => editMemoryResourceHashline(uri, edits, expectedHash, memoryAccessFor(ctx.state)),
+              run: async (uri, edits, expectedHash) => markJournaled(await editMemoryResourceHashline(uri, edits, expectedHash, memoryAccessFor(ctx.state))),
               emitArgKeys: ["path"] as const, previewChars: 0,
             })
       }
