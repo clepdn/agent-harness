@@ -60,7 +60,8 @@
 			# Control plane — spawns one worker per agent file
 			makeWrapper ${pkgs.nodejs_22}/bin/node $out/bin/nano-server \
 			    --add-flags "$out/lib/nano/node_modules/.bin/tsx" \
-			    --add-flags "$out/lib/nano/apps/server/src/index.ts"
+			    --add-flags "$out/lib/nano/apps/server/src/index.ts" \
+			    --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.gitMinimal ]}
 
 			# Executor — the tool-execution client. Runs shell/file/image
 			# tools over an authenticated HTTP boundary. No LLM, no session.
