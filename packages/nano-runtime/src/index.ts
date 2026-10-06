@@ -4,6 +4,7 @@ import { tryShim, SHIM_FAILED_ENV } from "./shim"
 import { REPO_ROOT } from "./agent-config"
 import { createServer } from "./server"
 import { initDb } from "./db"
+import { snapshotStateRevisions } from "./state-history"
 import { initMetricsDb } from "./metrics"
 import { initSnapcompactRenderer } from "./runner/compaction-companion"
 import { modelState, modelStateFor } from "./runner/model-state"
@@ -77,6 +78,7 @@ async function main() {
     }
   }
   initDb()
+  await snapshotStateRevisions()
   initMetricsDb()
 
   // If snapcompact bitmap frames are the configured deep-archive path, load the

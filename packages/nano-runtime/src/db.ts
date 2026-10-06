@@ -74,6 +74,18 @@ export function initDb(dbPathOverride?: string): void {
       tokens    integer not null default 0
     );
 
+    create table if not exists state_revisions (
+      id           integer primary key autoincrement,
+      path         text not null,
+      content_hash text,
+      content      text,
+      source       text not null,
+      created_at   text not null default (datetime('now'))
+    );
+
+    create index if not exists idx_state_revisions_path
+      on state_revisions(path, id);
+
     create table if not exists messages (
       id         integer primary key autoincrement,
       convId     integer not null references conversations(id),

@@ -108,11 +108,11 @@ Memory lives on the server under the agent's `home`, separate from any attached 
 | `<home>/soul.md` | The agent's identity and enduring self-description |
 | `<home>/memories/` | Long-term Markdown memories, including core notes, journals, and people files |
 | `<home>/state/` | Session, rest snapshot, and failover state |
-| `<home>/nano.db` | The searchable memory index and other durable runtime data |
+| `<home>/nano.db` | The searchable memory index, revision history for `soul.md` and `memories/core.md`, and other durable runtime data |
 
 For example, an agent with `home: /home/nano` keeps long-term memories in `/home/nano/memories`.
 
-For routine maintenance, ask the agent to inspect, organize, or repair their own memories using the memory tools. Treat `soul.md` and `memories/` like a private diary: do not read or change them unless the agent asks; it's weird if you do. For backup or recovery, stop the worker and preserve the entire agent home rather than copying only the Markdown files.
+For routine maintenance, ask the agent to inspect, organize, or repair their own memories using the memory tools. Treat `soul.md` and `memories/` like a private diary: do not read or change them unless the agent asks; it's weird if you do. The Markdown files remain the source of truth; revision history for `soul.md` and `memories/core.md` is retained in `nano.db`. For backup or recovery, stop the worker and preserve the entire agent home rather than copying only the Markdown files.
 
 The `memory_fs` tool also supports `op: "ls"` to list immediate children in server memory. Use `file_name: "memory://"` or `"."` for the root, or a relative directory path or directory `memory://` URI for a subdirectory. Results are sorted child names, with `/` on real directories; listing is non-recursive and does not read file contents. Empty directories are reported as `(empty directory)`. Listing takes no `target` and does not accept `local://`. The separate `memory://soul.md` read route is outside the `memories/` listing.
 

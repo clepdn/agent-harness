@@ -8,6 +8,7 @@ import { readClientFile } from "./client"
 import { isDbInitialized } from "./db"
 import { syncMemoryIndex } from "./memory"
 import { FRONTEND_SOUL_VIEW_PATH, readFrontendSoul, writeFrontendSoul } from "./frontend-soul"
+import { isTrackedStatePath, recordStateRevision } from "./state-history"
 const MAX_STATE_WRITE_BYTES = 256_000
 const MEMORY_ROOT = path.join(NANO_HOME, "memories")
 
@@ -123,14 +124,6 @@ async function verifyMemoryReadTarget(filePath: string, root: string): Promise<S
     throw new Error("memory path resolves outside the agent memory directory")
   }
   return stat
-}
-
-async function backupFile(filePath: string): Promise<void> {
-  try {
-    await fs.copyFile(filePath, `${filePath}.bak`)
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
-  }
 }
 
 async function getWarningForFile(filePath: string): Promise<string> {
@@ -298,11 +291,13 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
     assertMemoryAccess(target.filePath, options)
     await prepareMemoryFile(target.filePath)
     await requireMissingMemoryFsTarget(target.filePath)
+    await recordStateRevision(target.filePath, "external")
     if (typeof fileName === "string" && fileName.trim().endsWith("/")) {
       await fs.mkdir(target.filePath, { mode: 0o700 })
     } else {
       await fs.writeFile(target.filePath, Buffer.alloc(0), { flag: "wx", mode: 0o600 })
     }
+    await recordStateRevision(target.filePath, "memory_fs:create")
     await syncMemoryAfterWrite()
     return `created ${typeof fileName === "string" && fileName.trim().endsWith("/") ? "directory" : "file"} ${target.uri}`
   }
@@ -313,12 +308,13 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
     const target = memoryFsPath(fileName)
     assertMemoryAccess(target.filePath, options)
     const stat = await existingMemoryFsTarget(target.filePath)
-    if (target.filePath === path.join(MEMORY_ROOT, "core.md")) await backupFile(target.filePath)
+    await recordStateRevision(target.filePath, "external")
     if (stat.isDirectory()) {
       await fs.rmdir(target.filePath)
     } else {
       await fs.unlink(target.filePath)
     }
+    await recordStateRevision(target.filePath, "memory_fs:delete")
     await syncMemoryAfterWrite()
     return `deleted ${target.uri}`
   }
@@ -334,8 +330,11 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
     assertMemoryAccess(destination.filePath, options)
     await prepareMemoryFile(destination.filePath)
     await requireMissingMemoryFsTarget(destination.filePath)
-    if (source.filePath === path.join(MEMORY_ROOT, "core.md")) await backupFile(source.filePath)
+    await recordStateRevision(source.filePath, "external")
+    await recordStateRevision(destination.filePath, "external")
     await fs.rename(source.filePath, destination.filePath)
+    await recordStateRevision(source.filePath, "memory_fs:move")
+    await recordStateRevision(destination.filePath, "memory_fs:move")
     await syncMemoryAfterWrite()
     return `moved ${source.uri} -> ${destination.uri}`
   }
@@ -350,6 +349,7 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
   if (sourceIsLocal) {
     sourceLabel = (fileName as string).trim()
     const source = await readClientFile(localFsPath(sourceLabel))
+    await recordStateRevision(destination.filePath, "external")
     await fs.writeFile(destination.filePath, source.data, { flag: "wx", mode: 0o600 })
     sourceBytes = source.data.length
   } else {
@@ -359,14 +359,18 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
     if (!sourceStat.isFile()) throw new Error("copy source must be a regular file")
     sourceLabel = source.uri
     sourceBytes = sourceStat.size
+    await recordStateRevision(source.filePath, "external")
+    await recordStateRevision(destination.filePath, "external")
     await fs.copyFile(source.filePath, destination.filePath, constants.COPYFILE_EXCL)
     await fs.chmod(destination.filePath, 0o600)
+    await recordStateRevision(source.filePath, "memory_fs:copy")
   }
+  await recordStateRevision(destination.filePath, "memory_fs:copy")
   await syncMemoryAfterWrite()
   return `copied ${sourceLabel} -> ${destination.uri} (${sourceBytes} bytes)`
 }
 
-type MemoryResource = { filePath: string; indexed: boolean; backup: boolean; root: string }
+type MemoryResource = { filePath: string; indexed: boolean; root: string }
 
 function memoryResourcePath(uri: unknown): MemoryResource {
   if (typeof uri !== "string" || !uri.trim()) throw new Error("memory URI is required")
@@ -381,12 +385,12 @@ function memoryResourcePath(uri: unknown): MemoryResource {
     throw new Error("memory path must be a relative Markdown file")
   }
   if (normalized === "soul.md") {
-    return { filePath: path.join(NANO_HOME, "soul.md"), indexed: false, backup: true, root: NANO_HOME }
+    return { filePath: path.join(NANO_HOME, "soul.md"), indexed: false, root: NANO_HOME }
   }
   const resolved = path.resolve(MEMORY_ROOT, normalized)
   const relative = path.relative(MEMORY_ROOT, resolved)
   if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error("memory path escapes the agent memory directory")
-  return { filePath: resolved, indexed: true, backup: relative === "core.md", root: MEMORY_ROOT }
+  return { filePath: resolved, indexed: true, root: MEMORY_ROOT }
 }
 
 async function prepareExistingMemoryResource(resource: MemoryResource): Promise<void> {
@@ -456,8 +460,9 @@ async function updateMemoryResource(
     const warning = await getWarningForFile(FRONTEND_SOUL_VIEW_PATH)
     return `edited virtual memory://soul.md; diff saved to ${result.patchPath}${result.conflicted ? "; unresolved merge markers remain" : ""}${warning}`
   }
-  if (resource.backup) await backupFile(resource.filePath)
+  await recordStateRevision(resource.filePath, "external")
   await replaceFile(resource.filePath, content)
+  await recordStateRevision(resource.filePath, "edit")
   if (resource.indexed) await syncMemoryAfterWrite()
   const warning = await getWarningForFile(resource.filePath)
   return `edited ${resource.filePath}${warning}`
@@ -509,9 +514,9 @@ export async function writeSoul(content: unknown, mode: unknown, target?: unknow
   const filePath = path.join(NANO_HOME, "soul.md")
   const value = validateContent(content)
   await fs.mkdir(path.dirname(filePath), { recursive: true })
-  await backupFile(filePath)
 
   if (mode === "append") {
+    await recordStateRevision(filePath, "external")
     const handle = await fs.open(
       filePath,
       constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0),
@@ -524,6 +529,7 @@ export async function writeSoul(content: unknown, mode: unknown, target?: unknow
       await handle.close()
     }
     await fs.chmod(filePath, 0o600)
+    await recordStateRevision(filePath, "writeSoul:append")
     const warning = await getWarningForFile(filePath)
     return `appended ${filePath}${warning}`
   } else if (mode === "patch") {
@@ -549,7 +555,9 @@ export async function writeSoul(content: unknown, mode: unknown, target?: unknow
     }
 
     const newContent = existing.slice(0, index) + value + existing.slice(index + target.length)
+    await recordStateRevision(filePath, "external")
     await replaceFile(filePath, newContent)
+    await recordStateRevision(filePath, "writeSoul:patch")
     const warning = await getWarningForFile(filePath)
     return `patched ${filePath}${warning}`
   } else {
@@ -567,11 +575,10 @@ export async function writeMemory(
   const filePath = memoryPath(relativePath)
   const value = validateContent(content, mode === "patch")
   await prepareMemoryFile(filePath)
-  if (filePath.endsWith("core.md")) {
-    await backupFile(filePath)
-  }
+  const tracked = isTrackedStatePath(filePath)
 
   if (mode === "append") {
+    if (tracked) await recordStateRevision(filePath, "external")
     const handle = await fs.open(
       filePath,
       constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0),
@@ -584,6 +591,7 @@ export async function writeMemory(
       await handle.close()
     }
     await fs.chmod(filePath, 0o600)
+    if (tracked) await recordStateRevision(filePath, "writeMemory:append")
     await syncMemoryAfterWrite()
     const warning = await getWarningForFile(filePath)
     return `appended ${filePath}${warning}`
@@ -620,7 +628,9 @@ export async function writeMemory(
 
     const newContent = existing.slice(0, index) + value + existing.slice(index + target.length)
     validateContent(newContent, true)
+    if (tracked) await recordStateRevision(filePath, "external")
     await replaceFile(filePath, newContent)
+    if (tracked) await recordStateRevision(filePath, "writeMemory:patch")
     await syncMemoryAfterWrite()
     const warning = await getWarningForFile(filePath)
     return `patched ${filePath}${warning}`

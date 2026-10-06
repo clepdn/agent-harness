@@ -427,7 +427,7 @@ test("memory read and list tools function correctly", async (t) => {
   assert.equal(code, 0)
 })
 
-test("memory and soul validation, warning, and backup operations", async (t) => {
+test("memory and soul validation, warning, and revision history", async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-memory-ext-"))
   const home = path.join(root, "home")
   const memoriesDir = path.join(home, "memories")
@@ -439,8 +439,12 @@ test("memory and soul validation, warning, and backup operations", async (t) => 
     import assert from "node:assert/strict"
     import fs from "node:fs/promises"
     import path from "node:path"
-    const { writeSoul, writeMemory } = await import(${JSON.stringify(moduleUrl)})
-    
+    import { initDb, getDb } from ${JSON.stringify(new URL("./db.ts", import.meta.url).href)}
+    import { writeSoul, writeMemory, memoryFs } from ${JSON.stringify(moduleUrl)}
+    initDb(":memory:")
+    const db = getDb()
+    const revisions = db.prepare("select content, source from state_revisions where path = ? order by id")
+
     // 1. Test Markdown Validation (broken header)
     await assert.rejects(
       () => writeSoul("##Header without space", "append"),
@@ -453,16 +457,29 @@ test("memory and soul validation, warning, and backup operations", async (t) => 
       /Markdown validation failed/
     )
     
-    // 3. Test soul.md and core.md rolling backup (.bak) creation
+    // 3. Track changed contents, but not no-op patches
     await writeSoul("# Valid Soul", "append")
     await writeSoul("# Updated Soul", "patch", "# Valid Soul")
-    const soulBakExists = await fs.stat(path.join(${JSON.stringify(home)}, "soul.md.bak")).then(() => true).catch(() => false)
-    assert.equal(soulBakExists, true)
+    const soulRevisions = [
+      { content: "# Valid Soul", source: "writeSoul:append" },
+      { content: "# Updated Soul", source: "writeSoul:patch" },
+    ]
+    assert.deepEqual(revisions.all("soul.md"), soulRevisions)
+    await writeSoul("# Updated Soul", "patch", "# Updated Soul")
+    assert.deepEqual(revisions.all("soul.md"), soulRevisions)
 
-    await writeMemory("core.md", "# Valid Core", "append")
-    await writeMemory("core.md", "# Updated Core", "patch", "# Valid Core")
-    const coreBakExists = await fs.stat(path.join(${JSON.stringify(memoriesDir)}, "core.md.bak")).then(() => true).catch(() => false)
-    assert.equal(coreBakExists, true)
+    // Preserve out-of-band contents before the tool changes them
+    await fs.writeFile(path.join(${JSON.stringify(memoriesDir)}, "core.md"), "# External Core", "utf8")
+    await writeMemory("core.md", "# Updated Core", "patch", "# External Core")
+    assert.deepEqual(revisions.all("memories/core.md"), [
+      { content: "# External Core", source: "external" },
+      { content: "# Updated Core", source: "writeMemory:patch" },
+    ])
+    await memoryFs("core.md", "delete")
+    assert.deepEqual(
+      db.prepare("select content_hash, content, source from state_revisions where path = ? order by id desc limit 1").get("memories/core.md"),
+      { content_hash: null, content: null, source: "memory_fs:delete" },
+    )
 
     // 4. Test warning when size crosses 200KB
     const huge = "a".repeat(200005)
