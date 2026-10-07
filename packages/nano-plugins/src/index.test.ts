@@ -322,3 +322,51 @@ test("closes plugins whose apply returns a service disposer without deadlocking"
   assert.equal(bus.statuses()[0]?.errors.some(error => error.phase === "dispose"), false)
 })
 
+test("keeps provider guards live through dependent cleanup on close and disable", async () => {
+  const closeWrite = defineService<(value: string) => void>("shutdown.close-write")
+  const closeWrites: string[] = []
+  const closeOrder: string[] = []
+  const closeBus = new PluginBus()
+  await closeBus.install({
+    id: "close-write-provider",
+    provides: [closeWrite],
+    apply(scope) { scope.provide(closeWrite, scope.guard(value => { closeWrites.push(value) })) },
+  })
+  await closeBus.install({
+    id: "close-write-consumer",
+    requires: [closeWrite],
+    apply(scope) {
+      const write = scope.use(closeWrite)
+      scope.own(() => { write("close"); closeOrder.push("consumer") })
+    },
+  })
+  await closeBus.close()
+  assert.deepEqual(closeWrites, ["close"])
+  assert.deepEqual(closeOrder, ["consumer"])
+  assert.equal(closeBus.inspect().services, 0)
+  assert.equal(closeBus.statuses().flatMap(status => status.errors).some(error => error.phase === "dispose"), false)
+
+  const disableWrite = defineService<(value: string) => void>("shutdown.disable-write")
+  const disableWrites: string[] = []
+  const disableOrder: string[] = []
+  const disableBus = new PluginBus()
+  await disableBus.install({
+    id: "disable-write-provider",
+    provides: [disableWrite],
+    apply(scope) { scope.provide(disableWrite, scope.guard(value => { disableWrites.push(value) })) },
+  })
+  await disableBus.install({
+    id: "disable-write-consumer",
+    requires: [disableWrite],
+    apply(scope) {
+      const write = scope.use(disableWrite)
+      scope.own(() => { write("disable"); disableOrder.push("consumer") })
+    },
+  })
+  await disableBus.disable("disable-write-provider")
+  assert.deepEqual(disableWrites, ["disable"])
+  assert.deepEqual(disableOrder, ["consumer"])
+  assert.equal(disableBus.optional(disableWrite), undefined)
+  await disableBus.close()
+})
+

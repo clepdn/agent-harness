@@ -220,7 +220,7 @@ export class PluginBus {
   }
   replace<C>(plugin: Plugin<C>, config?: unknown): Promise<void> {
     const pending = this.entries.get(plugin.id);
-    pending?.controller?.abort();
+    if (pending?.status === 'LOADING') pending.controller?.abort();
     return this.serialize(async () => {
       this.assertOpen();
       assertPlugin(plugin);
@@ -293,7 +293,7 @@ export class PluginBus {
     this.closing = true;
     for (const entry of this.entries.values()) {
       entry.enabled = false;
-      entry.controller?.abort();
+      if (entry.status === 'LOADING') entry.controller?.abort();
     }
     this.closePromise = this.serialize(async () => {
       this.closed = true;
@@ -367,8 +367,8 @@ export class PluginBus {
   }
   private abortEntryAndDependents(id: string): void {
     for (const entry of this.entries.values()) {
-      if (entry.plugin.id === id) entry.controller?.abort();
-      else if (entry.status === 'LOADING' && [...entry.bindings.values()].includes(id)) entry.controller?.abort();
+      if (entry.status !== 'LOADING') continue;
+      if (entry.plugin.id === id || [...entry.bindings.values()].includes(id)) entry.controller?.abort();
     }
   }
 
@@ -377,10 +377,7 @@ export class PluginBus {
     for (const entry of this.entries.values()) {
       if (entry.bindings.get(token) !== providerId) continue;
       if (entry.status === 'LOADING') entry.controller?.abort();
-      else if (entry.status === 'ACTIVE') {
-        entry.needsRestart = true;
-        entry.controller?.abort();
-      }
+      else if (entry.status === 'ACTIVE') entry.needsRestart = true;
     }
   }
 
