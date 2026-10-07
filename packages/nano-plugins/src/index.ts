@@ -689,8 +689,15 @@ export class PluginBus {
         publishResource(resource);
         return async () => {
           if (!resource.active) return;
+          if (controller.signal.aborted || entry.generation !== generation || entry.status === 'UNLOADING') {
+            await this.disposeOwnedResource(entry, generation, resource);
+            stagedServices.delete(serviceToken);
+            entry.withdrawnServices.delete(serviceToken);
+            return;
+          }
           if (this.services.get(serviceToken)?.owner !== entry.plugin.id) {
             await this.disposeOwnedResource(entry, generation, resource);
+            stagedServices.delete(serviceToken);
             return;
           }
           entry.withdrawnServices.add(serviceToken);

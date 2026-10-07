@@ -302,3 +302,23 @@ test("runs ownership cleanup registered after cancellation", async () => {
   await bus.close()
 })
 
+test("closes plugins whose apply returns a service disposer without deadlocking", async () => {
+  const service = defineService<number>("close-disposer.service")
+  const bus = new PluginBus({ disposeTimeoutMs: 20 })
+  await bus.install({
+    id: "close-disposer",
+    provides: [service],
+    apply(scope) { return scope.provide(service, 1) },
+  })
+  await bus.close()
+  assert.deepEqual(bus.inspect(), {
+    plugins: 1,
+    services: 0,
+    slots: 0,
+    listeners: 0,
+    timers: 0,
+    byStatus: { PENDING: 0, LOADING: 0, ACTIVE: 0, FAILED: 0, UNLOADING: 0, DISPOSED: 1 },
+  })
+  assert.equal(bus.statuses()[0]?.errors.some(error => error.phase === "dispose"), false)
+})
+
