@@ -474,4 +474,3 @@ test("does not publish a failed plugin's staged slot contribution", async () => 
   await bus.close()
   assert.equal(bus.inspect().listeners, 0)
 })
-
