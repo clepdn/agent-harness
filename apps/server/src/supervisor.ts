@@ -9,6 +9,7 @@ type SupervisorOptions = {
   workerEntry: string
   workerEnv: NodeJS.ProcessEnv
   onReady: (agent: ResolvedLocalAgent) => void
+  signal?: AbortSignal
 }
 
 /**
@@ -61,10 +62,18 @@ export class LocalAgentSupervisor {
   private restartTimer: ReturnType<typeof setTimeout> | null = null
   private restartDelayMs = 1_000
   private healthyAt = 0
+  private readonly abortListener: (() => void) | null
 
   constructor(options: SupervisorOptions) {
     this.options = options
     this.agent = options.agent
+    if (options.signal) {
+      const abort = () => { void this.stop() }
+      options.signal.addEventListener("abort", abort, { once: true })
+      this.abortListener = () => options.signal?.removeEventListener("abort", abort)
+    } else {
+      this.abortListener = null
+    }
   }
 
   async start(): Promise<void> {
@@ -79,6 +88,7 @@ export class LocalAgentSupervisor {
 
   async stop(): Promise<void> {
     this.stopping = true
+    this.abortListener?.()
     if (this.restartTimer) clearTimeout(this.restartTimer)
     this.restartTimer = null
     const child = this.child

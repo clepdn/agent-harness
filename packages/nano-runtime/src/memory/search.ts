@@ -11,8 +11,9 @@
 
 import fs from "fs/promises"
 import path from "path"
-import { getDb, isVecAvailable, MEMORY_EMBEDDING_DIMENSIONS } from "../db"
-import { EMBEDDING_DIMENSIONS, embeddingsConfigured, embedTexts } from "../embeddings"
+import type Database from "better-sqlite3"
+import { MEMORY_EMBEDDING_DIMENSIONS } from "../db"
+import type { EmbeddingsService } from "../embeddings"
 import {
   basenameWithoutExt,
   BODY_INFORMATIVE_BM25_THRESHOLD,
@@ -24,15 +25,41 @@ import {
   MEMORY_QUERY_TOKEN_LIMIT,
   normalizeHandle,
   normalizeText,
-  PEOPLE_DIR,
+  memoryPaths,
   tokensFromText,
+  type AliasMap,
   type MemoryHit,
   type AuthoredMemorySearchResult,
   type MemorySearchProfile,
   type SemanticQuerySignal,
 } from "./shared"
-import { NANO_HOME as HOME_DIR } from "../agent-config"
-import { loadAliasMap, resolveAliases } from "./aliases"
+import type { MemoryQueryParts } from "./discord-query"
+import type { AliasService } from "./aliases"
+export interface MemorySearchDependencies {
+  home: string
+  db: Database.Database
+  vecAvailable: boolean
+  embeddings?: EmbeddingsService
+  aliases: AliasService
+}
+
+export interface MemorySearchRuntime {
+  buildSearchProfile(parts: MemoryQueryParts): Promise<MemorySearchProfile>
+  semanticQuerySignal(query: string, signal?: AbortSignal): Promise<SemanticQuerySignal | null>
+  searchMemory(
+    profile: MemorySearchProfile,
+    cooldowns: Record<number, number>,
+    currentTurn: number,
+    limit: number,
+    semanticSignal?: SemanticQuerySignal | null,
+    isExplicit?: boolean,
+  ): Promise<MemoryHit[]>
+  formatMemorySource(hit: MemoryHit): string
+  toMemorySearchResult(hit: MemoryHit): AuthoredMemorySearchResult
+  buildMemoryRecallMessage(hits: MemoryHit[]): string
+  isRelevant(hits: MemoryHit[], profile: MemorySearchProfile): boolean
+  shouldSkipForSemanticChatter(profile: MemorySearchProfile, signal: SemanticQuerySignal | null): boolean
+}
 
 // ── handle helpers ─────────────────────────────────────────────────────
 
@@ -271,11 +298,11 @@ function isRelevant(hits: MemoryHit[], profile: MemorySearchProfile): boolean {
 
 // ── search profile ─────────────────────────────────────────────────────
 
-function bestBodyBm25(bodyTokens: string[]): number | null {
+function bestBodyBm25(db: Database.Database, bodyTokens: string[]): number | null {
   if (bodyTokens.length === 0) return null
   const query = bodyTokens.map((token) => `"${token.replace(/"/g, '""')}"*`).join(" OR ")
   try {
-    const row = getDb()
+    const row = db
       .prepare(
         "select bm25(memory_chunks_fts, 5.0, 2.0, 1.0, 0.5) as r from memory_chunks_fts where memory_chunks_fts match ? order by r limit 1",
       )
@@ -286,18 +313,22 @@ function bestBodyBm25(bodyTokens: string[]): number | null {
   }
 }
 
-function computeBodyInformativeness(bodyTokens: string[], bodyPeople: string[]): boolean {
+function computeBodyInformativeness(
+  db: Database.Database,
+  bodyTokens: string[],
+  bodyPeople: string[],
+): boolean {
   if (bodyPeople.length > 0) return true
   if (bodyTokens.length === 0) return false
-  const top = bestBodyBm25(bodyTokens)
+  const top = bestBodyBm25(db, bodyTokens)
   if (top === null) return false
   return top <= BODY_INFORMATIVE_BM25_THRESHOLD
 }
-
-async function knownPeopleHandles(aliasMap: Record<string, string[]>): Promise<Set<string>> {
+async function knownPeopleHandles(peopleDir: string, aliasMap: AliasMap): Promise<Set<string>> {
   const handles = new Set<string>()
-  if (await import("fs/promises").then((fs) => fs.access(PEOPLE_DIR).then(() => true, () => false))) {
-    const entries = await fs.readdir(PEOPLE_DIR, { withFileTypes: true })
+
+  if (await fs.access(peopleDir).then(() => true, () => false)) {
+    const entries = await fs.readdir(peopleDir, { withFileTypes: true })
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith(".md")) continue
       const base = basenameWithoutExt(entry.name).toLowerCase()
@@ -313,32 +344,38 @@ async function knownPeopleHandles(aliasMap: Record<string, string[]>): Promise<S
 
 /**
  * Builds a rich search profile from query parts for use in scoring and gating.
- *
- * @param parts - Structured query parts (sender, source, body).
- * @returns Search profile with resolved aliases, tokens, and intent classification.
  */
-export async function buildSearchProfile(parts: {
-  sender: string | null
-  source: string | null
-  body: string
-}): Promise<MemorySearchProfile> {
-  const aliasMap = await loadAliasMap()
-  return buildSearchProfileWithContext(parts, aliasMap, await knownPeopleHandles(aliasMap))
+async function buildSearchProfile(
+  parts: MemoryQueryParts,
+  db: Database.Database,
+  peopleDir: string,
+  aliases: AliasService,
+): Promise<MemorySearchProfile> {
+  const aliasMap = await aliases.listAliases()
+  return buildSearchProfileWithContext(
+    parts,
+    db,
+    aliases,
+    aliasMap,
+    await knownPeopleHandles(peopleDir, aliasMap),
+  )
 }
 
 function buildSearchProfileWithContext(
-  parts: { sender: string | null; source: string | null; body: string },
-  aliasMap: Record<string, string[]>,
+  parts: MemoryQueryParts,
+  db: Database.Database,
+  aliases: AliasService,
+  aliasMap: AliasMap,
   peopleHandles: Iterable<string>,
 ): MemorySearchProfile {
   const sender = parts.sender ? normalizeHandle(parts.sender) : null
-  const senderAliases = resolveAliases(sender, aliasMap)
+  const senderAliases = aliases.resolveAliases(sender, aliasMap)
   const bodyTokens = parts.body ? tokensFromText(parts.body) : []
 
   const known = new Set(Array.from(peopleHandles, normalizeHandle).filter(Boolean))
-  for (const [handle, aliases] of Object.entries(aliasMap)) {
+  for (const [handle, aliasValues] of Object.entries(aliasMap)) {
     known.add(normalizeHandle(handle))
-    for (const alias of aliases) known.add(normalizeHandle(alias))
+    for (const alias of aliasValues) known.add(normalizeHandle(alias))
   }
   const inlineMentions = parts.body
     ? Array.from(parts.body.matchAll(/@([a-z0-9_.-]+)/gi)).map((match) => normalizeHandle(match[1]!))
@@ -351,7 +388,7 @@ function buildSearchProfileWithContext(
   }
   const bodyPeople = Array.from(bodyPeopleSet)
   for (const person of [...bodyPeople]) {
-    for (const alias of resolveAliases(person, aliasMap)) {
+    for (const alias of aliases.resolveAliases(person, aliasMap)) {
       if (!senderSet.has(alias)) bodyPeopleSet.add(alias)
     }
   }
@@ -376,7 +413,7 @@ function buildSearchProfileWithContext(
     .join(" ")
     .toLowerCase()
 
-  const bodyInformative = computeBodyInformativeness(bodyTokens, bodyPeopleResolved)
+  const bodyInformative = computeBodyInformativeness(db, bodyTokens, bodyPeopleResolved)
 
   return {
     normalized,
@@ -404,20 +441,18 @@ function buildSearchProfileWithContext(
   }
 }
 
-// ── semantic queries ───────────────────────────────────────────────────
-
-/**
- * Computes a semantic query signal using prototype embeddings for chatter/recall classification.
- *
- * @param memoryQuery - The search query string.
- * @returns Semantic signal with chatter and recall-intent similarity, or `null`.
- */
-export async function semanticQuerySignal(memoryQuery: string): Promise<SemanticQuerySignal | null> {
-  if (!isVecAvailable() || !embeddingsConfigured() || EMBEDDING_DIMENSIONS !== MEMORY_EMBEDDING_DIMENSIONS) return null
-  const [vector] = await embedTexts([memoryQuery])
+async function semanticQuerySignal(
+  query: string,
+  db: Database.Database,
+  vecAvailable: boolean,
+  embeddings?: EmbeddingsService,
+  signal?: AbortSignal,
+): Promise<SemanticQuerySignal | null> {
+  if (!vecAvailable || !embeddings?.configured() || embeddings.dimensions !== MEMORY_EMBEDDING_DIMENSIONS) return null
+  const [vector] = await embeddings.embedTexts([query], signal)
   if (!vector || vector.length !== MEMORY_EMBEDDING_DIMENSIONS) return null
 
-  const rows = getDb()
+  const rows = db
     .prepare(`
       select p.category as category, v.distance as distance
       from memory_prototype_vec v
@@ -440,6 +475,7 @@ export async function semanticQuerySignal(memoryQuery: string): Promise<Semantic
 
   return { vector, chatterSimilarity, recallIntentSimilarity }
 }
+
 
 /**
  * Determines whether a query should be skipped because it's chatter (e.g. "i love you")
@@ -465,9 +501,9 @@ function buildSearchQuery(profile: MemorySearchProfile): string | null {
   return profile.tokens.map((token) => `"${token.replace(/"/g, '""')}"*`).join(" OR ")
 }
 
-function semanticHitsForQuery(vector: number[], limit: number): MemoryHit[] {
-  if (!isVecAvailable()) return []
-  const rows = getDb()
+function semanticHitsForQuery(db: Database.Database, vecAvailable: boolean, vector: number[], limit: number): MemoryHit[] {
+  if (!vecAvailable) return []
+  const rows = db
     .prepare(`
       select
         c.id as chunkId,
@@ -495,8 +531,14 @@ function semanticHitsForQuery(vector: number[], limit: number): MemoryHit[] {
   }))
 }
 
-function mergeSemanticHits(rows: MemoryHit[], vector: number[], limit: number): MemoryHit[] {
-  const semanticRows = semanticHitsForQuery(vector, Math.max(limit * 16, 64))
+function mergeSemanticHits(
+  db: Database.Database,
+  vecAvailable: boolean,
+  rows: MemoryHit[],
+  vector: number[],
+  limit: number,
+): MemoryHit[] {
+  const semanticRows = semanticHitsForQuery(db, vecAvailable, vector, Math.max(limit * 16, 64))
   if (semanticRows.length === 0) return rows
 
   const byChunkId = new Map<number, MemoryHit>(rows.map((row) => [row.chunkId, { ...row }]))
@@ -517,11 +559,11 @@ function mergeSemanticHits(rows: MemoryHit[], vector: number[], limit: number): 
   return Array.from(byChunkId.values())
 }
 
+
 // ── exact person hits ──────────────────────────────────────────────────
 
-function exactPersonHits(profile: MemorySearchProfile): MemoryHit[] {
+function exactPersonHits(db: Database.Database, profile: MemorySearchProfile): MemoryHit[] {
   if (profile.bodyPeople.length === 0) return []
-  const db = getDb()
   const hits: MemoryHit[] = []
   const seen = new Set<number>()
   const stmt = db.prepare(`
@@ -573,7 +615,9 @@ function isCoolingDown(hit: MemoryHit, cooldowns: Record<number, number>, curren
  * @param semanticSignal - Optional semantic signal for similarity scoring.
  * @returns Deduplicated, scored, and filtered memory hits.
  */
-export async function searchMemory(
+async function searchMemory(
+  db: Database.Database,
+  vecAvailable: boolean,
   profile: MemorySearchProfile,
   cooldowns: Record<number, number>,
   currentTurn: number,
@@ -581,7 +625,6 @@ export async function searchMemory(
   semanticSignal: SemanticQuerySignal | null = null,
   isExplicit = false,
 ): Promise<MemoryHit[]> {
-  const db = getDb()
   const query = buildSearchQuery(profile)
   if (!query) return []
   const rows = db
@@ -606,12 +649,14 @@ export async function searchMemory(
     .all(query, Math.max(limit * 8, limit)) as MemoryHit[]
 
   // Inject exact person hits
-  for (const hit of exactPersonHits(profile)) {
+  for (const hit of exactPersonHits(db, profile)) {
     if (rows.some((row) => row.chunkId === hit.chunkId)) continue
     rows.push(hit)
   }
 
-  const candidateRows = semanticSignal ? mergeSemanticHits(rows, semanticSignal.vector, limit) : rows
+  const candidateRows = semanticSignal
+    ? mergeSemanticHits(db, vecAvailable, rows, semanticSignal.vector, limit)
+    : rows
 
   // Score all hits
   const scored = candidateRows.map((hit) => ({
@@ -707,8 +752,8 @@ export async function searchMemory(
  * @param hit - Memory hit.
  * @returns Formatted source string.
  */
-export function formatMemorySource(hit: MemoryHit): string {
-  const relativePath = path.relative(HOME_DIR, hit.path)
+function formatMemorySource(home: string, hit: MemoryHit): string {
+  const relativePath = path.relative(home, hit.path)
   const pieces = [`[${hit.kind}]`, hit.documentTitle]
   if (hit.headingPath && hit.headingPath !== hit.documentTitle) pieces.push(hit.headingPath)
   pieces.push(relativePath)
@@ -721,15 +766,15 @@ export function formatMemorySource(hit: MemoryHit): string {
  * @param hit - Memory hit.
  * @returns Search result with full chunk text.
  */
-export function toMemorySearchResult(hit: MemoryHit): AuthoredMemorySearchResult {
-  const relativePath = path.relative(path.join(HOME_DIR, "memories"), hit.path).split(path.sep).join("/")
+function toMemorySearchResult(memoriesDir: string, home: string, hit: MemoryHit): AuthoredMemorySearchResult {
+  const relativePath = path.relative(memoriesDir, hit.path).split(path.sep).join("/")
   return {
     id: `memory:${hit.chunkId}`,
     chunkId: hit.chunkId,
     kind: hit.kind,
     uri: `memory://${relativePath}`,
     documentHash: hit.documentHash,
-    source: formatMemorySource(hit),
+    source: formatMemorySource(home, hit),
     title: hit.title,
     headingPath: hit.headingPath,
     content: hit.text,
@@ -744,7 +789,7 @@ export function toMemorySearchResult(hit: MemoryHit): AuthoredMemorySearchResult
  * @param hits - Hits to include.
  * @returns Formatted recall message.
  */
-export function buildMemoryRecallMessage(hits: MemoryHit[]): string {
+function buildMemoryRecallMessage(home: string, hits: MemoryHit[]): string {
   const MEMORY_RECALL_HEADER = "[injected recalled memories]"
   const MEMORY_RECALL_NOTE =
     "Potentially relevant long-term notes. Use only if helpful; trust newer conversation details if anything conflicts."
@@ -752,7 +797,7 @@ export function buildMemoryRecallMessage(hits: MemoryHit[]): string {
   const lines = [MEMORY_RECALL_HEADER, MEMORY_RECALL_NOTE, ""]
 
   for (const hit of hits) {
-    const source = formatMemorySource(hit)
+    const source = formatMemorySource(home, hit)
     const body = normalizeText(hit.text)
     const block = `- ${source}\n  ${body}`
     lines.push(block)
@@ -761,4 +806,27 @@ export function buildMemoryRecallMessage(hits: MemoryHit[]): string {
   return lines.join("\n").trim()
 }
 
-export { isRelevant }
+export function createMemorySearch(deps: MemorySearchDependencies): MemorySearchRuntime {
+  const paths = memoryPaths(deps.home)
+  return {
+    buildSearchProfile: (parts) => buildSearchProfile(parts, deps.db, paths.peopleDir, deps.aliases),
+    semanticQuerySignal: (query, signal) =>
+      semanticQuerySignal(query, deps.db, deps.vecAvailable, deps.embeddings, signal),
+    searchMemory: (profile, cooldowns, currentTurn, limit, semanticSignal = null, isExplicit = false) =>
+      searchMemory(
+        deps.db,
+        deps.vecAvailable,
+        profile,
+        cooldowns,
+        currentTurn,
+        limit,
+        semanticSignal,
+        isExplicit,
+      ),
+    formatMemorySource: (hit) => formatMemorySource(deps.home, hit),
+    toMemorySearchResult: (hit) => toMemorySearchResult(paths.memoriesDir, deps.home, hit),
+    buildMemoryRecallMessage: (hits) => buildMemoryRecallMessage(deps.home, hits),
+    isRelevant,
+    shouldSkipForSemanticChatter,
+  }
+}

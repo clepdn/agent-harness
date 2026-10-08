@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto"
 import type Database from "better-sqlite3"
-import { getDb } from "../db"
 import type { Message } from "../types"
 import type { RuntimeKind } from "./types"
 
@@ -125,16 +124,6 @@ function insertMessage(db: Database.Database, message: Message, source: string, 
   return id
 }
 
-/** Persist every distinct raw message in an active checkpoint without changing model context. */
-export function archiveContextMessages(messages: readonly Message[], source: string, runtimeKind: RuntimeKind = "main"): string[] {
-  const db = getDb()
-  const now = new Date().toISOString()
-  const insert = db.transaction((items: Message[]) => items
-    .filter((message) => !messageText(message).startsWith("[context summary v1]"))
-    .map((message) => insertMessage(db, message, source, now, runtimeKind)))
-  return insert([...messages])
-}
-
 export function contextSummaryId(content: string): string | null {
   return content.match(SUMMARY_ID_PATTERN)?.[1] ?? null
 }
@@ -152,129 +141,6 @@ export function attachContextSummaryId(messages: Message[], summaryId: string): 
       : `${withoutOldId}\n[context-summary-id ${summaryId}]`
     return { ...message, content } as Message
   })
-}
-
-/**
- * Closes an active session into a new provenance node. The previous summary
- * becomes its parent and every newer raw message becomes a direct source.
- */
-export function recordRestContextSnapshot(messages: Message[], note?: string, runtimeKind: RuntimeKind = "main"): {
-  summaryId: string
-  forest: string
-  sourceCount: number
-} {
-  const summaryIndex = messages.findIndex((message) => messageText(message).startsWith(CONTEXT_SUMMARY_HEADER))
-  const priorSummaryContent = summaryIndex >= 0 ? messageText(messages[summaryIndex]!) : null
-  const compactedMessages = messages
-    .filter((message) => true && !messageText(message).startsWith(CONTEXT_SUMMARY_HEADER))
-  const trimmedNote = note?.trim()
-  const summaryText = priorSummaryContent
-    ?? [
-      `The prior session was archived verbatim at ${new Date().toISOString()}.`,
-      trimmedNote ? `Rest note: ${trimmedNote}` : null,
-      `Use context_expand on this summary id to inspect its ${compactedMessages.length} original message(s).`,
-    ].filter(Boolean).join("\n")
-  const summaryId = recordContextCompaction({
-    summaryText,
-    compactedMessages,
-    priorSummaryContent,
-    method: "rest-snapshot",
-    runtimeKind,
-  })
-  const baseForest = priorSummaryContent
-    ?? `${CONTEXT_SUMMARY_HEADER}\n${CONTEXT_SUMMARY_NOTE}\n[segments]\n${summaryText}`
-  const forestMessage = attachContextSummaryId([{ role: "user", content: baseForest } as Message], summaryId)[0]!
-
-  return {
-    summaryId,
-    forest: messageText(forestMessage),
-    sourceCount: compactedMessages.length,
-  }
-}
-
-/** Atomically records one summary node, its exact source messages, and its prior-summary edge. */
-export function recordContextCompaction(input: {
-  summaryText: string
-  compactedMessages: Message[]
-  priorSummaryContent?: string | null
-  method: string
-  runtimeKind?: RuntimeKind
-}): string {
-  const db = getDb()
-  const runtimeKind = input.runtimeKind ?? "main"
-  const id = `sum_${randomUUID()}`
-  const now = new Date().toISOString()
-  const candidateParentId = input.priorSummaryContent ? contextSummaryId(input.priorSummaryContent) : null
-  const parentId = candidateParentId && db.prepare("select 1 from context_summaries where id = ? and runtime_kind = ?").get(candidateParentId, runtimeKind)
-    ? candidateParentId
-    : null
-
-  db.transaction(() => {
-    db.prepare(`
-      insert into context_summaries (id, runtime_kind, summary_text, method, created_at)
-      values (?, ?, ?, ?, ?)
-    `).run(id, runtimeKind, input.summaryText, input.method, now)
-
-    if (parentId) {
-      db.prepare(`
-        insert into context_summary_parents (summary_id, parent_id, ordinal)
-        values (?, ?, 0)
-      `).run(id, parentId)
-    }
-
-    const sources = parentId || !input.priorSummaryContent
-      ? input.compactedMessages
-      : [{ role: "user", content: input.priorSummaryContent } as Message, ...input.compactedMessages]
-    const link = db.prepare(`
-      insert into context_summary_messages (summary_id, message_id, ordinal)
-      values (?, ?, ?)
-    `)
-    sources.forEach((message, ordinal) => {
-      const messageId = insertMessage(db, message, `compaction:${input.method}`, now, runtimeKind)
-      link.run(id, messageId, ordinal)
-    })
-  })()
-
-  return id
-}
-
-export function grepContext(query: string, limit?: number, summaryId?: string, runtimeKind: RuntimeKind = "main"): ContextSearchResult[] {
-  const trimmed = query.trim()
-  if (!trimmed) return []
-  const db = getDb()
-  const cappedLimit = boundedInteger(limit, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT)
-  const scopeSql = summaryId
-    ? `and exists (
-        with recursive tree(id) as (
-          select ?
-          union
-          select p.parent_id from context_summary_parents p join tree on p.summary_id = tree.id
-        )
-        select 1 from context_summary_messages sm join tree on tree.id = sm.summary_id
-        where sm.message_id = m.id
-      )`
-    : ""
-  const rows = db.prepare(`
-    select m.*
-    from context_messages m
-    where m.runtime_kind = ?
-      and instr(lower(m.content_text), lower(?)) > 0
-    ${scopeSql}
-    order by m.first_seen_at desc
-    limit ?
-  `).all(...(summaryId ? [runtimeKind, trimmed, summaryId, cappedLimit] : [runtimeKind, trimmed, cappedLimit])) as ContextMessageRow[]
-
-  const summariesFor = db.prepare(`
-    select summary_id from context_summary_messages where message_id = ? order by summary_id
-  `)
-  return rows.map((row) => ({
-    messageId: row.id,
-    role: row.role,
-    content: row.content_text,
-    firstSeenAt: row.first_seen_at,
-    source: row.source,
-    summaryIds: (summariesFor.all(row.id) as Array<{ summary_id: string }>).map((item) => item.summary_id),
-  }))
 }
 
 function collectSummaryMessageIds(db: Database.Database, summaryId: string, seen = new Set<string>()): string[] {
@@ -364,85 +230,125 @@ function collectSummaryManifest(
 }
 
 /** Describe a known summary node before spending context on verbatim expansion. */
-export function describeContextSummary(summaryId: string, tokenCap?: number, runtimeKind: RuntimeKind = "main"): ContextSummaryDescription | null {
-  const db = getDb()
-  const summary = db.prepare(`
-    select id, summary_text, method, created_at from context_summaries where id = ? and runtime_kind = ?
-  `).get(summaryId, runtimeKind) as { id: string; summary_text: string; method: string; created_at: string } | undefined
-  if (!summary) return null
-
-  const resolvedTokenCap = Number.isFinite(tokenCap) && Number(tokenCap) > 0
-    ? Math.min(Math.floor(Number(tokenCap)), 1_000_000)
-    : 8_000
-  const parentIds = (db.prepare(`
-    select parent_id from context_summary_parents where summary_id = ? order by ordinal
-  `).all(summaryId) as Array<{ parent_id: string }>).map((row) => row.parent_id)
-  const childIds = (db.prepare(`
-    select summary_id from context_summary_parents where parent_id = ? order by summary_id
-  `).all(summaryId) as Array<{ summary_id: string }>).map((row) => row.summary_id)
-  const directIds = (db.prepare(`
-    select message_id from context_summary_messages where summary_id = ? order by ordinal
-  `).all(summaryId) as Array<{ message_id: string }>).map((row) => row.message_id)
-  const expandedIds = collectSummaryMessageIds(db, summaryId)
-  const manifest = collectSummaryManifest(db, summaryId, resolvedTokenCap)
-
-  return {
-    id: summary.id,
-    type: "summary",
-    summary: {
-      content: summary.summary_text,
-      method: summary.method,
-      createdAt: summary.created_at,
-      parentIds,
-      childIds,
-      provenanceDepth: Math.max(0, ...manifest.map((node) => node.depthFromRoot)),
-      provenanceNodeCount: manifest.length,
-      directSources: contextSourceStats(db, directIds),
-      expandedSources: contextSourceStats(db, expandedIds),
-      manifest,
-    },
-    expansion: {
-      tool: "context_expand",
-      totalMessages: expandedIds.length,
-      defaultPageSize: DEFAULT_EXPAND_LIMIT,
-      maxPageSize: MAX_EXPAND_LIMIT,
-      estimatedPages: Math.ceil(expandedIds.length / DEFAULT_EXPAND_LIMIT),
-      tokenCap: resolvedTokenCap,
-    },
-  }
+export interface ContextStoreService {
+  archiveContextMessages(messages: readonly Message[], source: string, runtimeKind?: RuntimeKind): string[]
+  recordContextCompaction(input: { summaryText: string; compactedMessages: Message[]; priorSummaryContent?: string | null; method: string; runtimeKind?: RuntimeKind }): string
+  recordRestContextSnapshot(messages: Message[], note?: string, runtimeKind?: RuntimeKind): { summaryId: string; forest: string; sourceCount: number }
+  grepContext(query: string, limit?: number, summaryId?: string, runtimeKind?: RuntimeKind): ContextSearchResult[]
+  describeContextSummary(summaryId: string, tokenCap?: number, runtimeKind?: RuntimeKind): ContextSummaryDescription | null
+  expandContextSummary(summaryId: string, offset?: number, limit?: number, runtimeKind?: RuntimeKind): ContextExpansion | null
 }
 
-export function expandContextSummary(summaryId: string, offset?: number, limit?: number, runtimeKind: RuntimeKind = "main"): ContextExpansion | null {
-  const db = getDb()
-  const summary = db.prepare(`
-    select id, summary_text, method, created_at from context_summaries where id = ? and runtime_kind = ?
-  `).get(summaryId, runtimeKind) as { id: string; summary_text: string; method: string; created_at: string } | undefined
-  if (!summary) return null
-
-  const allIds = collectSummaryMessageIds(db, summaryId)
-  const safeOffset = typeof offset === "number" && Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0
-  const cappedLimit = boundedInteger(limit, DEFAULT_EXPAND_LIMIT, MAX_EXPAND_LIMIT)
-  const selectedIds = allIds.slice(safeOffset, safeOffset + cappedLimit)
-  const getMessage = db.prepare(`
-    select * from context_messages where id = ?
-  `)
-  const messages = selectedIds.flatMap((id) => {
-    const row = getMessage.get(id) as ContextMessageRow | undefined
-    if (!row) return []
-    let content: unknown = row.content_text
-    try { content = JSON.parse(row.content_json) }
-    catch { /* retain searchable text if an old row is malformed */ }
-    return [{ id: row.id, role: row.role, content, firstSeenAt: row.first_seen_at, source: row.source }]
-  })
-
-  return {
-    summaryId: summary.id,
-    summary: summary.summary_text,
-    method: summary.method,
-    createdAt: summary.created_at,
-    totalMessages: allIds.length,
-    offset: safeOffset,
-    limit: cappedLimit,
-    messages,
+export function createContextStore(db: Database.Database): ContextStoreService {
+  const recordContextCompaction = (input: { summaryText: string; compactedMessages: Message[]; priorSummaryContent?: string | null; method: string; runtimeKind?: RuntimeKind }): string => {
+    const runtimeKind = input.runtimeKind ?? "main"
+    const id = `sum_${randomUUID()}`
+    const now = new Date().toISOString()
+    const candidateParentId = input.priorSummaryContent ? contextSummaryId(input.priorSummaryContent) : null
+    const parentId = candidateParentId && db.prepare("select 1 from context_summaries where id = ? and runtime_kind = ?").get(candidateParentId, runtimeKind)
+      ? candidateParentId
+      : null
+    db.transaction(() => {
+      db.prepare("insert into context_summaries (id, runtime_kind, summary_text, method, created_at) values (?, ?, ?, ?, ?)")
+        .run(id, runtimeKind, input.summaryText, input.method, now)
+      if (parentId) db.prepare("insert into context_summary_parents (summary_id, parent_id, ordinal) values (?, ?, 0)").run(id, parentId)
+      const sources = parentId || !input.priorSummaryContent ? input.compactedMessages : [{ role: "user", content: input.priorSummaryContent } as Message, ...input.compactedMessages]
+      const link = db.prepare("insert into context_summary_messages (summary_id, message_id, ordinal) values (?, ?, ?)")
+      sources.forEach((message, ordinal) => {
+        const messageId = insertMessage(db, message, `compaction:${input.method}`, now, runtimeKind)
+        link.run(id, messageId, ordinal)
+      })
+    })()
+    return id
   }
+  const service: ContextStoreService = {
+    archiveContextMessages(messages, source, runtimeKind = "main") {
+      const now = new Date().toISOString()
+      const insert = db.transaction((items: Message[]) => items
+        .filter((message) => !messageText(message).startsWith("[context summary v1]"))
+        .map((message) => insertMessage(db, message, source, now, runtimeKind)))
+      return insert([...messages])
+    },
+    recordContextCompaction,
+    recordRestContextSnapshot(messages, note, runtimeKind = "main") {
+      const summaryIndex = messages.findIndex((message) => messageText(message).startsWith(CONTEXT_SUMMARY_HEADER))
+      const priorSummaryContent = summaryIndex >= 0 ? messageText(messages[summaryIndex]!) : null
+      const compactedMessages = messages.filter((message) => !messageText(message).startsWith(CONTEXT_SUMMARY_HEADER))
+      const trimmedNote = note?.trim()
+      const summaryText = priorSummaryContent ?? [
+        `The prior session was archived verbatim at ${new Date().toISOString()}.`,
+        trimmedNote ? `Rest note: ${trimmedNote}` : null,
+        `Use context_expand on this summary id to inspect its ${compactedMessages.length} original message(s).`,
+      ].filter(Boolean).join("\n")
+      const summaryId = recordContextCompaction({ summaryText, compactedMessages, priorSummaryContent, method: "rest-snapshot", runtimeKind })
+      const baseForest = priorSummaryContent ?? `${CONTEXT_SUMMARY_HEADER}\n${CONTEXT_SUMMARY_NOTE}\n[segments]\n${summaryText}`
+      const forestMessage = attachContextSummaryId([{ role: "user", content: baseForest } as Message], summaryId)[0]!
+      return { summaryId, forest: messageText(forestMessage), sourceCount: compactedMessages.length }
+    },
+    grepContext(query, limit, summaryId, runtimeKind = "main") {
+      const trimmed = query.trim()
+      if (!trimmed) return []
+      const cappedLimit = boundedInteger(limit, DEFAULT_SEARCH_LIMIT, MAX_SEARCH_LIMIT)
+      const scopeSql = summaryId ? `and exists (
+        with recursive tree(id) as (
+          select ?
+          union
+          select p.parent_id from context_summary_parents p join tree on p.summary_id = tree.id
+        )
+        select 1 from context_summary_messages sm join tree on tree.id = sm.summary_id
+        where sm.message_id = m.id
+      )` : ""
+      const rows = db.prepare(`select m.* from context_messages m
+        where m.runtime_kind = ? and instr(lower(m.content_text), lower(?)) > 0
+        ${scopeSql} order by m.first_seen_at desc limit ?`)
+        .all(...(summaryId ? [runtimeKind, trimmed, summaryId, cappedLimit] : [runtimeKind, trimmed, cappedLimit])) as ContextMessageRow[]
+      const summariesFor = db.prepare("select summary_id from context_summary_messages where message_id = ? order by summary_id")
+      return rows.map((row) => ({
+        messageId: row.id, role: row.role, content: row.content_text, firstSeenAt: row.first_seen_at, source: row.source,
+        summaryIds: (summariesFor.all(row.id) as Array<{ summary_id: string }>).map((item) => item.summary_id),
+      }))
+    },
+    describeContextSummary(summaryId, tokenCap, runtimeKind = "main") {
+      const summary = db.prepare("select id, summary_text, method, created_at from context_summaries where id = ? and runtime_kind = ?")
+        .get(summaryId, runtimeKind) as { id: string; summary_text: string; method: string; created_at: string } | undefined
+      if (!summary) return null
+      const resolvedTokenCap = Number.isFinite(tokenCap) && Number(tokenCap) > 0 ? Math.min(Math.floor(Number(tokenCap)), 1_000_000) : 8_000
+      const parentIds = (db.prepare("select parent_id from context_summary_parents where summary_id = ? order by ordinal").all(summaryId) as Array<{ parent_id: string }>).map((row) => row.parent_id)
+      const childIds = (db.prepare("select summary_id from context_summary_parents where parent_id = ? order by summary_id").all(summaryId) as Array<{ summary_id: string }>).map((row) => row.summary_id)
+      const directIds = (db.prepare("select message_id from context_summary_messages where summary_id = ? order by ordinal").all(summaryId) as Array<{ message_id: string }>).map((row) => row.message_id)
+      const expandedIds = collectSummaryMessageIds(db, summaryId)
+      const manifest = collectSummaryManifest(db, summaryId, resolvedTokenCap)
+      return {
+        id: summary.id, type: "summary",
+        summary: {
+          content: summary.summary_text, method: summary.method, createdAt: summary.created_at, parentIds, childIds,
+          provenanceDepth: Math.max(0, ...manifest.map((node) => node.depthFromRoot)), provenanceNodeCount: manifest.length,
+          directSources: contextSourceStats(db, directIds), expandedSources: contextSourceStats(db, expandedIds), manifest,
+        },
+        expansion: {
+          tool: "context_expand", totalMessages: expandedIds.length, defaultPageSize: DEFAULT_EXPAND_LIMIT,
+          maxPageSize: MAX_EXPAND_LIMIT, estimatedPages: Math.ceil(expandedIds.length / DEFAULT_EXPAND_LIMIT), tokenCap: resolvedTokenCap,
+        },
+      }
+    },
+    expandContextSummary(summaryId, offset, limit, runtimeKind = "main") {
+      const summary = db.prepare("select id, summary_text, method, created_at from context_summaries where id = ? and runtime_kind = ?")
+        .get(summaryId, runtimeKind) as { id: string; summary_text: string; method: string; created_at: string } | undefined
+      if (!summary) return null
+      const allIds = collectSummaryMessageIds(db, summaryId)
+      const safeOffset = typeof offset === "number" && Number.isFinite(offset) && offset > 0 ? Math.floor(offset) : 0
+      const cappedLimit = boundedInteger(limit, DEFAULT_EXPAND_LIMIT, MAX_EXPAND_LIMIT)
+      const selectedIds = allIds.slice(safeOffset, safeOffset + cappedLimit)
+      const getMessage = db.prepare("select * from context_messages where id = ?")
+      const messages = selectedIds.flatMap((id) => {
+        const row = getMessage.get(id) as ContextMessageRow | undefined
+        if (!row) return []
+        let content: unknown = row.content_text
+        try { content = JSON.parse(row.content_json) } catch { /* retain searchable text if an old row is malformed */ }
+        return [{ id: row.id, role: row.role, content, firstSeenAt: row.first_seen_at, source: row.source }]
+      })
+      return { summaryId: summary.id, summary: summary.summary_text, method: summary.method, createdAt: summary.created_at, totalMessages: allIds.length, offset: safeOffset, limit: cappedLimit, messages }
+    },
+  }
+  return service
 }

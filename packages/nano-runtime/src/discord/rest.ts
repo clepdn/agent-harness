@@ -6,6 +6,7 @@
 
 import { REST, Routes } from "discord.js"
 import { config } from "../config"
+import { asString } from "./parse"
 
 /**
  * Returns the configured Discord bot token.
@@ -143,7 +144,7 @@ export async function withDiscordRestRetry<T>(label: string, fn: () => Promise<T
  */
 export async function getBotUserId(rest: REST): Promise<string> {
   const me = (await withDiscordRestRetry("get current user", () => rest.get(Routes.user("@me")))) as { id?: unknown }
-  const id = (await import("./parse")).asString(me?.id)
+  const id = asString(me?.id)
   if (!id) throw new Error("failed to resolve bot user id")
   return id
 }

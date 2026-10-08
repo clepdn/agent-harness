@@ -1,11 +1,12 @@
 import fs from "fs/promises"
 import path from "path"
 import { Context } from "../llm"
+import type { ModelProviderResolver } from "../model-api"
 import type { AssistantMessage, Model, TextContent, ToolCall } from "../llm"
-import { NANO_HOME as HOME_DIR } from "../agent-config"
-import { readFrontendSoul } from "../frontend-soul"
 import type { Message } from "../types"
 import type { RuntimeKind } from "./types"
+import type { ContextStoreService } from "./context-store"
+import { attachContextSummaryId } from "./context-store"
 import {
   AGENT_NAME,
   FALLBACK_CONTEXT_MARGIN,
@@ -234,22 +235,29 @@ async function latestJournalEntry(journalDir: string): Promise<{ date: string; c
   return { date: latest.replace(/\.md$/, ""), content }
 }
 
+export interface SummaryContextDependencies {
+  readonly home: string
+  readonly readFrontendSoul: () => Promise<string>
+}
+
 /**
  * Assembles the agent's grounding context for the summarizer: soul, core
  * memories, and today's journal (or most recent if today's isn't written yet).
  */
-export async function loadAgentSummaryContext(runtimeKind: RuntimeKind = "main"): Promise<string | null> {
-  const soulPath = path.join(HOME_DIR, "soul.md")
-  const corePath = path.join(HOME_DIR, "memories", "core.md")
-  const journalDir = path.join(HOME_DIR, "memories", "journal")
+export async function loadAgentSummaryContext(
+  dependencies: SummaryContextDependencies,
+  runtimeKind: RuntimeKind = "main",
+): Promise<string | null> {
+  const soulPath = path.join(dependencies.home, "soul.md")
+  const corePath = path.join(dependencies.home, "memories", "core.md")
+  const journalDir = path.join(dependencies.home, "memories", "journal")
   const today = localDateStamp()
 
   const [soul, core, todayJournal] = await Promise.all([
-    runtimeKind === "frontend" ? readFrontendSoul() : readTextFile(soulPath),
+    runtimeKind === "frontend" ? dependencies.readFrontendSoul() : readTextFile(soulPath),
     readTextFile(corePath),
     readTextFile(path.join(journalDir, `${today}.md`)),
   ])
-
   let journal = todayJournal
   let journalLabel = `today's journal (${today})`
   if (!journal) {
@@ -332,19 +340,27 @@ export function buildConversationSummaryContent(
     `${handoff}\n${summaryText}`
 }
 
+export interface SummaryOptions {
+  recentMinKeep?: number
+  recentMaxKeep?: number
+  tailCharBudget?: number
+  maxTranscriptChars?: number
+  agentContext?: string | null
+  /** Small-model summary that the primary model must journal on its next turn. */
+  primaryHandoff?: boolean
+  runtimeKind?: RuntimeKind
+}
+
+interface SummaryRuntimeOptions extends SummaryOptions {
+  providerResolver?: ModelProviderResolver
+  contextStore?: ContextStoreService
+}
+
 export async function summarizeConversationViaLLM(
   messages: readonly Message[],
   model: Model,
   apiKey: string | undefined,
-  options: {
-    recentMinKeep?: number
-    recentMaxKeep?: number
-    tailCharBudget?: number
-    maxTranscriptChars?: number
-    agentContext?: string | null
-    /** Small-model summary that the primary model must journal on its next turn. */
-    primaryHandoff?: boolean
-  } = {},
+  options: SummaryRuntimeOptions = {},
 ): Promise<Message[] | null> {
   const recentMinKeep = Math.max(2, options.recentMinKeep ?? 6)
   const recentMaxKeep = Math.max(recentMinKeep, options.recentMaxKeep ?? 40)
@@ -377,6 +393,7 @@ export async function summarizeConversationViaLLM(
 
   const summaryContext = new Context({
     model,
+    providerResolver: options.providerResolver,
     apiKey,
     systemPrompt: systemContent,
     items: [{ role: "user", content: transcript, timestamp: Date.now() }],
@@ -409,7 +426,17 @@ export async function summarizeConversationViaLLM(
       options.primaryHandoff === true,
     )
 
-    const summaryMessage = { role: "user", content: summaryContent, timestamp: Date.now() } as Message
+    let summaryMessage = { role: "user", content: summaryContent, timestamp: Date.now() } as Message
+    if (options.contextStore) {
+      const summaryId = options.contextStore.recordContextCompaction({
+        summaryText: summaryContent,
+        compactedMessages: middle,
+        priorSummaryContent: priorSummaryText,
+        method: "llm",
+        runtimeKind: options.runtimeKind,
+      })
+      summaryMessage = attachContextSummaryId([summaryMessage], summaryId)[0]!
+    }
     // A primary handoff must be the newest message on its first actual-model
     // wake. Once the primary responds, its assistant message naturally follows
     // this block and makes the one-time instruction self-expiring.
@@ -436,6 +463,7 @@ async function summarizeToolResult(
   toolName: string,
   model: Model,
   apiKey: string | undefined,
+  providerResolver?: ModelProviderResolver,
 ): Promise<string | null> {
   const systemPrompt =
     `You are summarizing the output of a "${toolName}" tool call from an agent's conversation. ` +
@@ -445,6 +473,7 @@ async function summarizeToolResult(
 
   const ctx = new Context({
     model,
+    providerResolver,
     apiKey,
     systemPrompt,
     items: [{ role: "user", content, timestamp: Date.now() }],
@@ -472,6 +501,7 @@ type ToolResultSummarizer = (
   toolName: string,
   model: Model,
   apiKey: string | undefined,
+  providerResolver?: ModelProviderResolver,
 ) => Promise<string | null>
 
 /**
@@ -486,6 +516,7 @@ export async function proactiveCompaction(
   turnAge: number,
   minChars: number,
   summarize: ToolResultSummarizer = summarizeToolResult,
+  providerResolver?: ModelProviderResolver,
 ): Promise<{ messages: Message[]; compacted: number; attempted: number }> {
   let assistantsRemaining = messages.reduce((count, message) => count + (message.role === "assistant" ? 1 : 0), 0)
   const result = [...messages]
@@ -507,7 +538,7 @@ export async function proactiveCompaction(
       continue
     }
 
-    const summary = await summarize(content, msg.toolName || "unknown", model, apiKey)
+    const summary = await summarize(content, msg.toolName || "unknown", model, apiKey, providerResolver)
     result[i] = summary
       ? {
           ...msg,

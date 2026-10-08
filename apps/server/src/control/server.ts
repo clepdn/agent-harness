@@ -1,517 +1,242 @@
-import Fastify from "fastify"
-import type { FastifyInstance, FastifyReply } from "fastify"
-import fastifyStatic from "@fastify/static"
-import { existsSync } from "node:fs"
-import { dirname, join } from "node:path"
-import { fileURLToPath } from "node:url"
-import { setWebUiCacheHeaders } from "./static-ui"
-import {
-  getAgent,
-  listAgents,
-  listMirroredEvents,
-  listRecentCompactions,
-  recordWorkerEvent,
-  updateAgentStatus,
-} from "./db"
-import type { ControlCommand, UserMessage, WorkerEvent } from "@nano/protocol"
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify"
+import { defineService, type Plugin, type PluginBus } from "@nano/plugins"
+import { nanoOperations, nanoRpcAuth, nanoStreams, type RpcAuthService } from "@nano/protocol/rpc"
+import { controlAgentCompactions, controlAgentEvents, controlAgentOverview, controlAgentStatus, controlAgentStream, controlAgentsList, controlClientConnect, controlClientDisconnect, controlClientStatus, controlCron, controlDiscordChannels, controlDiscordMessages, controlEnqueue, controlShutdown, type OperationDescriptor, type OperationOutput, type StreamDescriptor } from "@nano/protocol"
+import type { JsonValue } from "@nano/protocol"
+import { authenticateRpcRequest, invokeRpcOperation, prepareRpcStream, registerRpcTransport, rpcErrorStatus, rpcErrorValue, type PreparedRpcStream, type RpcGatewayOptions, type RpcIdentity } from "@nano/runtime/rpc-gateway"
+import { CONTROL_AGENTS, CONTROL_STORE } from "./plugins"
+import { CONTROL_STATIC_UI, type ControlStaticUi } from "./static-ui"
+import { ControlStore } from "./db"
 
-const SRC_DIR = dirname(fileURLToPath(import.meta.url))
-const WEB_DIST_DIR = join(SRC_DIR, "..", "..", "..", "web", "dist")
+export type ControlHttpOptions = {
+  staticUi?: boolean
+  maxBodyBytes?: number
+  maxFrameBytes?: number
+}
 
-function parseJsonOrText(text: string): unknown {
+const requestIdentities = new WeakMap<FastifyRequest, RpcIdentity>()
+
+function rpcRouteError(reply: FastifyReply, error: unknown, fallback = 502) {
+  const rpcError = rpcErrorValue(error)
+  return reply.code(rpcError.code === "INTERNAL" ? fallback : rpcErrorStatus(error)).send({ error: rpcError.message })
+}
+
+function failStream(reply: FastifyReply, error: unknown) {
+  if (!reply.raw.destroyed) {
+    reply.raw.write(`event: error\ndata: ${JSON.stringify({ error: rpcErrorValue(error).message })}\n\n`)
+    reply.raw.end()
+  }
+}
+
+async function authenticateLegacy(request: FastifyRequest, reply: FastifyReply, auth: RpcAuthService): Promise<boolean> {
   try {
-    return JSON.parse(text)
-  } catch {
-    return text
+    requestIdentities.set(request, await authenticateRpcRequest(request, auth))
+    return true
+  } catch (error) {
+    await rpcRouteError(reply, error, 401)
+    return false
   }
 }
 
-async function fetchWorkerJson(agent: { baseUrl: string }, path: string, init: RequestInit = {}): Promise<unknown> {
-  const res = await fetch(`${agent.baseUrl}${path}`, {
-    ...init,
-    headers: {
-      ...(init.body ? { "content-type": "application/json" } : {}),
-      ...(init.headers ?? {}),
-    },
-    signal: init.signal ?? AbortSignal.timeout(15_000),
+function installLegacyAuth(app: FastifyInstance, auth: RpcAuthService): void {
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.method === "OPTIONS" || request.url.startsWith("/rpc/")) return
+    if (!await authenticateLegacy(request, reply, auth)) return reply
   })
-  const text = await res.text()
-  const data = parseJsonOrText(text)
-  if (!res.ok) {
-    const detail = typeof data === "object" && data && "error" in data ? String((data as { error: unknown }).error) : text
-    throw new Error(detail || `${res.status} ${res.statusText}`)
-  }
-  return data
 }
 
-function looksLikeWorkerEvent(value: unknown): value is WorkerEvent {
-  if (!value || typeof value !== "object") return false
-  const event = value as Partial<WorkerEvent>
-  return (
-    typeof event.id === "string" &&
-    typeof event.agentId === "string" &&
-    typeof event.seq === "number" &&
-    typeof event.type === "string" &&
-    typeof event.createdAt === "string"
-  )
+function requireAgent(store: ControlStore, configuredAgentIds: ReadonlySet<string>, id: string): boolean {
+  return configuredAgentIds.has(id) && store.getAgent(id) !== null
 }
 
-function normalizeWorkerEvent(event: WorkerEvent, agentId?: string): WorkerEvent {
-  if (!agentId || event.agentId === agentId) return event
-  return { ...event, agentId }
-}
-
-function mirrorWorkerEvent(raw: unknown, agentId?: string): void {
-  if (!looksLikeWorkerEvent(raw)) return
-  recordWorkerEvent(normalizeWorkerEvent(raw, agentId))
-}
-
-function mirrorWorkerEvents(raw: unknown, agentId?: string): void {
-  if (!raw || typeof raw !== "object" || !("events" in raw)) return
-  const events = (raw as { events?: unknown }).events
-  if (!Array.isArray(events)) return
-  for (const event of events) mirrorWorkerEvent(event, agentId)
-}
-
-export function compactWorkerEventForChat(raw: unknown): WorkerEvent | null {
-  if (!looksLikeWorkerEvent(raw)) return null
-  const payload = raw.payload && typeof raw.payload === "object" ? (raw.payload as Record<string, unknown>) : {}
-
-  if (raw.type === "conversation.started" || raw.type === "conversation.ended") return raw
-
-  if (raw.type === "stream.event") {
-    const type = typeof payload.type === "string" ? payload.type : ""
-    if (type !== "user") return null
-    return {
-      ...raw,
-      payload: {
-        type,
-        source: payload.source,
-        text: payload.text,
-        triggeredAt: payload.triggeredAt,
-        clientId: payload.clientId,
-      },
-    }
-  }
-
-  if (raw.type !== "conversation.message") return null
-
-  const role = typeof payload.role === "string" ? payload.role : ""
-  const content = typeof payload.content === "string" ? payload.content : ""
-  const toolCalls = role === "assistant" && Array.isArray(payload.toolCalls) ? payload.toolCalls : []
-  if (!content.trim() && toolCalls.length === 0) return null
-  if (role === "user" && content.trim().startsWith("[wake]")) return null
-  if (role === "user" && content.trim().startsWith("[incoming")) return null
-  if (role !== "assistant" && role !== "tool" && role !== "toolResult" && role !== "user") return null
-
-  const isToolResult = role === "tool" || role === "toolResult"
-
-  return {
-    ...raw,
-    payload: {
-      role,
-      content: isToolResult ? compactText(content, 2400) : content,
-      ...(toolCalls.length > 0 ? { toolCalls } : {}),
-      ...(isToolResult && typeof payload.toolCallId === "string" ? { toolCallId: payload.toolCallId } : {}),
-      createdAt: payload.createdAt,
-    },
-  }
-}
-
-function compactText(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text
-  return `${text.slice(0, maxChars).trimEnd()}\n\n... truncated for the control panel ...`
-}
-
-export function compactEventsForChat(events: unknown[]): WorkerEvent[] {
-  const compacted: WorkerEvent[] = []
-  for (const event of events) {
-    const compact = compactWorkerEventForChat(event)
-    if (compact) compacted.push(compact)
-  }
-  return compacted
-}
-
-function splitSseBlocks(buffer: string): { blocks: string[]; rest: string } {
-  const normalized = buffer.replace(/\r\n/g, "\n")
-  const parts = normalized.split("\n\n")
-  const rest = parts.pop() ?? ""
-  return { blocks: parts, rest }
-}
-
-function mirrorSseBlock(block: string, agentId?: string): void {
-  const dataLines = block
-    .split("\n")
-    .filter((line) => line.startsWith("data:"))
-    .map((line) => line.slice(5).trimStart())
-  if (dataLines.length === 0) return
-
-  try {
-    mirrorWorkerEvent(JSON.parse(dataLines.join("\n")), agentId)
-  } catch {}
-}
-
-async function proxyWorkerStream(
-  agentId: string,
-  reply: FastifyReply,
-  afterSeq: number,
-  configuredAgentIds?: ReadonlySet<string>,
-): Promise<void> {
-  const agent = configuredAgentIds && !configuredAgentIds.has(agentId) ? null : getAgent(agentId)
-  if (!agent) {
-    reply.code(404).send({ error: "agent not found" })
-    return
-  }
-
-  reply.hijack()
-
-  const downstream = reply.raw
-  downstream.writeHead(200, {
-    "content-type": "text/event-stream",
-    "cache-control": "no-cache",
-    connection: "keep-alive",
-    "x-accel-buffering": "no",
-  })
-  downstream.write(":ok\n\n")
-
-  let res: Response
+async function routeOperation<D extends OperationDescriptor>(gateway: RpcGatewayOptions, request: FastifyRequest, reply: FastifyReply, descriptor: D, input: unknown): Promise<OperationOutput<D> | FastifyReply | undefined> {
   const controller = new AbortController()
-  downstream.on("close", () => controller.abort())
+  const onAborted = () => controller.abort()
+  const onClose = () => { if (!reply.raw.writableEnded) controller.abort() }
+  request.raw.once("aborted", onAborted)
+  reply.raw.once("close", onClose)
   try {
-    res = await fetch(`${agent.baseUrl}/awp/stream?after_seq=${afterSeq}`, {
-      signal: controller.signal,
-    })
-  } catch (err) {
-    downstream.write(`event: error\ndata: ${JSON.stringify({ error: err instanceof Error ? err.message : String(err) })}\n\n`)
-    downstream.end()
-    return
+    return await invokeRpcOperation(gateway, descriptor, input, request, controller.signal, requestIdentities.get(request))
+  } catch (error) {
+    return rpcRouteError(reply, error)
+  } finally {
+    request.raw.off("aborted", onAborted)
+    reply.raw.off("close", onClose)
   }
+}
 
-  if (!res.ok || !res.body) {
-    downstream.write(`event: error\ndata: ${JSON.stringify({ error: `${res.status} ${res.statusText}` })}\n\n`)
-    downstream.end()
-    return
-  }
-
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ""
-
+async function routeStream<D extends StreamDescriptor>(gateway: RpcGatewayOptions, request: FastifyRequest, reply: FastifyReply, descriptor: D, input: unknown): Promise<void | FastifyReply> {
+  let prepared: PreparedRpcStream<D>
   try {
-    while (!downstream.destroyed) {
-      const { done, value } = await reader.read()
-      if (done) break
-      const chunk = decoder.decode(value, { stream: true })
-      downstream.write(chunk)
-      buffer += chunk
-      const parsed = splitSseBlocks(buffer)
-      buffer = parsed.rest
-      for (const block of parsed.blocks) mirrorSseBlock(block, agentId)
+    prepared = await prepareRpcStream(gateway, descriptor, input, request, requestIdentities.get(request))
+  } catch (error) {
+    return rpcRouteError(reply, error)
+  }
+  reply.hijack()
+  const response = reply.raw
+  response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" })
+  response.write(":ok\n\n")
+  const controller = new AbortController()
+  const onAborted = () => controller.abort()
+  const onClose = () => controller.abort()
+  request.raw.once("aborted", onAborted)
+  response.once("close", onClose)
+  try {
+    for await (const event of prepared.run(controller.signal)) {
+      if (response.destroyed) break
+      response.write(`data: ${JSON.stringify(event)}\n\n`)
     }
-  } catch (err) {
-    if (!downstream.destroyed && !(err instanceof Error && err.name === "AbortError")) {
-      downstream.write(`event: error\ndata: ${JSON.stringify({ error: err instanceof Error ? err.message : String(err) })}\n\n`)
-    }
+  } catch (error) {
+    if (!controller.signal.aborted && !response.destroyed) failStream(reply, error)
   } finally {
     controller.abort()
-    reader.releaseLock()
-    if (!downstream.destroyed) downstream.end()
+    request.raw.off("aborted", onAborted)
+    response.off("close", onClose)
+    if (!response.writableEnded && !response.destroyed) response.end()
   }
 }
-
-function chatEventFromBody(agentId: string, body: unknown): UserMessage | null {
-  if (!body || typeof body !== "object") return null
-  const b = body as Record<string, unknown>
-  const content = typeof b.content === "string" ? b.content.trim() : ""
-  if (!content) return null
-  return {
-    source: "chat",
-    triggeredAt: new Date().toISOString(),
-    content,
-    raw: body,
-    clientId: typeof b.clientId === "string" ? b.clientId : `control-${agentId}`,
-  }
-}
-
 export function registerControlRoutes(
   app: FastifyInstance,
-  options: {
-    staticUi?: boolean
-    configuredAgentIds?: ReadonlySet<string>
-    stopLocalAgent?: (id: string) => Promise<boolean>
-  } = {},
-) {
-  const findAgent = (id: string) => options.configuredAgentIds && !options.configuredAgentIds.has(id) ? null : getAgent(id)
-  if (options.staticUi !== false && existsSync(WEB_DIST_DIR)) {
-    app.register(fastifyStatic, {
-      root: WEB_DIST_DIR,
-      prefix: "/ui/",
-      index: "index.html",
-      cacheControl: false,
-      setHeaders: setWebUiCacheHeaders,
-    })
-
-    app.get("/ui", async (_req, reply) => {
-      setWebUiCacheHeaders(reply.raw)
-      return reply.sendFile("index.html", { cacheControl: false })
-    })
-  } else if (options.staticUi !== false) {
-    app.get("/ui", async (_req, reply) => {
-      reply.code(503)
-      return { error: "web ui is not built yet. run `npm run build:web` first." }
-    })
-  }
-
-  app.get("/agents", async () => ({
-    agents: listAgents().filter((agent) => !options.configuredAgentIds || options.configuredAgentIds.has(agent.id)),
-  }))
-
-  app.get("/agents/:id/status", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const agent = findAgent(id)
-    if (!agent) return reply.code(404).send({ error: "agent not found" })
-
-    try {
-      const status = await fetchWorkerJson(agent, "/awp/status")
-      updateAgentStatus(id, "online")
-      return status
-    } catch (err) {
-      updateAgentStatus(id, "offline")
-      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) })
-    }
-  })
-
-  app.get("/agents/:id/overview", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const agent = findAgent(id)
-    if (!agent) return reply.code(404).send({ error: "agent not found" })
-
-    let workerStatus: unknown = null
-    try {
-      workerStatus = await fetchWorkerJson(agent, "/awp/status")
-      updateAgentStatus(id, "online")
-    } catch (err) {
-      updateAgentStatus(id, "offline")
-      workerStatus = { error: err instanceof Error ? err.message : String(err) }
-    }
-
-    return {
-      agent: findAgent(id) ?? agent,
-      status: workerStatus,
-      compactions: listRecentCompactions(id, 12),
-    }
-  })
-
-  app.post("/agents/:id/events", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const agent = findAgent(id)
-    if (!agent) return reply.code(404).send({ error: "agent not found" })
-
-    const body =
-      req.body && typeof req.body === "object"
-        ? (req.body as Partial<ControlCommand> | Record<string, unknown>)
-        : {}
-    let command: ControlCommand
-    if ("type" in body && body.type === "event.enqueue") {
-      command = body as ControlCommand
-    } else {
-      const event = chatEventFromBody(id, body)
-      if (!event) return reply.code(400).send({ error: "expected content or event.enqueue command" })
-      command = {
-        type: "event.enqueue",
-        event,
-      }
-    }
-
-    if (command.type !== "event.enqueue" || !command.event) {
-      return reply.code(400).send({ error: "expected content or event.enqueue command" })
-    }
-
-    try {
-      const previousLastSeq = agent.lastSeq
-      const result = await fetchWorkerJson(agent, "/awp/events", {
-        method: "POST",
-        body: JSON.stringify(command),
-      })
-      try {
-        const remote = await fetchWorkerJson(agent, `/awp/events?after_seq=${previousLastSeq}&limit=1000`)
-        mirrorWorkerEvents(remote, id)
-      } catch (err) {
-        console.warn(`[control] failed to sync events from ${id}: ${err instanceof Error ? err.message : String(err)}`)
-      }
-      updateAgentStatus(id, "online")
-      return result
-    } catch (err) {
-      updateAgentStatus(id, "offline")
-      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) })
-    }
-  })
-
-  app.post("/agents/:id/shutdown", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const agent = findAgent(id)
-    if (!agent) return reply.code(404).send({ error: "agent not found" })
-
-    try {
-      if (await options.stopLocalAgent?.(id)) {
-        updateAgentStatus(id, "offline")
-        return reply.send({ ok: true, agentId: id, shuttingDown: true })
-      }
-      const result = await fetchWorkerJson(agent, "/awp/shutdown", { method: "POST" })
-      updateAgentStatus(id, "online")
-      return result
-    } catch (err) {
-      updateAgentStatus(id, "offline")
-      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) })
-    }
-  })
-
-  app.post("/agents/:id/trigger/cron", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const agent = findAgent(id)
-    if (!agent) return reply.code(404).send({ error: "agent not found" })
-    try {
-      const result = await fetchWorkerJson(agent, "/trigger/cron", {
-        method: "POST",
-        body: JSON.stringify(req.body ?? {}),
-      })
-      updateAgentStatus(id, "online")
-      return reply.send(result)
-    } catch (err) {
-      updateAgentStatus(id, "offline")
-      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) })
-    }
-  })
-
-  app.get("/agents/:id/events", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const agent = findAgent(id)
-    if (!agent) return reply.code(404).send({ error: "agent not found" })
-    const query = req.query as { after_seq?: string; limit?: string; tail?: string; view?: string }
-    const afterSeq = Number.parseInt(query.after_seq ?? "0", 10) || 0
-    const limit = Number.parseInt(query.limit ?? "500", 10) || 500
-    const mode = query.tail === "1" || query.tail === "true" ? "tail" : "after"
-
-    try {
-      const remote =
-        mode === "tail"
-          ? await fetchWorkerJson(agent, `/awp/events?tail=1&limit=${limit}`)
-          : await fetchWorkerJson(agent, `/awp/events?after_seq=${afterSeq}&limit=${limit}`)
-      mirrorWorkerEvents(remote, id)
-      updateAgentStatus(id, "online")
-    } catch (err) {
-      updateAgentStatus(id, "offline")
-      console.warn(`[control] failed to sync events from ${id}: ${err instanceof Error ? err.message : String(err)}`)
-    }
-
-    const events = listMirroredEvents(
-      id,
-      afterSeq,
-      limit,
-      mode,
-    )
-
-    return {
-      agentId: id,
-      events: query.view === "chat" ? compactEventsForChat(events) : events,
-    }
-  })
-
-  app.get("/agents/:id/compactions", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    if (!findAgent(id)) return reply.code(404).send({ error: "agent not found" })
-    const query = req.query as { limit?: string }
-    return {
-      agentId: id,
-      compactions: listRecentCompactions(id, Number.parseInt(query.limit ?? "20", 10) || 20),
-    }
-  })
-
-  app.get("/agents/:id/stream", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const query = req.query as { after_seq?: string }
-    await proxyWorkerStream(id, reply, Number.parseInt(query.after_seq ?? "0", 10) || 0, options.configuredAgentIds)
-  })
-
-  app.post("/agents/:id/client/connect", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const agent = findAgent(id)
-    if (!agent) return reply.code(404).send({ error: "agent not found" })
-    try {
-      const result = await fetchWorkerJson(agent, "/client/connect", {
-        method: "POST",
-        body: JSON.stringify(req.body ?? {}),
-      })
-      return reply.send(result)
-    } catch (err) {
-      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) })
-    }
-  })
-
-  app.post("/agents/:id/client/disconnect", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const agent = findAgent(id)
-    if (!agent) return reply.code(404).send({ error: "agent not found" })
-    try {
-      const result = await fetchWorkerJson(agent, "/client/disconnect", { method: "POST" })
-      return reply.send(result)
-    } catch (err) {
-      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) })
-    }
-  })
-
-  app.get("/agents/:id/client/status", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const agent = findAgent(id)
-    if (!agent) return reply.code(404).send({ error: "agent not found" })
-    try {
-      return reply.send(await fetchWorkerJson(agent, "/awp/client/status"))
-    } catch (err) {
-      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) })
-    }
-  })
-
-  app.get("/agents/:id/discord/channels", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const agent = findAgent(id)
-    if (!agent) return reply.code(404).send({ error: "agent not found" })
-    try {
-      return reply.send(await fetchWorkerJson(agent, "/discord/channels"))
-    } catch (err) {
-      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) })
-    }
-  })
-
-  app.get("/agents/:id/discord/channels/:channelId/messages", async (req, reply) => {
-    const { id, channelId } = req.params as { id: string; channelId: string }
-    const agent = findAgent(id)
-    if (!agent) return reply.code(404).send({ error: "agent not found" })
-    const query = req.query as { before?: string; limit?: string }
-    const params = new URLSearchParams()
-    if (query.before) params.set("before", query.before)
-    if (query.limit) params.set("limit", query.limit)
-    try {
-      return reply.send(await fetchWorkerJson(agent, `/discord/channels/${encodeURIComponent(channelId)}/messages?${params}`))
-    } catch (err) {
-      return reply.code(502).send({ error: err instanceof Error ? err.message : String(err) })
-    }
-  })
+  services: { store: ControlStore; configuredAgentIds: ReadonlySet<string>; ui?: ControlStaticUi },
+  gateway: RpcGatewayOptions,
+): void {
+  const { store, configuredAgentIds } = services
+  const agentExists = (id: string) => requireAgent(store, configuredAgentIds, id)
+  app.options("/*", async (_request, reply) => reply.code(204).send())
 
   app.get("/health", async () => ({ ok: true }))
-}
+  app.get("/agents", async (request, reply) => routeOperation(gateway, request, reply, controlAgentsList, {}))
 
-export function createControlServer(options: {
-  configuredAgentIds?: ReadonlySet<string>
-  stopLocalAgent?: (id: string) => Promise<boolean>
-} = {}) {
-  const app = Fastify({ logger: false, bodyLimit: 2_000_000 })
-
-  app.options("/*", async (_req, reply) => reply.code(204).send())
-
-  registerControlRoutes(app, {
-    configuredAgentIds: options.configuredAgentIds,
-    stopLocalAgent: options.stopLocalAgent,
+  app.get("/agents/:id/status", async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    return routeOperation(gateway, request, reply, controlAgentStatus, { agentId: id })
   })
 
-  return app
+  app.get("/agents/:id/overview", async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    return routeOperation(gateway, request, reply, controlAgentOverview, { agentId: id })
+  })
+
+  app.post("/agents/:id/events", async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    const raw = request.body
+    const body = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : {}
+    let commandBody: unknown
+    if (body.type === "event.enqueue") {
+      if (!body.event) return reply.code(400).send({ error: "expected content or event.enqueue command" })
+      commandBody = raw
+    } else {
+      const content = typeof body.content === "string" ? body.content.trim() : ""
+      if (!content) return reply.code(400).send({ error: "expected content or event.enqueue command" })
+      commandBody = { content, ...(typeof body.clientId === "string" ? { clientId: body.clientId } : {}) }
+    }
+    return routeOperation(gateway, request, reply, controlEnqueue, { agentId: id, body: commandBody as JsonValue })
+  })
+
+  app.post("/agents/:id/shutdown", async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    return routeOperation(gateway, request, reply, controlShutdown, { agentId: id })
+  })
+
+  app.post("/agents/:id/trigger/cron", async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    return routeOperation(gateway, request, reply, controlCron, { agentId: id, body: request.body as JsonValue })
+  })
+
+  app.get("/agents/:id/events", async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    const query = request.query as { after_seq?: string; limit?: string; tail?: string; view?: string }
+    const input = { agentId: id, afterSeq: Number.parseInt(query.after_seq ?? "0", 10) || 0, limit: Number.parseInt(query.limit ?? "500", 10) || 500, tail: query.tail === "1" || query.tail === "true", view: query.view }
+    return routeOperation(gateway, request, reply, controlAgentEvents, input)
+  })
+
+  app.get("/agents/:id/compactions", async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    const query = request.query as { limit?: string }
+    return routeOperation(gateway, request, reply, controlAgentCompactions, { agentId: id, limit: Number.parseInt(query.limit ?? "20", 10) || 20 })
+  })
+
+  app.get("/agents/:id/stream", async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    const query = request.query as { after_seq?: string }
+    return routeStream(gateway, request, reply, controlAgentStream, { agentId: id, afterSeq: Number.parseInt(query.after_seq ?? "0", 10) || 0 })
+  })
+
+  app.post("/agents/:id/client/connect", async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    return routeOperation(gateway, request, reply, controlClientConnect, { agentId: id, body: request.body as JsonValue })
+  })
+  app.post("/agents/:id/client/disconnect", async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    return routeOperation(gateway, request, reply, controlClientDisconnect, { agentId: id })
+  })
+  app.get("/agents/:id/client/status", async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    return routeOperation(gateway, request, reply, controlClientStatus, { agentId: id })
+  })
+  app.get("/agents/:id/discord/channels", async (request, reply) => {
+    const { id } = request.params as { id: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    return routeOperation(gateway, request, reply, controlDiscordChannels, { agentId: id })
+  })
+  app.get("/agents/:id/discord/channels/:channelId/messages", async (request, reply) => {
+    const { id, channelId } = request.params as { id: string; channelId: string }
+    if (!agentExists(id)) return reply.code(404).send({ error: "agent not found" })
+    const query = request.query as { before?: string; limit?: string }
+    return routeOperation(gateway, request, reply, controlDiscordMessages, { agentId: id, channelId, before: query.before, limit: query.limit ? Number.parseInt(query.limit, 10) : undefined })
+  })
+
+  app.get("/ui", async (_request, reply) => {
+    if (services.ui) return services.ui.serve(undefined, reply)
+    return reply.code(503).send({ error: "web ui is not built yet. run `npm run build:web` first." })
+  })
+  app.get("/ui/*", async (request, reply) => {
+    if (services.ui) return services.ui.serve((request.params as { "*"?: string })["*"], reply)
+    return reply.code(503).send({ error: "web ui is not built yet. run `npm run build:web` first." })
+  })
+}
+
+export const CONTROL_HTTP = defineService<FastifyInstance>("control.http")
+
+export function controlHttpPlugin(options: ControlHttpOptions): Plugin {
+  return {
+    id: "control.http",
+    requires: [CONTROL_STORE, CONTROL_AGENTS, nanoRpcAuth],
+    optional: [CONTROL_STATIC_UI],
+    provides: [CONTROL_HTTP],
+    async apply(scope) {
+      const app = Fastify({ logger: false, bodyLimit: options.maxBodyBytes ?? 2_000_000 })
+      const store = scope.use(CONTROL_STORE)
+      const agents = scope.use(CONTROL_AGENTS)
+      const auth = scope.use(nanoRpcAuth)
+      const ui = options.staticUi === false ? undefined : scope.optional(CONTROL_STATIC_UI)
+      const gateway: RpcGatewayOptions = {
+        operations: () => scope.list(nanoOperations),
+        streams: () => scope.list(nanoStreams),
+        auth: () => auth,
+        maxBodyBytes: options.maxBodyBytes,
+        maxFrameBytes: options.maxFrameBytes,
+      }
+      installLegacyAuth(app, auth)
+      registerControlRoutes(app, { store, configuredAgentIds: agents.configuredAgentIds, ui }, gateway)
+      await registerRpcTransport(app, gateway)
+      scope.provide(CONTROL_HTTP, app)
+      scope.own(() => app.close())
+    },
+  }
+}
+
+export function createControlServer(bus: PluginBus): FastifyInstance {
+  return bus.get(CONTROL_HTTP)
 }

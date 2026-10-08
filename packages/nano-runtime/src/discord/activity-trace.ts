@@ -5,7 +5,6 @@
  * so /trace can show what the agent is currently doing.
  */
 
-import { subscribe } from "../stream"
 import type { StreamEvent } from "@nano/protocol"
 
 export interface TraceEntry {
@@ -30,24 +29,36 @@ export interface TraceEntry {
 }
 
 const MAX_ENTRIES = 100
-const buffer: TraceEntry[] = []
 
-let started = false
+export function createDiscordActivityTrace(
+  subscribe: (listener: (event: StreamEvent) => void) => () => void,
+) {
+  const buffer: TraceEntry[] = []
+  let unsubscribe: (() => void) | null = null
 
-export function startActivityTrace(): void {
-  if (started) return
-  started = true
+  function start(): void {
+    if (unsubscribe) return
 
-  subscribe((event: StreamEvent) => {
-    const entry = convertEvent(event)
-    if (!entry) return
+    unsubscribe = subscribe((event) => {
+      const entry = convertEvent(event)
+      if (!entry) return
+      buffer.push(entry)
+      if (buffer.length > MAX_ENTRIES) buffer.splice(0, buffer.length - MAX_ENTRIES)
+    })
+  }
 
-    buffer.push(entry)
-    if (buffer.length > MAX_ENTRIES) {
-      buffer.splice(0, buffer.length - MAX_ENTRIES)
-    }
-  })
+  function stop(): void {
+    unsubscribe?.()
+    unsubscribe = null
+  }
+
+  function getRecentActivity(count = 15): TraceEntry[] {
+    return buffer.slice(-count)
+  }
+
+  return { start, getRecentActivity, formatActivityTrace, stop }
 }
+
 
 function convertEvent(event: StreamEvent): TraceEntry | null {
   const timestamp = Date.now()
@@ -89,11 +100,8 @@ function convertEvent(event: StreamEvent): TraceEntry | null {
   }
 }
 
-export function getRecentActivity(count = 15): TraceEntry[] {
-  return buffer.slice(-count)
-}
 
-export function formatActivityTrace(entries: TraceEntry[]): string {
+function formatActivityTrace(entries: TraceEntry[]): string {
   if (entries.length === 0) {
     return "no recent activity"
   }

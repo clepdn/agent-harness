@@ -1,33 +1,21 @@
 import { createHash, randomUUID } from "node:crypto"
-import { buildBootstrap } from "../bootstrap"
+import { AGENT_ID } from "../agent-config"
 import { config } from "../config"
-import { clientTools } from "../client"
-import { areDiscordToolsAvailable } from "../discord/availability"
-import { isWebSearchAvailable } from "../web-search"
-import { markDiscordItem } from "../discord/state"
-import { endConversation, logMessage, startConversation } from "../db"
-import { emit } from "../stream"
-import { clearDiscordTypingScope } from "../discord/typing-lease"
 import { runLoop } from "./loop"
-import { setRunnerPresence } from "./presence"
+import { createPresenceTracker, type RunnerPresenceTracker } from "./presence"
 import { createNiriToolCatalog, reconcileImageToolDefinition, reconcileMemoryFileToolDefinitions } from "./tool-catalog"
-import { archiveContextMessages, recordRestContextSnapshot } from "./context-store"
 import type { ManualCompactionRequest, RunnerStateInternal } from "./types"
-import { archiveDiscardedSession, BOREDOM_WAKE_MS, clearSession, loadRestSnapshot, loadSession, quarantineSession, saveRestSnapshot, saveSession } from "./util"
-import type { UserMessage, Message } from "../types"
+import type { RuntimeExecutionServices } from "../plugins/api"
+import type { Message, UserMessage } from "../types"
 import type { ToolDefinition } from "@nano/harness-core"
-import { fromBoredom } from "../triggers/boredom"
 import { createBoredomTimer } from "./boredom-timer"
-import { discordEventImageReferences } from "../discord/context-avatars"
 import { registerDiscordTargets, rewriteDiscordTargetLabels } from "../discord/targets"
-import { cancelRunningJobs, hasExecutingJobs } from "./jobs"
 import { createRuntimeContext } from "./context"
 import { getCompletionTools } from "./tools"
-import { applyModelSwap, persistModelSwap, resolveModelSwap, modelStateFor, type ModelSwapSelection } from "./model-state"
-import { clearModelSwapHandoff, loadModelSwapHandoff, saveModelSwapHandoff } from "./session"
-import { beginFrontendModelSwap, resumeFrontendAfterModelSwap, frontendModelSwapSnapshot, setFrontendModelSwapCheckpoint, checkpointFrontendModelSwapReplay } from "./frontend"
-
-let shutdownResolvers: Array<() => void> = []
+import type { ModelSwapSelection } from "./model-state"
+import type { FrontendRunnerRuntime } from "./frontend"
+import { BOREDOM_WAKE_MS } from "./config"
+import { fromBoredom } from "../triggers/boredom"
 export type ModelSwapResult = {
   preset: string
   model: string
@@ -36,13 +24,83 @@ export type ModelSwapResult = {
   fallbackReason?: string
 }
 
-export type ModelSwapTestOptions = Partial<SwapOptions>
 export interface SwapOptions {
   boundaryWaitMs: number
   toolSettleMs: number
   gracefulDeadlineMs: number
   gracefulTurnLimit: number
 }
+
+export type InterruptRequestResult = "interrupted" | "idle" | "not-running"
+
+export interface RunnerRuntime {
+  isRunning(): boolean
+  isWaitingForEvent(): boolean
+  requestRest(reason: string): boolean
+  requestCompaction(options?: Partial<ManualCompactionRequest>): boolean
+  requestInterrupt(): InterruptRequestResult
+  requestDiscard(): boolean
+  getRunnerStatus(): { agentId: string; running: boolean; idle: boolean; tokenCount: number; contextSize: number; processStartedAt: string; uptimeMs: number }
+  enqueueEvent(event: UserMessage, options?: { onlyIfWaiting?: boolean; priority?: boolean }): boolean
+  activate(event: UserMessage, options?: { priority?: boolean }): void
+  startBoredomTimer(): void
+  shutdown(): Promise<void>
+  wake(event: UserMessage): Promise<void>
+  requestModelSwap(presetName: string, options?: Partial<SwapOptions>): Promise<ModelSwapResult>
+  recoverModelSwapHandoff(): Promise<void>
+  cleanup(): Promise<void>
+}
+
+export function createRunnerRuntime(services: RuntimeExecutionServices, frontend: FrontendRunnerRuntime): RunnerRuntime {
+  const configuredModel = services.model
+  if (!configuredModel) throw new Error("nano.runner requires nano.model")
+  const model = configuredModel
+  const getImageReferences = (event: UserMessage) => services.discord?.discordEventImageReferences(event) ?? []
+  let cleanupPromise: Promise<void> | undefined
+  let closing = false
+  let activeWakeRuns = new Set<Promise<void>>()
+async function prepareRuntimeMessages(messages: Message[]): Promise<void> {
+  const prepare = services.images?.prepareMessages
+  if (!prepare) throw new Error("nano.runner requires nano.images prepareMessages")
+  await prepare(messages)
+}
+function runtimeModelConfig(kind: "main" | "frontend" = "main") {
+  return model.current(kind)
+}
+function requiredPersistence(): NonNullable<RuntimeExecutionServices["persistence"]> {
+  const persistence = services.persistence
+  if (!persistence) throw new Error("nano.runner requires nano.persistence")
+  return persistence
+}
+
+function loadSession(kind: "main" | "frontend" = "main") { return requiredPersistence().loadSession(kind) }
+function saveSession(snapshot: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["saveSession"]>[0], kind: "main" | "frontend" = "main") { return requiredPersistence().saveSession(snapshot, kind) }
+function clearSession(kind: "main" | "frontend" = "main") { return requiredPersistence().clearSession(kind) }
+function loadRestSnapshot(kind: "main" | "frontend" = "main") { return requiredPersistence().loadRestSnapshot(kind) }
+function saveRestSnapshot(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["saveRestSnapshot"]>) { return requiredPersistence().saveRestSnapshot(...args) }
+function loadModelSwapHandoff() { return requiredPersistence().loadModelSwapHandoff() }
+function saveModelSwapHandoff(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["saveModelSwapHandoff"]>) { return requiredPersistence().saveModelSwapHandoff(...args) }
+function clearModelSwapHandoff() { return requiredPersistence().clearModelSwapHandoff() }
+function archiveDiscardedSession(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["archiveDiscardedSession"]>) { return requiredPersistence().archiveDiscardedSession(...args) }
+function quarantineSession(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["quarantineSession"]>) { return requiredPersistence().quarantineSession(...args) }
+function startConversation(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["startConversation"]>) { return requiredPersistence().startConversation(...args) }
+function logMessage(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["logMessage"]>) { return requiredPersistence().logMessage(...args) }
+function endConversation(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["endConversation"]>) { return requiredPersistence().endConversation(...args) }
+function recordRestContextSnapshot(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["recordRestContextSnapshot"]>) { return requiredPersistence().recordRestContextSnapshot(...args) }
+function hasExecutingJobs(): boolean { return services.jobs?.hasExecutingJobs() ?? false }
+function cancelRunningJobs(reason: string): void { services.jobs?.cancelRunningJobs(reason) }
+
+function buildBootstrap(event: UserMessage, priorRest: Parameters<NonNullable<RuntimeExecutionServices["bootstrap"]>["build"]>[1] = null, options: Parameters<NonNullable<RuntimeExecutionServices["bootstrap"]>["build"]>[2] = {}) {
+  const bootstrap = services.bootstrap
+  if (!bootstrap) throw new Error("nano.runner requires nano.bootstrap")
+  return bootstrap.build(event, priorRest, options)
+}
+
+let shutdownResolvers: Array<() => void> = []
+
+
+type ModelSwapTestOptions = Partial<SwapOptions>
+
 const MODEL_SWAP_DEFAULTS: SwapOptions = {
   boundaryWaitMs: 15_000,
   toolSettleMs: 5_000,
@@ -83,14 +141,14 @@ function swapPrompt(preset: string): UserMessage {
 function checkpointModelSwap(): Promise<void> {
   const swap = pendingModelSwap
   if (!swap) return Promise.resolve()
-  const frontend = frontendModelSwapSnapshot()
+  const frontendSnapshot = frontend.frontendModelSwapSnapshot()
   const events = [...swap.deliveredEvents, ...heldSwapEvents]
   const snapshot = {
     version: 1 as const, id: swap.id, preset: swap.selection.preset, phase: swap.phase,
     eventIds: events.map(event => swap.eventIds.get(event)!),
     messages: swap.phase === "closing" && state.running ? state.context.snapshot() : swap.messages,
     events, note: "operator-requested model swap",
-    ...(frontend ? { frontendMessages: frontend.messages, frontendEvents: frontend.events, frontendId: frontend.id, frontendEventIds: frontend.eventIds } : {}),
+    ...(frontendSnapshot ? { frontendMessages: frontendSnapshot.messages, frontendEvents: frontendSnapshot.events, frontendId: frontendSnapshot.id, frontendEventIds: frontendSnapshot.eventIds } : {}),
   }
   swap.checkpoint = swap.checkpoint.then(() => saveModelSwapHandoff(snapshot))
   swap.checkpoint.catch(error => { swap.checkpointError = error })
@@ -140,15 +198,15 @@ function startGracefulDeadline(swap: PendingModelSwap): void {
 }
 
 /** Close outgoing sessions before installing a preset and scheduling a fresh session. */
-export async function requestModelSwap(presetName: string): Promise<ModelSwapResult> {
-  return requestModelSwapInternal(presetName)
+async function requestModelSwap(presetName: string, overrides?: ModelSwapTestOptions): Promise<ModelSwapResult> {
+  return requestModelSwapInternal(presetName, overrides)
 }
 
 async function requestModelSwapInternal(presetName: string, overrides?: ModelSwapTestOptions): Promise<ModelSwapResult> {
+  const options: SwapOptions = { ...MODEL_SWAP_DEFAULTS, ...overrides }
   if (pendingModelSwap) throw new Error("model swap already in progress")
   if (hasExecutingJobs()) throw new Error("model swap failed safely: background tasks are still executing; wait for them to finish")
-  const selection = resolveModelSwap(presetName)
-  const options = { ...MODEL_SWAP_DEFAULTS, ...overrides }
+  const selection = model.resolveModelSwap(presetName)
   let close!: PendingModelSwap["close"]
   let fail!: PendingModelSwap["fail"]
   const closed = new Promise<{ graceful: boolean; fallbackReason?: string }>((resolve, reject) => { close = resolve; fail = reject })
@@ -168,10 +226,10 @@ async function requestModelSwapInternal(presetName: string, overrides?: ModelSwa
     onCheckpoint: () => { void checkpointModelSwap() },
   }
   const frontendClosing = config.frontend.enable && config.frontend.preset === undefined
-    ? beginFrontendModelSwap(selection.preset, options)
+    ? frontend.beginFrontendModelSwap(selection.preset, options)
     : Promise.resolve({ graceful: true } as { graceful: boolean; fallbackReason?: string })
   frontendClosing.catch(error => fail(error instanceof Error ? error : new Error(String(error))))
-  setFrontendModelSwapCheckpoint(() => { void checkpointModelSwap() })
+  frontend.setFrontendModelSwapCheckpoint(() => { void checkpointModelSwap() })
   try {
     await checkpointModelSwap()
     if (state.running) interruptEventWaiters()
@@ -194,15 +252,15 @@ async function requestModelSwapInternal(presetName: string, overrides?: ModelSwa
     if (swap.checkpointError) throw swap.checkpointError
     await checkpointModelSwap()
     if (hasExecutingJobs()) throw new Error("background task has not stopped; selected settings were not applied")
-    await persistModelSwap(selection)
-    applyModelSwap(selection)
+    await model.persistModelSwap(selection)
+    model.applyModelSwap(selection)
     swap.phase = "selected"
     await checkpointModelSwap()
     const ready = new Promise<void>((resolve, reject) => { swap.bootstrapReady = resolve; swap.bootstrapFailed = reject })
     swap.wakeEvent = { source: "system", raw: null, triggeredAt: new Date().toISOString(), content: `[model swap complete] Fresh session using preset "${selection.preset}". Resume preserved pending work from the handoff.` }
     void wake(swap.wakeEvent).catch(error => swap.bootstrapFailed?.(error))
     await ready
-    await resumeFrontendAfterModelSwap()
+    await frontend.resumeFrontendAfterModelSwap()
     await swap.checkpoint
     while (true) {
       while (heldSwapEvents.length) {
@@ -213,16 +271,16 @@ async function requestModelSwapInternal(presetName: string, overrides?: ModelSwa
         }
         await saveRuntimeSnapshot()
       }
-      await checkpointFrontendModelSwapReplay()
+      await frontend.checkpointFrontendModelSwapReplay()
       await swap.checkpoint
       await clearModelSwapHandoff()
-      const frontend = frontendModelSwapSnapshot()
-      if (!heldSwapEvents.length && (!frontend || frontend.eventIds.every(id => frontend.deliveredEventIds.includes(id)))) break
+      const frontendSnapshot = frontend.frontendModelSwapSnapshot()
+      if (!heldSwapEvents.length && (!frontendSnapshot || frontendSnapshot.eventIds.every(id => frontendSnapshot.deliveredEventIds.includes(id)))) break
       await checkpointModelSwap()
     }
     pendingModelSwap = undefined
     recoveryChecked = true
-    setFrontendModelSwapCheckpoint(undefined)
+    frontend.setFrontendModelSwapCheckpoint(undefined)
     swap.releaseBootstrap?.()
     const fallbackReason = [mainResult.fallbackReason, frontendResult.fallbackReason].filter(Boolean).join("; ")
     return { preset: selection.preset, model: selection.model.id, provider: selection.model.provider,
@@ -231,12 +289,12 @@ async function requestModelSwapInternal(presetName: string, overrides?: ModelSwa
     const selected = swap.phase === "selected"
     state.modelSwap = undefined
     pendingModelSwap = undefined
-    setFrontendModelSwapCheckpoint(undefined)
+    frontend.setFrontendModelSwapCheckpoint(undefined)
     state.pendingInputs.push(...heldSwapEvents.splice(0))
     swap.releaseBootstrap?.()
     await swap.checkpoint.catch(() => {})
     if (!selected && !swap.checkpointError) await clearModelSwapHandoff().catch(() => {})
-    await resumeFrontendAfterModelSwap().catch(() => {})
+    await frontend.resumeFrontendAfterModelSwap().catch(() => {})
     throw new Error(`model swap failed safely: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
   } finally {
     for (const timer of swap.timers) clearTimeout(timer)
@@ -245,14 +303,14 @@ async function requestModelSwapInternal(presetName: string, overrides?: ModelSwa
 
 let activeSwapConversation: number | undefined
 /** Recover a crashed handoff before any external event can restore its old context. */
-export async function recoverModelSwapHandoff(): Promise<void> {
+async function recoverModelSwapHandoff(): Promise<void> {
   if (recoveryChecked) return
   const handoff = await loadModelSwapHandoff()
   if (!handoff) {
     recoveryChecked = true
     return
   }
-  const selection = resolveModelSwap(handoff.preset)
+  const selection = model.resolveModelSwap(handoff.preset)
   const archiveLane = async (messages: Message[], kind: "main" | "frontend") => {
     const saved = await loadSession(kind)
     const retained = [...messages, ...(saved?.messages ?? [])]
@@ -263,8 +321,8 @@ export async function recoverModelSwapHandoff(): Promise<void> {
   if (handoff.phase !== "selected") {
     await archiveLane(handoff.messages, "main")
     if (handoff.frontendMessages) await archiveLane(handoff.frontendMessages, "frontend")
-    await persistModelSwap(selection)
-    applyModelSwap(selection)
+    await model.persistModelSwap(selection)
+    model.applyModelSwap(selection)
   }
   const saveQueued = async (kind: "main" | "frontend", events: UserMessage[], eventIds?: string[], handoffId = handoff.id) => {
     const existing = await loadSession(kind)
@@ -274,15 +332,16 @@ export async function recoverModelSwapHandoff(): Promise<void> {
       const event = events[index]!
       const id = eventIds?.[index]
       if (id && replayed.has(id)) continue
-      messages.push({ role: "user", content: formatIncomingEvent(event), timestamp: Date.now(), imageReferences: discordEventImageReferences(event) })
+      messages.push({ role: "user", content: formatIncomingEvent(event), timestamp: Date.now(), imageReferences: getImageReferences(event) })
       if (id) replayed.add(id)
     }
     if (!existing) {
       const rest = await loadRestSnapshot(kind)
       const event: UserMessage = { source: "system", raw: null, triggeredAt: new Date().toISOString(), content: "[model swap recovered] Start fresh and resume the preserved pending work." }
-      const catalog = kind === "main" ? buildCurrentCatalog() : createNiriToolCatalog({ frontend: true, memory: true, discord: areDiscordToolsAvailable(), agentChannel: true, vision: modelStateFor("frontend").primaryVision })
-      const bootstrap = await buildBootstrap(event, rest ? { restedAt: rest.restedAt, note: rest.note, forest: rest.summary } : null, { frontend: kind === "frontend", vision: modelStateFor(kind).primaryVision, agentChannel: config.frontend.enable })
-      const context = createRuntimeContext(kind, [...bootstrap, ...messages], catalog)
+      const frontendContributions = services.tools?.list("frontend") ?? []
+      const catalog = kind === "main" ? buildCurrentCatalog() : createNiriToolCatalog({ contributions: frontendContributions, clientCapabilities: [], workspace: null, frontend: true, vision: runtimeModelConfig("frontend").primaryVision })
+      const bootstrap = await buildBootstrap(event, rest ? { restedAt: rest.restedAt, note: rest.note, forest: rest.summary } : null, { frontend: kind === "frontend", vision: runtimeModelConfig(kind).primaryVision, agentChannel: config.frontend.enable })
+      const context = createRuntimeContext(kind, [...bootstrap, ...messages], catalog, undefined, services.providerResolver, prepareRuntimeMessages, model)
       await saveSession({ version: 1, messages: context.snapshot(), contextId: context.id, contextModelId: context.model.id, contextConfigurationFingerprint: context.configurationFingerprint, toolCatalog: catalog, toolCatalogEpoch: 1, toolCatalogFingerprint: catalogFingerprint(catalog), modelSwapHandoffId: handoffId, modelSwapEventIds: [...replayed] }, kind)
     } else {
       await saveSession({ ...existing, messages, modelSwapHandoffId: handoffId, modelSwapEventIds: [...replayed] }, kind)
@@ -294,7 +353,6 @@ export async function recoverModelSwapHandoff(): Promise<void> {
   recoveryChecked = true
   console.warn("[model-swap] recovered interrupted handoff using archived history; model-driven journaling was not verified")
 }
-export const __test = { requestModelSwap: requestModelSwapInternal }
 const PROCESS_STARTED_AT = new Date().toISOString()
 let eventResolvers: Array<(event: UserMessage | null) => void> = []
 function catalogFingerprint(catalog: ToolDefinition[]): string {
@@ -302,16 +360,14 @@ function catalogFingerprint(catalog: ToolDefinition[]): string {
 }
 
 function buildCurrentCatalog(): ToolDefinition[] {
+  const client = services.client
+  const contributions = services.tools?.list("main") ?? []
   return createNiriToolCatalog({
-    clientCapabilities: clientTools.getCapabilities(),
-    workspace: clientTools.getWorkspace(),
-    memory: true,
-    discord: areDiscordToolsAvailable(),
-    subagents: config.subagents.length > 0,
+    contributions,
+    clientCapabilities: client?.capabilities() ?? [],
+    workspace: client?.workspace() ?? null,
     computer: config.computer_use.enabled,
-    webSearch: isWebSearchAvailable(),
-    vision: modelStateFor("main").primaryVision,
-    agentChannel: config.frontend.enable,
+    vision: runtimeModelConfig("main").primaryVision,
   })
 }
 
@@ -321,7 +377,7 @@ function refreshToolCatalog(reason: "new-session" | "post-compaction"): void {
   state.toolCatalogFingerprint = catalogFingerprint(catalog)
   state.toolCatalogEpoch += 1
   if (reason === "post-compaction") {
-    state.context = state.context.fork({ tools: getCompletionTools(catalog, "main"), reason: "tools-change" })
+    state.context = state.context.fork({ tools: getCompletionTools(catalog, { runtimeKind: "main", vision: runtimeModelConfig("main").primaryVision, imageRoot: services.client?.workspace()?.imageRoot }), reason: "tools-change" })
     state.context.append({
       role: "user",
       content: `[tool environment epoch ${state.toolCatalogEpoch}] Tool catalog refreshed after context rewrite. Active workspace and client capabilities are now those captured at this epoch.`,
@@ -337,8 +393,7 @@ function reconcileFileToolCatalog(): void {
   if (!image.changed && !memoryFiles.changed) return
   state.toolCatalog = memoryFiles.catalog
   state.toolCatalogFingerprint = catalogFingerprint(state.toolCatalog)
-  state.toolCatalogEpoch += 1
-  state.context = state.context.fork({ tools: getCompletionTools(state.toolCatalog, "main"), reason: "tools-change" })
+  state.context = state.context.fork({ tools: getCompletionTools(state.toolCatalog, { runtimeKind: "main", vision: runtimeModelConfig("main").primaryVision, imageRoot: services.client?.workspace()?.imageRoot }), reason: "tools-change" })
   state.context.append({
     role: "user",
     content: `[tool environment epoch ${state.toolCatalogEpoch}] ${[
@@ -365,7 +420,7 @@ function reconcileAgentChannelCatalog(): void {
     state.toolCatalog = state.toolCatalog.filter((tool) => !bridgeNames.has(tool.function.name))
   }
   state.toolCatalogFingerprint = catalogFingerprint(state.toolCatalog)
-  state.toolCatalogEpoch += 1
+  state.context = state.context.fork({ tools: getCompletionTools(state.toolCatalog, { runtimeKind: "main", vision: runtimeModelConfig("main").primaryVision, imageRoot: services.client?.workspace()?.imageRoot }), reason: "tools-change" })
   state.context = state.context.fork({ tools: getCompletionTools(state.toolCatalog, "main"), reason: "tools-change" })
   state.context.append({
     role: "user",
@@ -374,35 +429,43 @@ function reconcileAgentChannelCatalog(): void {
   } as Message)
 }
 
-const state: RunnerStateInternal = {
-  runtimeKind: "main",
-  contextSize: 0,
-  running: false,
-  context: createRuntimeContext("main"),
-  pendingInputs: [],
-  tokenCount: 0,
-  toolCatalog: [],
-  toolCatalogEpoch: 0,
-  toolCatalogFingerprint: "",
-  toolInFlight: false,
-  memoryRecallCooldowns: {},
-  memoryRecallTurn: 0,
-  memoryRecallPending: false,
-  shutdownRequested: false,
-  turnInFlight: false,
-  deferredEvents: [],
-  restRequested: false,
-  restReason: "",
+let state: RunnerStateInternal
+
+function initializeRunnerState(): void {
+  state = {
+    runtimeKind: "main",
+    contextSize: 0,
+    running: false,
+    services,
+    context: createRuntimeContext("main", [], undefined, undefined, services.providerResolver, prepareRuntimeMessages, model),
+    pendingInputs: [],
+    tokenCount: 0,
+    toolCatalog: [],
+    toolCatalogEpoch: 0,
+    toolCatalogFingerprint: "",
+    toolInFlight: false,
+    memoryRecallCooldowns: {},
+    memoryRecallTurn: 0,
+    memoryRecallPending: false,
+    shutdownRequested: false,
+    turnInFlight: false,
+    deferredEvents: [],
+    restRequested: false,
+    restReason: "",
+  }
 }
+initializeRunnerState()
+let presenceTracker: RunnerPresenceTracker = createPresenceTracker((presence) => services.persistence?.publishWorkerEvent("runner.status", { presence }))
+
 /**
  * @returns `true` when the wake loop is running, otherwise `false`.
  */
-export function isRunning(): boolean {
+function isRunning(): boolean {
   return state.running
 }
 
 /** Returns whether the runner is currently blocked in wait or wait_then_continue. */
-export function isWaitingForEvent(): boolean {
+function isWaitingForEvent(): boolean {
   return eventResolvers.length > 0
 }
 
@@ -412,7 +475,7 @@ export function isWaitingForEvent(): boolean {
  * If the runner is idle (waiting for events), this also interrupts the wait
  * so the rest takes effect immediately.
  */
-export function requestRest(reason: string): boolean {
+function requestRest(reason: string): boolean {
   if (!state.running) return false
   state.restRequested = true
   state.restReason = reason
@@ -427,7 +490,7 @@ export function requestRest(reason: string): boolean {
  * snapcompact frame. If the runner is idle, interrupts the wait so compaction
  * runs immediately. Returns false if not running.
  */
-export function requestCompaction(
+function requestCompaction(
   options: Partial<ManualCompactionRequest> = {},
 ): boolean {
   if (!state.running) return false
@@ -439,10 +502,10 @@ export function requestCompaction(
   return true
 }
 
-export type InterruptRequestResult = "interrupted" | "idle" | "not-running"
+
 
 /** Abort the active model generation or blocking tool without ending its session. */
-export function requestInterrupt(): InterruptRequestResult {
+function requestInterrupt(): InterruptRequestResult {
   if (!state.running) return "not-running"
   if (!state.turnInFlight && !state.toolInFlight) return "idle"
   state.interruptRequested = true
@@ -452,7 +515,7 @@ export function requestInterrupt(): InterruptRequestResult {
 }
 
 /** Abort and archive the complete active session, including pending background jobs. */
-export function requestDiscard(): boolean {
+function requestDiscard(): boolean {
   if (!state.running) return false
   state.discardRequested = true
   state.activeTurnController?.abort(new Error("session discarded by Discord /discard"))
@@ -461,7 +524,8 @@ export function requestDiscard(): boolean {
   return true
 }
 
-export function getRunnerStatus(): {
+function getRunnerStatus(): {
+  agentId: string
   running: boolean
   idle: boolean
   tokenCount: number
@@ -470,6 +534,7 @@ export function getRunnerStatus(): {
   uptimeMs: number
 } {
   return {
+    agentId: AGENT_ID,
     running: state.running,
     idle: isWaitingForEvent(),
     tokenCount: state.tokenCount,
@@ -522,33 +587,32 @@ function flushDeferredEvents(): void {
  * @param event - Trigger event to deliver to the runner.
  * @returns `true` when the event was accepted for delivery.
  */
-export function enqueueEvent(event: UserMessage, options: EnqueueOptions = {}): boolean {
+function enqueueEvent(event: UserMessage, options: EnqueueOptions = {}): boolean {
   if (holdSwapEvent(event, options)) return true
   if (state.running) {
     const accepted = deliverEvent(event, options)
     if (accepted) boredomTimer.active()
     return accepted
   }
-  if (options.onlyIfWaiting) {
-    return false
-  }
-  if (options.priority) {
-    state.pendingInputs.unshift(event)
-  } else {
-    state.pendingInputs.push(event)
-  }
+  if (options.onlyIfWaiting) return false
+  if (options.priority) state.pendingInputs.unshift(event)
+  else state.pendingInputs.push(event)
   return true
 }
 
-/**
- * Standard activation: enqueue the event if a session is already running,
- * otherwise cold-wake the runner. This is the same pattern the trigger routes
- * use; boredom activations go through it too rather than calling wake() raw.
- */
-export function activate(event: UserMessage): void {
-  if (holdSwapEvent(event)) return
-  if (isRunning()) enqueueEvent(event)
-  else void wake(event)
+let coldWakePromise: Promise<void> | undefined
+
+/** Standard activation: enqueue the event if an active session exists, otherwise cold-wake once. */
+function activate(event: UserMessage, options: { priority?: boolean } = {}): void {
+  if (closing) return
+  if (holdSwapEvent(event, options)) return
+  if (isRunning() || coldWakePromise) {
+    enqueueEvent(event, options)
+    return
+  }
+  coldWakePromise ??= wake(event)
+    .catch((error) => { console.error("[runner] activation failed:", error) })
+    .finally(() => { coldWakePromise = undefined })
 }
 
 // ── Boredom wake timer ──────────────────────────────────────────────────────
@@ -562,7 +626,7 @@ const boredomTimer = createBoredomTimer(BOREDOM_WAKE_MS, () => {
 })
 
 /** Start the initial quiet interval after the worker is ready to serve. */
-export function startBoredomTimer(): void {
+function startBoredomTimer(): void {
   if (!state.running && !state.shutdownRequested) boredomTimer.idle()
 }
 
@@ -573,9 +637,9 @@ export function startBoredomTimer(): void {
  *
  * @returns A promise that resolves when shutdown persistence has completed.
  */
-export async function shutdown(): Promise<void> {
+async function shutdown(): Promise<void> {
   boredomTimer.stop()
-  if (!state.running || state.context.items.length === 0) return
+  if (!state.running) return
 
   state.shutdownRequested = true
   interruptEventWaiters()
@@ -586,7 +650,7 @@ export async function shutdown(): Promise<void> {
     return
   }
 
-  await saveRuntimeSnapshot()
+  if (state.context.items.length > 0) await saveRuntimeSnapshot()
 }
 
 function interruptEventWaiters(): void {
@@ -602,7 +666,6 @@ function resolveShutdown(): void {
 }
 
 async function saveRuntimeSnapshot(): Promise<void> {
-  archiveContextMessages(state.context.items, "runtime-checkpoint", state.runtimeKind)
   await saveSession({
     version: 1,
     messages: state.context.snapshot(),
@@ -629,9 +692,7 @@ function holdResolvedSwapEvent(event: UserMessage | null): UserMessage | null {
 function waitForEvent(): Promise<UserMessage | null> {
   if (state.shutdownRequested || state.restRequested) return Promise.resolve(null)
   if (state.pendingInputs.length > 0) return Promise.resolve(state.pendingInputs.shift()!).then(holdResolvedSwapEvent)
-  const waiting = new Promise<UserMessage | null>((resolve) => {
-    eventResolvers.push(resolve)
-  })
+  const waiting = new Promise<UserMessage | null>((resolve) => eventResolvers.push(resolve))
   boredomTimer.idle()
   return waiting.finally(() => boredomTimer.pause()).then(holdResolvedSwapEvent)
 }
@@ -639,12 +700,9 @@ function waitForEvent(): Promise<UserMessage | null> {
 /** Wait up to timeoutMs for the next event; resolves null if the timer fires first. */
 function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null> {
   if (state.shutdownRequested || state.restRequested) return Promise.resolve(null)
-  if (state.pendingInputs.length > 0) {
-    return Promise.resolve(state.pendingInputs.shift()!).then(holdResolvedSwapEvent)
-  }
+  if (state.pendingInputs.length > 0) return Promise.resolve(state.pendingInputs.shift()!).then(holdResolvedSwapEvent)
   const waiting = new Promise<UserMessage | null>((resolve) => {
     let settled = false
-
     const timer = setTimeout(() => {
       if (settled) return
       settled = true
@@ -652,14 +710,12 @@ function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null>
       if (idx !== -1) eventResolvers.splice(idx, 1)
       resolve(null)
     }, timeoutMs)
-
     const resolver = (event: UserMessage | null) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
       resolve(event)
     }
-
     eventResolvers.push(resolver)
   })
   boredomTimer.idle()
@@ -681,46 +737,35 @@ function applyDiscordTargets(event: UserMessage): void {
 
 function autoSeeDiscordEvent(event: UserMessage): void {
   if (event.source !== "discord") return
-
   const itemIds = [
     ...(event.discordTargets ?? []).map((target) => target.itemId ?? target.messageId),
     ...[...event.content.matchAll(/^source_item_id:\s*(\S+)/gm)].map((match) => match[1]),
-  ]
-    .map((itemId) => itemId?.trim())
-    .filter((itemId): itemId is string => Boolean(itemId))
+  ].map((itemId) => itemId?.trim()).filter((itemId): itemId is string => Boolean(itemId))
   for (const itemId of new Set(itemIds)) {
-    try {
-      markDiscordItem(itemId, "seen", "auto-seen after injection into runner context", "noted")
-    } catch (err) {
-      console.warn(`[runner] failed to auto-see Discord item ${itemId}: ${err instanceof Error ? err.message : String(err)}`)
-    }
+    try { services.discord?.markDiscordItem(itemId, "seen", "auto-seen after injection into runner context", "noted") }
+    catch (err) { console.warn(`[runner] failed to auto-see Discord item ${itemId}: ${err instanceof Error ? err.message : String(err)}`) }
   }
 }
 
 function emitUserEvent(event: UserMessage): void {
-  emit({
-    type: "user",
-    source: event.source,
-    text: event.content,
-    triggeredAt: event.triggeredAt,
-    clientId: event.clientId,
-  })
+  services.events?.emit({ type: "user", source: event.source, text: event.content, triggeredAt: event.triggeredAt, clientId: event.clientId })
 }
 
 function injectIncomingEvent(convId: number, event: UserMessage): void {
-  clearDiscordTypingScope(state)
+  services.discord?.stopTyping(state.discordTypingTurnId)
+  state.discordTypingTurnId = undefined
+  state.discordTypingChannelId = undefined
   applyDiscordTargets(event)
   autoSeeDiscordEvent(event)
   const incomingMessage = formatIncomingEvent(event)
   state.context.append({
     role: "user",
     content: incomingMessage,
-    imageReferences: discordEventImageReferences(event),
+    imageReferences: getImageReferences(event),
     timestamp: Date.now(),
   } as Message)
   logMessage(convId, "user", incomingMessage)
   emitUserEvent(event)
-  // A new incoming event starts a new turn — recall once for it.
   state.memoryRecallPending = true
   console.log("[runner] injected event from", event.source)
 }
@@ -733,12 +778,14 @@ function injectIncomingEvent(convId: number, event: UserMessage): void {
  * @param event - Event that should wake or steer the runner.
  * @returns A promise that resolves once this wake cycle fully completes.
  */
-export async function wake(event: UserMessage): Promise<void> {
+async function wakeInternal(event: UserMessage): Promise<void> {
+  if (closing) return
   if (pendingModelSwap && event !== pendingModelSwap.wakeEvent) {
     holdSwapEvent(event)
     return
   }
   if (!pendingModelSwap) await recoverModelSwapHandoff()
+  if (closing) return
   // Any wake cancels a pending boredom timer — a real (or synthetic) activation
   // is now in flight, so we don't want the idle timer firing on top of it.
   boredomTimer.active()
@@ -749,7 +796,7 @@ export async function wake(event: UserMessage): Promise<void> {
   }
 
   state.running = true
-  setRunnerPresence("awake")
+  presenceTracker.set("awake")
   state.tokenCount = 0
   state.contextSize = 0
   state.memoryRecallCooldowns = {}
@@ -772,7 +819,7 @@ export async function wake(event: UserMessage): Promise<void> {
       configurationFingerprint: saved.contextConfigurationFingerprint,
       modelId: saved.contextModelId,
       effortState: saved.contextEffortState,
-    })
+    }, services.providerResolver, prepareRuntimeMessages, model)
     state.toolCatalog = saved.toolCatalog
     state.toolCatalogEpoch = saved.toolCatalogEpoch
     state.toolCatalogFingerprint = saved.toolCatalogFingerprint
@@ -784,7 +831,7 @@ export async function wake(event: UserMessage): Promise<void> {
     state.context.append({
       role: "user",
       content: `[harness restarted — ${event.source} @ ${event.triggeredAt}]\n\n${event.content}`,
-      imageReferences: discordEventImageReferences(event),
+      imageReferences: getImageReferences(event),
       timestamp: Date.now(),
     } as Message)
   } else {
@@ -794,15 +841,15 @@ export async function wake(event: UserMessage): Promise<void> {
     const restSnapshot = await loadRestSnapshot()
     const priorRest = restSnapshot ? { restedAt: restSnapshot.restedAt, note: restSnapshot.note, forest: restSnapshot.summary } : null
     const bootstrap = await buildBootstrap(event, priorRest, {
-      clientCapabilities: clientTools.getCapabilities(),
-      workspace: clientTools.getWorkspace(),
-      discord: areDiscordToolsAvailable(),
-      vision: modelStateFor("main").primaryVision,
+      clientCapabilities: services.client?.capabilities() ?? [],
+      workspace: services.client?.workspace() ?? null,
+      discord: Boolean(services.discord?.available),
+      vision: runtimeModelConfig("main").primaryVision,
       agentChannel: config.frontend.enable,
     })
     state.toolCatalogEpoch = 0
     refreshToolCatalog("new-session")
-    state.context = createRuntimeContext("main", bootstrap, state.toolCatalog)
+    state.context = createRuntimeContext("main", bootstrap, state.toolCatalog, undefined, services.providerResolver, prepareRuntimeMessages, model)
   }
   convId = startConversation(event.source, event.triggeredAt)
   console.log("[runner] nano is awake")
@@ -835,8 +882,7 @@ export async function wake(event: UserMessage): Promise<void> {
   let discarded = false
   try {
     const exit = await runLoop(convId, state, {
-      clientTools,
-      onTurnStart: () => boredomTimer.active(),
+      clientTools: services.client,
       refreshToolCatalog: () => refreshToolCatalog("post-compaction"),
       waitForEvent,
       waitForEventWithTimeout,
@@ -865,7 +911,7 @@ export async function wake(event: UserMessage): Promise<void> {
       })
       console.log(`[runner] discarded session archived at ${archive}`)
     }
-    setRunnerPresence("resting")
+    presenceTracker.set("resting")
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     if (pendingModelSwap?.phase === "closing") {
@@ -919,7 +965,7 @@ export async function wake(event: UserMessage): Promise<void> {
     if (!pendingModelSwap) state.deferredEvents = []
     eventResolvers = []
     resolveShutdown()
-    setRunnerPresence("resting")
+    presenceTracker.set("resting")
     console.log("[runner] nano is resting")
     if (closingSwap) return
 
@@ -933,5 +979,49 @@ export async function wake(event: UserMessage): Promise<void> {
       // its own after a quiet stretch instead of resting forever.
       startBoredomTimer()
     }
+  }
+}
+
+
+  function wake(event: UserMessage): Promise<void> {
+    const run = wakeInternal(event)
+    activeWakeRuns.add(run)
+    void run.then(() => activeWakeRuns.delete(run), () => activeWakeRuns.delete(run))
+    return run
+  }
+
+  async function cleanup(): Promise<void> {
+    if (cleanupPromise) return cleanupPromise
+    closing = true
+    cleanupPromise = (async () => {
+      boredomTimer.stop()
+      const swap = pendingModelSwap
+      if (swap) {
+        for (const timer of swap.timers) clearTimeout(timer)
+        swap.timers.clear()
+        swap.fail(new Error("runner runtime is shutting down"))
+        swap.releaseBootstrap?.()
+        frontend.setFrontendModelSwapCheckpoint(undefined)
+        await swap.checkpoint.catch(() => {})
+      }
+      if (state.running) {
+        state.shutdownRequested = true
+        state.activeTurnController?.abort(new Error("runner runtime is shutting down"))
+        interruptEventWaiters()
+        await shutdown()
+      }
+      await Promise.allSettled([...activeWakeRuns])
+      eventResolvers = []
+      shutdownResolvers = []
+      heldSwapEvents = []
+      pendingModelSwap = undefined
+    })()
+    return cleanupPromise
+  }
+
+  return {
+    isRunning, isWaitingForEvent, requestRest, requestCompaction, requestInterrupt, requestDiscard,
+    getRunnerStatus, enqueueEvent, activate, startBoredomTimer, shutdown, wake, requestModelSwap,
+    recoverModelSwapHandoff, cleanup,
   }
 }

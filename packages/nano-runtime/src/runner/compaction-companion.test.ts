@@ -8,8 +8,45 @@ import {
   resolveDeepArchiveBackend,
   initSnapcompactRenderer,
 } from "./compaction-companion"
-import { modelState } from "./model-state"
+import type { Model } from "../llm"
+import type { RuntimeModelConfig } from "./model-state"
 
+const archiveModel: Model = {
+  id: "archive-test",
+  name: "Archive test",
+  api: "anthropic-messages",
+  provider: "anthropic",
+  baseUrl: "https://archive.invalid",
+  reasoning: false,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 1000,
+  maxTokens: 100,
+}
+const archiveConfig: RuntimeModelConfig = {
+  primaryModel: archiveModel,
+  primaryApiKey: undefined,
+  primaryToolChoice: "auto",
+  primaryVision: true,
+  primaryNudgeOnNoTool: false,
+  idleCompactionMs: 0,
+  cacheWarming: false,
+  cacheWarmingDurationMs: 0,
+  cacheWarmingMode: "prewarm",
+  cacheLifetimeMs: 0,
+  enableThinking: false,
+  thinkingEffort: "low",
+  fallbackModel: archiveModel,
+  fallbackApiKey: undefined,
+  fallbackToolChoice: "auto",
+  summaryModel: null,
+  summaryApiKey: undefined,
+  respectPromptCache: false,
+  compactionStrategy: "companion",
+  compactTriggerTokens: 1000,
+  deepArchive: true,
+  useFallback: false,
+}
 function userMsg(content: string): Message {
   return { role: "user", content, timestamp: Date.now() } as Message
 }
@@ -81,7 +118,7 @@ test("initSnapcompactRenderer resolves when the native renderer is available (el
     await initSnapcompactRenderer()
   } catch (err) {
     assert.match(String((err as Error).message), /native renderer could not be loaded/)
-    console.warn("[test] native renderer unavailable in this env; init threw as designed")
+    console.warn("[test] snapcompact renderer unavailable in this env; init threw as designed")
   }
 })
 
@@ -103,7 +140,7 @@ test("noop archive always declines", async () => {
 
 test("default deep-archive backends preserve source details", async () => {
   for (const provider of ["anthropic", "openai", undefined]) {
-    const result = await resolveDeepArchiveBackend(provider).archive([userMsg("provider-specific-marker")])
+    const result = await resolveDeepArchiveBackend(provider, false, archiveConfig).archive([userMsg("provider-specific-marker")])
     assert.ok(result)
     const content = (result.archiveMessage as { content: unknown }).content
     if (typeof content === "string") assert.match(content, /provider-specific-marker/)
@@ -111,11 +148,8 @@ test("default deep-archive backends preserve source details", async () => {
   }
 })
 
-test("forced snapcompact ignores the model's deep-archive toggle", async (t) => {
-  const prior = modelState.deepArchive
-  t.after(() => { modelState.deepArchive = prior })
-  modelState.deepArchive = false
-  const result = await resolveDeepArchiveBackend("anthropic", true).archive([
+test("forced snapcompact ignores the model's deep-archive toggle", async () => {
+  const result = await resolveDeepArchiveBackend("anthropic", true, { ...archiveConfig, deepArchive: false }).archive([
     userMsg("forced-snapcompact-marker"),
   ])
   assert.ok(result)

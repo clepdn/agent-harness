@@ -3,16 +3,25 @@ import { basename } from "node:path"
 import { randomUUID } from "node:crypto"
 import { NodeToolHost } from "@nano/harness-client-node"
 import type { ClientToolExecutor } from "@nano/harness-core"
-import { HttpToolClient, type HttpToolClientStatus } from "@nano/harness-server"
+import { HttpToolClient } from "@nano/harness-server"
+import type { HttpToolClientStatus } from "@nano/harness-server"
 import type { ClientToolName, ClientToolResult, ToolCapability, ToolInvocation, WorkspaceDescriptor } from "@nano/harness-protocol"
 import { AGENT_ID, REPO_ROOT } from "../agent-config"
 import { config } from "../config"
 import { SwitchableToolClient } from "./switchable"
 
 export type ConfiguredToolClient = ClientToolExecutor & {
-  start(): Promise<void>
+  start(signal?: AbortSignal): Promise<void>
   stop(): Promise<void>
   status(): HttpToolClientStatus
+}
+
+export interface ConfiguredToolClientOptions {
+  readonly agentId?: string
+  readonly endpoint?: string
+  readonly authToken?: string
+  readonly workspaceRoot?: string
+  readonly hashline?: boolean
 }
 
 class LocalToolClient implements ConfiguredToolClient {
@@ -20,19 +29,24 @@ class LocalToolClient implements ConfiguredToolClient {
   private readonly host: NodeToolHost
   private connected = false
 
-  constructor(agentId: string) {
+  constructor(agentId: string, workspaceRoot: string, hashline: boolean) {
     this.agentId = agentId
     this.host = new NodeToolHost({
       workspace: {
         id: `${agentId}-server`,
-        root: process.env.NANO_CLIENT_WORKSPACE?.trim() || REPO_ROOT,
+        root: workspaceRoot,
       },
-      hashline: config.tools.hashline,
+      hashline,
     })
   }
 
-  async start(): Promise<void> {
+  async start(signal?: AbortSignal): Promise<void> {
+    signal?.throwIfAborted()
     await this.host.start()
+    if (signal?.aborted) {
+      await this.host.stop()
+      signal.throwIfAborted()
+    }
     this.connected = true
   }
 
@@ -82,10 +96,6 @@ class LocalToolClient implements ConfiguredToolClient {
   }
 }
 
-const client = process.env.NANO_CLIENT?.trim() || "local"
-
-// Shared bearer token for the remote executor. Prefer a file path (agenix
-// secret) via NANO_EXECUTOR_TOKEN_FILE, fall back to the raw NANO_EXECUTOR_TOKEN.
 function resolveExecutorToken(): string | undefined {
   const file = process.env.NANO_EXECUTOR_TOKEN_FILE?.trim()
   if (file) {
@@ -99,17 +109,17 @@ function resolveExecutorToken(): string | undefined {
   return process.env.NANO_EXECUTOR_TOKEN?.trim() || undefined
 }
 
-const executorToken = resolveExecutorToken()
-const baseClient: ConfiguredToolClient = client === "local"
-  ? new LocalToolClient(AGENT_ID)
-  : new HttpToolClient({ agentId: AGENT_ID, endpoint: client, ...(executorToken ? { authToken: executorToken } : {}) })
-
-// The exported client is switchable: it serves `baseClient` by default but a
-// client running from the operator's own `pwd` can mount its executor at
-// runtime via the /client/connect handshake (see server.ts). This is the
-// direct-connection / pwd-mount feature.
-export const clientTools: SwitchableToolClient = new SwitchableToolClient(AGENT_ID, baseClient)
-
+/** Construct clients only when a runtime generation is applied. */
+export function createConfiguredToolClient(options: ConfiguredToolClientOptions = {}): SwitchableToolClient {
+  const agentId = options.agentId?.trim() || AGENT_ID
+  const endpoint = options.endpoint ?? (process.env.NANO_CLIENT?.trim() || "local")
+  const workspaceRoot = options.workspaceRoot ?? (process.env.NANO_CLIENT_WORKSPACE?.trim() || REPO_ROOT)
+  const authToken = options.authToken?.trim() || resolveExecutorToken()
+  const fallback: ConfiguredToolClient = endpoint === "local"
+    ? new LocalToolClient(agentId, workspaceRoot, options.hashline ?? config.tools.hashline)
+    : new HttpToolClient({ agentId, endpoint, ...(authToken ? { authToken } : {}) })
+  return new SwitchableToolClient(agentId, fallback)
+}
 /**
  * Pull a file off the attached client as raw bytes. Tool-supplied paths name
  * the client's filesystem, which is a different machine whenever the executor
@@ -117,12 +127,14 @@ export const clientTools: SwitchableToolClient = new SwitchableToolClient(AGENT_
  * upload, say) has to come across the wire.
  */
 export async function readClientFile(
+  client: ClientToolExecutor,
   filePath: string,
   maxBytes?: number,
   timeoutMs = 120_000,
+  agentId = AGENT_ID,
 ): Promise<{ path: string; name: string; mime: string; data: Buffer }> {
-  const result = await clientTools.execute({
-    agentId: AGENT_ID,
+  const result = await client.execute({
+    agentId,
     tool: "read_bytes",
     args: { path: filePath, ...(maxBytes === undefined ? {} : { max_bytes: maxBytes }) },
     timeoutMs,

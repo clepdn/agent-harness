@@ -8,6 +8,7 @@
  */
 
 import { Routes } from "discord.js"
+import type Database from "better-sqlite3"
 import { config } from "../config"
 import {
   asNumber,
@@ -63,13 +64,12 @@ import {
   makeRestClient,
   withDiscordRestRetry,
 } from "./rest"
-import { maybeFetchAndCachePronouns } from "./pronouns"
 import {
   getOrCreateDiscordFriendlyId,
   resolveDiscordChannelId,
   resolveDiscordFriendlyId,
 } from "./friendly-id"
-import { readClientFile } from "../client"
+import type { ClientService } from "../plugins/api"
 import type { RuntimeKind } from "../runner/types"
 import type { DiscordMessageTarget } from "../types"
 import { assertDiscordChannelAccess, assertDiscordItemAccess, filterDiscordRowsForRuntime, isOwnerDmChannel, ownerDmChannelIds } from "./access"
@@ -200,7 +200,7 @@ function detectInboxBucket(record: ReturnType<typeof parseMessageRecord>): "dm" 
  * @param options - Optional bot user id override.
  * @returns Ingest result describing what was stored and classified.
  */
-export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: string }): DiscordIngestResult {
+export function ingestDiscordEvent(db: Database.Database, payload: unknown, options?: { botUserId?: string }): DiscordIngestResult {
   const record = parseMessageRecord(payload, options?.botUserId)
   if (!record) {
     return { stored: false, isNew: false, reason: "payload is missing message/channel identity" }
@@ -220,7 +220,7 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
     }
   }
 
-  const isNew = !messageExists(record.messageId)
+  const isNew = !messageExists(db, record.messageId)
   const configured = !record.isDm && isConfiguredDiscordChannel(record.channelId)
 
   const channelRecord = parseChannelRecord(payload, {
@@ -229,17 +229,14 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
     channelType: record.channelType,
     isDm: record.isDm,
   })
-  if (channelRecord) upsertDiscordChannel(channelRecord)
+  if (channelRecord) upsertDiscordChannel(db, channelRecord)
 
-  upsertDiscordMessage(record)
+  upsertDiscordMessage(db, record)
 
-  if (record.authorId) {
-    void maybeFetchAndCachePronouns(record.authorId)
-  }
 
   const bucket = detectInboxBucket(record)
   if (bucket) {
-    upsertInboxItem(record.messageId, bucket)
+    upsertInboxItem(db, record.messageId, bucket)
     return {
       stored: true,
       isNew,
@@ -282,13 +279,13 @@ export function ingestDiscordEvent(payload: unknown, options?: { botUserId?: str
  * @param statuses - Status filter string or array.
  * @returns Raw inbox rows.
  */
-export function listDiscordInbox(limit = 20, statuses?: string[] | string, kind: RuntimeKind = "main"): unknown[] {
+export function listDiscordInbox(db: Database.Database, limit = 20, statuses?: string[] | string, kind: RuntimeKind = "main"): unknown[] {
   const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit) || 20))
   const statusList = normalizeStatuses(statuses)
-  const rows = filterDiscordRowsForRuntime(queryInboxItems(statusList, safeLimit), kind) as Array<Record<string, unknown>>
+  const rows = filterDiscordRowsForRuntime(db, queryInboxItems(db, statusList, safeLimit), kind) as Array<Record<string, unknown>>
   return rows.map((row) => ({
     ...row,
-    id: getOrCreateDiscordFriendlyId(String(row.message_id), String(row.channel_id)),
+    id: getOrCreateDiscordFriendlyId(db, String(row.message_id), String(row.channel_id)),
   }))
 }
 
@@ -302,19 +299,19 @@ export function listDiscordInbox(limit = 20, statuses?: string[] | string, kind:
  * @param beforeMessageId - Optional cursor for pagination.
  * @returns Message rows with resolved reply context.
  */
-export function listDiscordBackread(channelId: string, limit = 40, beforeMessageId?: string, kind: RuntimeKind = "main"): unknown[] {
-  const safeChannelId = resolveDiscordChannelId(channelId)
+export function listDiscordBackread(db: Database.Database, channelId: string, limit = 40, beforeMessageId?: string, kind: RuntimeKind = "main"): unknown[] {
+  const safeChannelId = resolveDiscordChannelId(db, channelId)
   if (!safeChannelId) throw new Error("channel_id is required")
-  assertDiscordChannelAccess(safeChannelId, kind)
+  assertDiscordChannelAccess(db, safeChannelId, kind)
 
   const safeLimit = Math.max(1, Math.min(200, Math.trunc(limit) || 40))
   const before = String(beforeMessageId ?? "").trim()
-  const rows = queryChannelMessages(safeChannelId, before, safeLimit)
+  const rows = queryChannelMessages(db, safeChannelId, before, safeLimit)
 
-  const replyByMessageId = buildReplyTargetContextMap(rows)
+  const replyByMessageId = buildReplyTargetContextMap(db, rows)
   return rows.map(({ raw_json: _rawJson, ...row }) => ({
     ...row,
-    id: getOrCreateDiscordFriendlyId(row.message_id, row.channel_id),
+    id: getOrCreateDiscordFriendlyId(db, row.message_id, row.channel_id),
     source_item_id: row.message_id,
     created_at: formatHumanTimestamp(row.created_at),
     ...(replyByMessageId.has(row.message_id) ? { reply_to: replyByMessageId.get(row.message_id) } : {}),
@@ -331,13 +328,13 @@ export function listDiscordBackread(channelId: string, limit = 40, beforeMessage
  * @param note - Optional decision note.
  * @param action - Action taken.
  */
-export function markDiscordItem(itemId: string, status: InboxStatus, note = "", action: InboxAction = "none", kind: RuntimeKind = "main"): void {
+export function markDiscordItem(db: Database.Database, itemId: string, status: InboxStatus, note = "", action: InboxAction = "none", kind: RuntimeKind = "main"): void {
   const safeItemId = String(itemId ?? "").trim()
   if (!safeItemId) throw new Error("item_id is required")
-  assertDiscordItemAccess(safeItemId, kind)
+  assertDiscordItemAccess(db, safeItemId, kind)
   if (!["pending", "seen", "acted", "ignored"].includes(status)) throw new Error(`invalid status: ${status}`)
   if (!VALID_ACTION.has(action)) throw new Error(`invalid action: ${action}`)
-  updateInboxItem(safeItemId, status, action, note || null)
+  updateInboxItem(db, safeItemId, status, action, note || null)
 }
 
 // ── channels listing / notes ───────────────────────────────────────────
@@ -347,10 +344,10 @@ export function markDiscordItem(itemId: string, status: InboxStatus, note = "", 
  *
  * @returns Channel rows.
  */
-export function listDiscordChannels(kind: RuntimeKind = "main"): unknown[] {
-  ensureConfiguredChannelsMaterialized()
+export function listDiscordChannels(db: Database.Database, kind: RuntimeKind = "main"): unknown[] {
+  ensureConfiguredChannelsMaterialized(db)
   const configuredIds = parseChannelIds()
-  return filterDiscordRowsForRuntime(queryChannels(configuredIds), kind)
+  return filterDiscordRowsForRuntime(db, queryChannels(db, configuredIds), kind)
 }
 
 /**
@@ -360,16 +357,16 @@ export function listDiscordChannels(kind: RuntimeKind = "main"): unknown[] {
  * @param note - Note text (empty string clears it).
  * @returns Updated channel row.
  */
-export function setDiscordChannelNote(channelId: string, note: string, kind: RuntimeKind = "main"): Record<string, unknown> {
-  const safeChannelId = resolveDiscordChannelId(channelId)
+export function setDiscordChannelNote(db: Database.Database, channelId: string, note: string, kind: RuntimeKind = "main"): Record<string, unknown> {
+  const safeChannelId = resolveDiscordChannelId(db, channelId)
   if (!safeChannelId) throw new Error("channel_id is required")
-  assertDiscordChannelAccess(safeChannelId, kind)
+  assertDiscordChannelAccess(db, safeChannelId, kind)
 
-  ensureConfiguredChannelsMaterialized([safeChannelId])
+  ensureConfiguredChannelsMaterialized(db, [safeChannelId])
   const trimmed = note.trim()
-  updateChannelNote(safeChannelId, trimmed.length > 0 ? trimmed : null)
+  updateChannelNote(db, safeChannelId, trimmed.length > 0 ? trimmed : null)
 
-  const row = getChannelRow(safeChannelId)
+  const row = getChannelRow(db, safeChannelId)
   return {
     ok: true,
     cleared: trimmed.length === 0,
@@ -387,7 +384,7 @@ const DEFAULT_SCAN_LIMIT = 50
  * @param params - Optional batch parameters.
  * @returns Formatted digest, or `null` when no new messages exist.
  */
-export function buildDiscordBatchDigest(params?: {
+export function buildDiscordBatchDigest(db: Database.Database, params?: {
   maxMessages?: number
   pendingPreviewLimit?: number
   intervalMs?: number
@@ -406,8 +403,8 @@ export function buildDiscordBatchDigest(params?: {
   // Cooldown channels outside their active window: spare their pending items
   // from both the stale-demote and this digest, so they resurface when active.
   const inactiveChannelIds = inactiveCooldownChannelIds()
-  repairDiscordMessageChannelFlags()
-  const privateChannelIds = params?.runtimeKind === "frontend" ? ownerDmChannelIds() : []
+  repairDiscordMessageChannelFlags(db)
+  const privateChannelIds = params?.runtimeKind === "frontend" ? ownerDmChannelIds(db) : []
   const activeConfiguredIds =
     inactiveChannelIds.length > 0 ? configuredIds.filter((id) => !inactiveChannelIds.includes(id)) : configuredIds
   const polledChannelIds = channelPoll ? activeConfiguredIds : []
@@ -425,10 +422,10 @@ export function buildDiscordBatchDigest(params?: {
   const channelScopeClause = `${configuredScopeClause} ${privateScopeClause}`
   const botUserId = config.discord.bot_user_id
 
-  autoDemoteStalePendingItems(autoSeenMinutes, [...new Set([...inactiveChannelIds, ...privateChannelIds])])
+  autoDemoteStalePendingItems(db, autoSeenMinutes, [...new Set([...inactiveChannelIds, ...privateChannelIds])])
 
   const from =
-    getDiscordMeta("discord_batch_last_dispatched_at") ??
+    getDiscordMeta(db, "discord_batch_last_dispatched_at") ??
     new Date(now.getTime() - intervalMs).toISOString()
 
   const queryOpts = {
@@ -438,16 +435,16 @@ export function buildDiscordBatchDigest(params?: {
     channelScopeClause,
   }
 
-  const messageRows = queryBatchMessages({ ...queryOpts, limit: maxMessages + 1 })
+  const messageRows = queryBatchMessages(db, { ...queryOpts, limit: maxMessages + 1 })
 
   if (messageRows.length === 0) return null
 
   const truncated = messageRows.length > maxMessages
   const recentMessages = truncated ? messageRows.slice(0, maxMessages) : messageRows
 
-  const pendingCount = countPendingInbox(queryOpts)
+  const pendingCount = countPendingInbox(db, queryOpts)
 
-  const pendingPreview = queryBatchPendingPreview({ ...queryOpts, limit: previewLimit })
+  const pendingPreview = queryBatchPendingPreview(db, { ...queryOpts, limit: previewLimit })
 
   // Cooldown channels outside their active window are dropped from this digest
   // and left as `pending` so they resurface once the window opens. The inactive
@@ -458,14 +455,14 @@ export function buildDiscordBatchDigest(params?: {
   const activePendingPreview = inactiveChannelIds.length
     ? pendingPreview.filter((row) => !inactiveChannelIds.includes(row.channel_id))
     : pendingPreview
-  const visibleRecentMessages = filterDiscordRowsForRuntime(activeRecentMessages, params?.runtimeKind)
-  const visiblePendingPreview = filterDiscordRowsForRuntime(activePendingPreview, params?.runtimeKind)
+  const visibleRecentMessages = filterDiscordRowsForRuntime(db, activeRecentMessages, params?.runtimeKind)
+  const visiblePendingPreview = filterDiscordRowsForRuntime(db, activePendingPreview, params?.runtimeKind)
 
   // If cooldown filtering removed everything, skip this batch (leave items
   // pending) rather than waking the agent with an empty digest.
   if (visibleRecentMessages.length === 0 && visiblePendingPreview.length === 0) return null
 
-  const replyContextByMessageId = buildReplyTargetContextMap([...visibleRecentMessages, ...visiblePendingPreview])
+  const replyContextByMessageId = buildReplyTargetContextMap(db, [...visibleRecentMessages, ...visiblePendingPreview])
   const targets: DiscordMessageTarget[] = []
   const targetByMessageId = new Map<string, DiscordMessageTarget>()
   const targetLabel = (row: {
@@ -477,7 +474,7 @@ export function buildDiscordBatchDigest(params?: {
   }): string => {
     let target = targetByMessageId.get(row.message_id)
     if (!target) {
-      const friendlyId = getOrCreateDiscordFriendlyId(row.message_id, row.channel_id)
+      const friendlyId = getOrCreateDiscordFriendlyId(db, row.message_id, row.channel_id)
       target = {
         position: targets.length + 1,
         friendlyId,
@@ -555,19 +552,19 @@ export function buildDiscordBatchDigest(params?: {
   // items are left `pending` so they reappear once their window opens.
   for (const row of visibleRecentMessages) {
     if (row.item_id) {
-      updateInboxItem(row.item_id, "seen", "noted", "auto-seen after inclusion in Discord batch context")
+      updateInboxItem(db, row.item_id, "seen", "noted", "auto-seen after inclusion in Discord batch context")
     }
   }
   for (const row of visiblePendingPreview) {
-    updateInboxItem(row.item_id, "seen", "noted", "auto-seen after inclusion in Discord batch context")
+      updateInboxItem(db, row.item_id, "seen", "noted", "auto-seen after inclusion in Discord batch context")
   }
-  markDiscordMessagesDispatched([
+  markDiscordMessagesDispatched(db, [
     ...visibleRecentMessages.map((row) => row.message_id),
     ...visiblePendingPreview.map((row) => row.message_id),
   ])
 
   const lastVisibleRecent = visibleRecentMessages.at(-1)
-  setDiscordMeta("discord_batch_last_dispatched_at", truncated && lastVisibleRecent ? lastVisibleRecent.first_seen_at : nowIso)
+  setDiscordMeta(db, "discord_batch_last_dispatched_at", truncated && lastVisibleRecent ? lastVisibleRecent.first_seen_at : nowIso)
 
   return {
     content: lines.join("\n"),
@@ -583,36 +580,35 @@ export function buildDiscordBatchDigest(params?: {
 
 type ReplyMode = "auto" | "plain" | "explicit"
 
-function resolveReferenceMessage(channelId: string, sourceItemId?: string, referenceMessage?: string): string | null {
+function resolveReferenceMessage(db: Database.Database, channelId: string, sourceItemId?: string, referenceMessage?: string): string | null {
   const ref = referenceMessage?.trim()
   if (ref) {
-    const friendly = resolveDiscordFriendlyId(ref)
+    const friendly = resolveDiscordFriendlyId(db, ref)
     if (friendly) return friendly.channelId === channelId ? friendly.messageId : null
 
-    if (/^\d+$/.test(ref) && messageExistsById(ref)) return ref
+    if (/^\d+$/.test(ref) && messageExistsById(db, ref)) return ref
 
-    const byContent = findMessageByContentPrefix(channelId, ref)
+    const byContent = findMessageByContentPrefix(db, channelId, ref)
     if (byContent) return byContent
 
-    const byUsername = findMessageByUsername(channelId, `%${ref}%`)
+    const byUsername = findMessageByUsername(db, channelId, `%${ref}%`)
     if (byUsername) return byUsername
 
     return null
   }
 
-  return resolveSourceMessageId(sourceItemId)
+  return resolveSourceMessageId(db, sourceItemId)
 }
-
-function resolveSourceMessageId(sourceItemId?: string): string | null {
+function resolveSourceMessageId(db: Database.Database, sourceItemId?: string): string | null {
   const safeSourceItemId = sourceItemId?.trim()
   if (!safeSourceItemId) return null
-  return getItemMessageId(safeSourceItemId) ?? (messageExistsById(safeSourceItemId) ? safeSourceItemId : null)
+  return getItemMessageId(db, safeSourceItemId) ?? (messageExistsById(db, safeSourceItemId) ? safeSourceItemId : null)
 }
 
-function resolveSourceChannelId(sourceItemId?: string): string | null {
-  const sourceMessageId = resolveSourceMessageId(sourceItemId)
+function resolveSourceChannelId(db: Database.Database, sourceItemId?: string): string | null {
+  const sourceMessageId = resolveSourceMessageId(db, sourceItemId)
   if (!sourceMessageId) return null
-  return getMessageForReference(sourceMessageId)?.channel_id?.trim() || null
+  return getMessageForReference(db, sourceMessageId)?.channel_id?.trim() || null
 }
 
 const AUTO_REPLY_STALE_MINUTES = 10
@@ -630,14 +626,14 @@ function responseGroupAlreadyReferencesSource(
   return false
 }
 
-function shouldKeepAutoReplyPlain(channelId: string, sourceMessageId: string): boolean {
-  const recent = queryChannelMessages(channelId, "", AUTO_REPLY_GROUP_SCAN_LIMIT)
+function shouldKeepAutoReplyPlain(db: Database.Database, channelId: string, sourceMessageId: string): boolean {
+  const recent = queryChannelMessages(db, channelId, "", AUTO_REPLY_GROUP_SCAN_LIMIT)
   if (recent[0]?.message_id === sourceMessageId) return true
   return responseGroupAlreadyReferencesSource(recent, sourceMessageId)
 }
 
-function shouldUseReplyReference(channelId: string, sourceMessageId: string): boolean {
-  const source = getMessageForReference(sourceMessageId)
+function shouldUseReplyReference(db: Database.Database, channelId: string, sourceMessageId: string): boolean {
+  const source = getMessageForReference(db, sourceMessageId)
 
   if (!source?.message_id || !source.channel_id) return false
   if (source.channel_id !== channelId) return false
@@ -646,7 +642,7 @@ function shouldUseReplyReference(channelId: string, sourceMessageId: string): bo
   // single model response may also be delivered as several consecutive
   // messages; once that group references the source, keep the rest plain until
   // another person speaks.
-  if (shouldKeepAutoReplyPlain(channelId, sourceMessageId)) return false
+  if (shouldKeepAutoReplyPlain(db, channelId, sourceMessageId)) return false
 
   const createdMs = Date.parse(source.created_at ?? "")
   if (Number.isFinite(createdMs)) {
@@ -654,13 +650,14 @@ function shouldUseReplyReference(channelId: string, sourceMessageId: string): bo
     if (Date.now() - createdMs >= staleMs) return true
   }
 
-  const intervening = countInterveningMessages(channelId, sourceMessageId, source.author_id ?? "")
+  const intervening = countInterveningMessages(db, channelId, sourceMessageId, source.author_id ?? "")
   return intervening > 0
 }
 
-function inferPendingDmItemId(channelId: string): string | null {
-  return findPendingDmItemId(channelId)
+function inferPendingDmItemId(db: Database.Database, channelId: string): string | null {
+  return findPendingDmItemId(db, channelId)
 }
+
 
 function normalizeReplyMode(value: unknown): ReplyMode {
   if (value === "plain" || value === "explicit" || value === "auto") return value
@@ -676,7 +673,7 @@ type DeliveryTargetParams = {
   replyMode?: string
 }
 
-export async function resolveDiscordDeliveryTarget(params: DeliveryTargetParams): Promise<{
+export async function resolveDiscordDeliveryTarget(db: Database.Database, params: DeliveryTargetParams): Promise<{
   channelId: string
   replyMode: ReplyMode
   sourceItemId: string | null
@@ -686,8 +683,8 @@ export async function resolveDiscordDeliveryTarget(params: DeliveryTargetParams)
 }> {
   const turnTargets = params.turnTargets ?? []
   const selectorSupplied = hasDiscordTargetSelector(params.target)
-  const requestedChannelId = resolveDiscordChannelId(params.channelId)
-  const referenceRoute = selectorSupplied ? null : resolveDiscordFriendlyId(params.referenceMessage)
+  const requestedChannelId = resolveDiscordChannelId(db, params.channelId)
+  const referenceRoute = selectorSupplied ? null : resolveDiscordFriendlyId(db, params.referenceMessage)
   const selected = selectorSupplied || (!requestedChannelId && !referenceRoute)
     ? selectDiscordTarget(turnTargets, params.target)
     : null
@@ -704,12 +701,12 @@ export async function resolveDiscordDeliveryTarget(params: DeliveryTargetParams)
   }
   if (!channelId) channelId = contextualChannelId ?? ""
   if (!channelId && params.sourceItemId?.trim()) {
-    channelId = getItemChannelId(params.sourceItemId.trim()) ?? resolveSourceChannelId(params.sourceItemId) ?? ""
+    channelId = getItemChannelId(db, params.sourceItemId.trim()) ?? resolveSourceChannelId(db, params.sourceItemId) ?? ""
   }
   if (!channelId) throw new Error("no active Discord target; provide channel_id for a proactive message")
 
   const explicitSourceItemId = selected?.itemId ?? selected?.messageId ?? params.sourceItemId?.trim() ?? null
-  const inferredSourceItemId = explicitSourceItemId ? null : inferPendingDmItemId(channelId)
+  const inferredSourceItemId = explicitSourceItemId ? null : inferPendingDmItemId(db, channelId)
   let resolvedSourceItemId = explicitSourceItemId ?? inferredSourceItemId
   const referenceSelector = selectorSupplied
     ? selected?.messageId ?? String(params.target).trim()
@@ -717,6 +714,7 @@ export async function resolveDiscordDeliveryTarget(params: DeliveryTargetParams)
   const requestedReferenceId = selectorSupplied && selected
     ? selected.messageId
     : resolveReferenceMessage(
+        db,
         channelId,
         resolvedSourceItemId ?? undefined,
         referenceSelector,
@@ -730,7 +728,7 @@ export async function resolveDiscordDeliveryTarget(params: DeliveryTargetParams)
   const referenceMessageId = requestedReferenceId
     ? replyMode === "plain"
       ? null
-      : shouldUseReplyReference(channelId, requestedReferenceId)
+      : shouldUseReplyReference(db, channelId, requestedReferenceId)
         ? requestedReferenceId
         : null
     : null
@@ -739,19 +737,16 @@ export async function resolveDiscordDeliveryTarget(params: DeliveryTargetParams)
     channelId,
     replyMode,
     sourceItemId: resolvedSourceItemId,
-    sourceMessageId: resolveSourceMessageId(resolvedSourceItemId ?? undefined),
+    sourceMessageId: resolveSourceMessageId(db, resolvedSourceItemId ?? undefined),
     referenceMessageId,
     inferredSourceItemId,
   }
 }
-
 /**
- * Sends a Discord message with optional reply reference resolution.
- *
  * @param params - Send parameters including channel, content, and reply options.
  * @returns Send result with message id and resolved reference information.
  */
-export async function sendDiscordMessage(params: {
+export async function sendDiscordMessage(db: Database.Database, params: {
   channelId?: string
   content: string
   target?: unknown
@@ -761,10 +756,10 @@ export async function sendDiscordMessage(params: {
   referenceMessage?: string
   runtimeKind?: RuntimeKind
 }): Promise<Record<string, unknown>> {
-  const delivery = await resolveDiscordDeliveryTarget(params)
+  const delivery = await resolveDiscordDeliveryTarget(db, params)
   const { channelId, replyMode, sourceItemId: resolvedSourceItemId, sourceMessageId: resolvedSourceMessageId,
     referenceMessageId, inferredSourceItemId } = delivery
-  assertDiscordChannelAccess(channelId, params.runtimeKind)
+  assertDiscordChannelAccess(db, channelId, params.runtimeKind)
 
   const content = String(params.content ?? "").trim()
   if (!content) throw new Error("content is required")
@@ -791,6 +786,7 @@ export async function sendDiscordMessage(params: {
   )) as DiscordObject
 
   const ingest = ingestDiscordEvent(
+    db,
     {
       message,
       channel: {
@@ -804,9 +800,10 @@ export async function sendDiscordMessage(params: {
     { botUserId },
   )
 
-  if (resolvedSourceItemId && getItemMessageId(resolvedSourceItemId)) {
+  if (resolvedSourceItemId && getItemMessageId(db, resolvedSourceItemId)) {
     const wasInferred = inferredSourceItemId !== null
     markDiscordItem(
+      db,
       resolvedSourceItemId,
       "acted",
       `responded via discord_send (${replyMode}${referenceMessageId ? ", explicit" : ", plain"}${wasInferred ? ", inferred_dm_item" : ""})`,
@@ -837,7 +834,7 @@ const DISCORD_MAX_FILE_BYTES = 25 * 1024 * 1024 // 25 MB
  * @param params - Upload parameters.
  * @returns Upload result with message id and attachment info.
  */
-export async function uploadDiscordFile(params: {
+export async function uploadDiscordFile(db: Database.Database, client: ClientService, params: {
   channelId?: string
   filePath: string
   content?: string
@@ -848,10 +845,10 @@ export async function uploadDiscordFile(params: {
   referenceMessage?: string
   runtimeKind?: RuntimeKind
 }): Promise<Record<string, unknown>> {
-  const delivery = await resolveDiscordDeliveryTarget(params)
+  const delivery = await resolveDiscordDeliveryTarget(db, params)
   const { channelId, replyMode, sourceItemId: resolvedSourceItemId, referenceMessageId,
     inferredSourceItemId } = delivery
-  assertDiscordChannelAccess(channelId, params.runtimeKind)
+  assertDiscordChannelAccess(db, channelId, params.runtimeKind)
 
   const filePath = String(params.filePath ?? "").trim()
   if (!filePath) throw new Error("file_path is required")
@@ -862,7 +859,7 @@ export async function uploadDiscordFile(params: {
   let fileSize: number
 
   try {
-    const artifact = await readClientFile(filePath, DISCORD_MAX_FILE_BYTES)
+    const artifact = await client.readFile(filePath, DISCORD_MAX_FILE_BYTES)
     fileBuf = artifact.data
     fileName = artifact.name
     fileSize = artifact.data.length
@@ -896,6 +893,7 @@ export async function uploadDiscordFile(params: {
   )) as DiscordObject
 
   const ingest = ingestDiscordEvent(
+    db,
     {
       message,
       channel: {
@@ -923,6 +921,7 @@ export async function uploadDiscordFile(params: {
   if (resolvedSourceItemId) {
     const wasInferred = inferredSourceItemId !== null
     markDiscordItem(
+      db,
       resolvedSourceItemId,
       "acted",
       `uploaded file${wasInferred ? ", inferred_dm_item" : ""}`,
@@ -953,7 +952,7 @@ export async function uploadDiscordFile(params: {
  * @param params - Scan parameters.
  * @returns Summary of scanned channels and fetched/stored messages.
  */
-export async function scanDiscordChannels(params?: {
+export async function scanDiscordChannels(db: Database.Database, params?: {
   limit?: number
   channelIds?: string[] | string
   beforeMessageId?: string
@@ -962,11 +961,11 @@ export async function scanDiscordChannels(params?: {
   const rest = makeRestClient()
   const botUserId = await getBotUserId(rest)
 
-  const requestedChannelIds = parseChannelIds(params?.channelIds).map(resolveDiscordChannelId)
+  const requestedChannelIds = parseChannelIds(params?.channelIds).map((channelId) => resolveDiscordChannelId(db, channelId))
   const channelIds = params?.runtimeKind === "frontend"
-    ? requestedChannelIds.filter((channelId) => !isOwnerDmChannel(channelId))
+    ? requestedChannelIds.filter((channelId) => !isOwnerDmChannel(db, channelId))
     : requestedChannelIds
-  ensureConfiguredChannelsMaterialized(channelIds)
+  ensureConfiguredChannelsMaterialized(db, channelIds)
   if (channelIds.length === 0) {
     return {
       scanned_channels: 0,
@@ -1009,7 +1008,7 @@ export async function scanDiscordChannels(params?: {
       }
     }
 
-    upsertDiscordChannel({
+    upsertDiscordChannel(db, {
       channelId,
       guildId,
       channelType,
@@ -1033,6 +1032,7 @@ export async function scanDiscordChannels(params?: {
 
     for (const message of messages) {
       const result = ingestDiscordEvent(
+        db,
         {
           message,
           channel: {

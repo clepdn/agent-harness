@@ -5,12 +5,20 @@
  */
 
 import { createHash } from "crypto"
-import { getDb, isVecAvailable, MEMORY_EMBEDDING_DIMENSIONS } from "../db"
+import type Database from "better-sqlite3"
 import type { RuntimeKind } from "../runner/types"
 import { assertDiscordChannelAccess, filterDiscordRowsForRuntime } from "./access"
 import { getOrCreateDiscordFriendlyId, resolveDiscordChannelId } from "./friendly-id"
-import { EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, embeddingsConfigured, embedTexts } from "../embeddings"
 import { MEMORY_SEMANTIC_MIN_SIMILARITY, normalizeText, type DiscordMemorySearchResult } from "../memory/shared"
+
+export type DiscordEmbeddings = {
+  configured(): boolean
+  dimensions: number
+  model: string
+  embedTexts(texts: string[], signal?: AbortSignal): Promise<number[][]>
+}
+
+const DISCORD_MEMORY_EMBEDDING_DIMENSIONS = 3072
 
 const DISCORD_EMBEDDING_BATCH_SIZE = Math.max(
   1,
@@ -102,9 +110,9 @@ function formatHumanTimestamp(value: string | null | undefined): string {
   })
 }
 
-function publicRow(row: DiscordSearchRow, extra: Record<string, unknown> = {}): Record<string, unknown> {
+function publicRow(db: Database.Database, row: DiscordSearchRow, extra: Record<string, unknown> = {}): Record<string, unknown> {
   return {
-    id: getOrCreateDiscordFriendlyId(row.message_id, row.channel_id),
+    id: getOrCreateDiscordFriendlyId(db, row.message_id, row.channel_id),
     message_id: row.message_id,
     source_item_id: row.message_id,
     channel_id: row.channel_id,
@@ -122,40 +130,32 @@ function publicRow(row: DiscordSearchRow, extra: Record<string, unknown> = {}): 
   }
 }
 
-function getMessage(channelId: string, messageId: string): DiscordSearchRow | null {
-  const db = getDb()
-  const row = db
-    .prepare(
-      `select
-         m.message_id, m.channel_id, m.guild_id, m.author_id, m.author_username,
-         m.content, m.created_at, m.is_dm, m.mentions_bot, m.is_from_bot,
-         c.guild_name, c.channel_name
-       from discord_messages m
-       left join discord_channels c on c.channel_id = m.channel_id
-       where m.channel_id = ? and m.message_id = ?`,
-    )
-    .get(channelId, messageId) as DiscordSearchRow | undefined
+function getMessage(db: Database.Database, channelId: string, messageId: string): DiscordSearchRow | null {
+  const row = db.prepare<unknown[], DiscordSearchRow>(`select
+     m.message_id, m.channel_id, m.guild_id, m.author_id, m.author_username,
+     m.content, m.created_at, m.is_dm, m.mentions_bot, m.is_from_bot,
+     c.guild_name, c.channel_name
+   from discord_messages m
+   left join discord_channels c on c.channel_id = m.channel_id
+   where m.channel_id = ? and m.message_id = ?`).get(channelId, messageId)
   return row ?? null
 }
 
-function discordEmbeddingUnavailableReason(): string | null {
-  if (!isVecAvailable()) return "sqlite-vec unavailable"
-  if (!embeddingsConfigured()) return "embeddings disabled: set EMBEDDING_API_KEY"
-  if (EMBEDDING_DIMENSIONS !== MEMORY_EMBEDDING_DIMENSIONS) {
-    return `embedding dimension mismatch: configured ${EMBEDDING_DIMENSIONS}, expected ${MEMORY_EMBEDDING_DIMENSIONS}`
+function discordEmbeddingUnavailableReason(embeddings: DiscordEmbeddings | undefined, vecAvailable: () => boolean): string | null {
+  if (!vecAvailable()) return "sqlite-vec unavailable"
+  if (!embeddings?.configured()) return "embeddings disabled: set EMBEDDING_API_KEY"
+  if (embeddings.dimensions !== DISCORD_MEMORY_EMBEDDING_DIMENSIONS) {
+    return `embedding dimension mismatch: configured ${embeddings.dimensions}, expected ${DISCORD_MEMORY_EMBEDDING_DIMENSIONS}`
   }
   return null
 }
 
-let orphanCleanupDone = false
-
-function cleanupDiscordEmbeddingOrphans(): void {
-  if (orphanCleanupDone) return
-  const db = getDb()
+function cleanupDiscordEmbeddingOrphans(db: Database.Database): void {
   db.prepare("delete from discord_message_embedding_meta where message_id not in (select message_id from discord_messages)").run()
   db.prepare("delete from discord_message_vec where rowid not in (select cast(message_id as integer) from discord_messages)").run()
-  orphanCleanupDone = true
 }
+
+
 
 /**
  * Embeds one bounded batch of pending Discord messages.
@@ -169,7 +169,8 @@ function cleanupDiscordEmbeddingOrphans(): void {
  * the worker rather than trigger batch subdivision, which only multiplies spend.
  */
 function isFatalEmbeddingError(err: unknown): boolean {
-  const status = (err as { status?: number; code?: number })?.status ?? (err as { code?: number })?.code
+  const record = err && typeof err === "object" ? err : undefined
+  const status = record && "status" in record ? record.status : record && "code" in record ? record.code : undefined
   if (status === 401 || status === 403 || status === 429) return true
   const msg = (err instanceof Error ? err.message : String(err)).toLowerCase()
   return (
@@ -188,42 +189,39 @@ export class FatalEmbeddingError extends Error {
   }
 }
 
-export async function syncDiscordMessageEmbeddingsBatch(params?: {
-  channelId?: string
-  limit?: number
-}): Promise<DiscordEmbeddingSyncResult> {
-  const skipped = discordEmbeddingUnavailableReason()
+export async function syncDiscordMessageEmbeddingsBatch(
+  db: Database.Database,
+  embeddings: DiscordEmbeddings,
+  vecAvailable: () => boolean,
+  params?: { channelId?: string; limit?: number },
+): Promise<DiscordEmbeddingSyncResult> {
+  const skipped = discordEmbeddingUnavailableReason(embeddings, vecAvailable)
   if (skipped) return { embedded: 0, selected: 0, skipped }
 
-  cleanupDiscordEmbeddingOrphans()
+  cleanupDiscordEmbeddingOrphans(db)
 
   const channelId = String(params?.channelId ?? "").trim()
   const limit = Math.max(1, Math.min(512, Math.trunc(params?.limit ?? DISCORD_EMBEDDING_BATCH_SIZE) || DISCORD_EMBEDDING_BATCH_SIZE))
-  const db = getDb()
-  const rows = db
-    .prepare(
-      `select
-         m.message_id, m.channel_id, m.guild_id, m.author_id, m.author_username,
-         m.content, m.created_at, m.is_dm, m.mentions_bot, m.is_from_bot,
-         c.guild_name, c.channel_name,
-         e.model, e.dimensions, e.content_hash
-       from discord_messages m
-       left join discord_channels c on c.channel_id = m.channel_id
-       left join discord_message_embedding_meta e on e.message_id = m.message_id
-       where (? = '' or m.channel_id = ?)
-         and not exists (
-           select 1 from discord_memory_prunes p where p.message_id = m.message_id
-         )
-         and m.message_id not glob '*[^0-9]*'
-         and (
-           e.message_id is null
-           or e.model != ?
-           or e.dimensions != ?
-         )
-       order by cast(m.message_id as integer) asc
-       limit ?`,
-    )
-    .all(channelId, channelId, EMBEDDING_MODEL, MEMORY_EMBEDDING_DIMENSIONS, limit) as DiscordEmbeddingRow[]
+  const rows = db.prepare<unknown[], DiscordEmbeddingRow>(`select
+     m.message_id, m.channel_id, m.guild_id, m.author_id, m.author_username,
+     m.content, m.created_at, m.is_dm, m.mentions_bot, m.is_from_bot,
+     c.guild_name, c.channel_name,
+     e.model, e.dimensions, e.content_hash
+   from discord_messages m
+   left join discord_channels c on c.channel_id = m.channel_id
+   left join discord_message_embedding_meta e on e.message_id = m.message_id
+   where (? = '' or m.channel_id = ?)
+     and not exists (
+       select 1 from discord_memory_prunes p where p.message_id = m.message_id
+     )
+     and m.message_id not glob '*[^0-9]*'
+     and (
+       e.message_id is null
+       or e.model != ?
+       or e.dimensions != ?
+     )
+   order by cast(m.message_id as integer) asc
+   limit ?`).all(channelId, channelId, embeddings.model, DISCORD_MEMORY_EMBEDDING_DIMENSIONS, limit)
 
   const pending = rows
     .map((row) => {
@@ -232,8 +230,8 @@ export async function syncDiscordMessageEmbeddingsBatch(params?: {
     })
     .filter(
       (row) =>
-        row.model !== EMBEDDING_MODEL ||
-        row.dimensions !== MEMORY_EMBEDDING_DIMENSIONS ||
+        row.model !== embeddings.model ||
+        row.dimensions !== DISCORD_MEMORY_EMBEDDING_DIMENSIONS ||
         row.content_hash !== row.next_hash,
     )
 
@@ -256,12 +254,9 @@ export async function syncDiscordMessageEmbeddingsBatch(params?: {
   const embedPendingRows = async (batch: PendingDiscordEmbeddingRow[]): Promise<void> => {
     let vectors: number[][]
     try {
-      vectors = await embedTexts(batch.map((row) => row.embedding_text))
+      vectors = await embeddings.embedTexts(batch.map((row) => row.embedding_text))
     } catch (err) {
-      // The embedTexts call itself failed. This is a per-REQUEST error (auth,
-      // quota, network), never a per-row problem — subdividing just multiplies
-      // the cost of a guaranteed failure, so bail hard on fatal errors and let
-      // transient ones bubble to the tick's retry backoff.
+      // Request failures are not per-row problems; subdivision only multiplies spend.
       if (isFatalEmbeddingError(err)) throw err
       if (batch.length <= 1) throw err
       const midpoint = Math.ceil(batch.length / 2)
@@ -273,34 +268,25 @@ export async function syncDiscordMessageEmbeddingsBatch(params?: {
       return
     }
 
-    // Persistence is per-row robust: a single malformed row (non-numeric id,
-    // wrong-dimension vector, missing vector) is quarantined and quarantined, never
-    // allowed to roll back the whole batch. This is what previously let 4 test
-    // fixtures perpetually poison every other message's embedding.
     db.transaction(() => {
       batch.forEach((row, index) => {
-        // A prune may happen while the embedding request is in flight. Recheck
-        // inside the write transaction so that late results cannot resurrect it.
         if (isPruned.get(row.message_id)) return
         const vector = vectors[index]
         if (!vector) {
           quarantined += 1
           return
         }
-        // Quarantine a row that cannot be embedded: record meta so it is not
-        // re-selected forever, but skip the vector. Prevents a permanent loop
-        // (which is the non-crashing form of the same poison-row bug).
         const quarantine = (reason: string) => {
           console.warn(`[discord embeddings] skipping message ${row.message_id}: ${reason}`)
           try {
-            upsertMeta.run(row.message_id, EMBEDDING_MODEL, MEMORY_EMBEDDING_DIMENSIONS, row.next_hash)
+            upsertMeta.run(row.message_id, embeddings.model, DISCORD_MEMORY_EMBEDDING_DIMENSIONS, row.next_hash)
           } catch {
             // meta write for a malformed id can also fail; nothing more to do
           }
           quarantined += 1
         }
-        if (vector.length !== MEMORY_EMBEDDING_DIMENSIONS) {
-          quarantine(`dimension ${vector.length} != ${MEMORY_EMBEDDING_DIMENSIONS}`)
+        if (vector.length !== DISCORD_MEMORY_EMBEDDING_DIMENSIONS) {
+          quarantine(`dimension ${vector.length} != ${DISCORD_MEMORY_EMBEDDING_DIMENSIONS}`)
           return
         }
         if (!/^[0-9]+$/.test(row.message_id)) {
@@ -309,7 +295,7 @@ export async function syncDiscordMessageEmbeddingsBatch(params?: {
         }
         try {
           upsertVector.run(BigInt(row.message_id), vectorParam(vector))
-          upsertMeta.run(row.message_id, EMBEDDING_MODEL, MEMORY_EMBEDDING_DIMENSIONS, row.next_hash)
+          upsertMeta.run(row.message_id, embeddings.model, DISCORD_MEMORY_EMBEDDING_DIMENSIONS, row.next_hash)
           embedded += 1
         } catch (rowErr) {
           quarantine(rowErr instanceof Error ? rowErr.message : String(rowErr))
@@ -332,7 +318,11 @@ export async function syncDiscordMessageEmbeddingsBatch(params?: {
  * Starts a non-blocking worker that continuously embeds pending Discord
  * messages until caught up, then wakes periodically for new messages.
  */
-export function startDiscordEmbeddingBackfill(): DiscordEmbeddingBackfillHandle {
+export function startDiscordEmbeddingBackfill(
+  db: Database.Database,
+  embeddings: DiscordEmbeddings | undefined,
+  vecAvailable: () => boolean,
+): DiscordEmbeddingBackfillHandle {
   const enabled = (process.env.DISCORD_EMBEDDING_BACKFILL ?? "true").trim().toLowerCase() !== "false"
   let stopped = false
   let running = false
@@ -344,9 +334,7 @@ export function startDiscordEmbeddingBackfill(): DiscordEmbeddingBackfillHandle 
 
   const schedule = (delayMs: number) => {
     if (stopped) return
-    timer = setTimeout(() => {
-      void tick()
-    }, delayMs)
+    timer = setTimeout(() => { void tick() }, delayMs)
     if (typeof timer.unref === "function") timer.unref()
   }
 
@@ -354,7 +342,11 @@ export function startDiscordEmbeddingBackfill(): DiscordEmbeddingBackfillHandle 
     if (stopped || running) return
     running = true
     try {
-      const result = await syncDiscordMessageEmbeddingsBatch()
+      if (!embeddings) {
+        schedule(DISCORD_EMBEDDING_IDLE_MS)
+        return
+      }
+      const result = await syncDiscordMessageEmbeddingsBatch(db, embeddings, vecAvailable)
       if (result.skipped) {
         if (loggedSkip !== result.skipped) {
           console.warn(`[discord embeddings] skipped: ${result.skipped}`)
@@ -382,9 +374,7 @@ export function startDiscordEmbeddingBackfill(): DiscordEmbeddingBackfillHandle 
       schedule(DISCORD_EMBEDDING_IDLE_MS)
     } catch (err) {
       if (err instanceof FatalEmbeddingError) {
-        console.error(
-          `[discord embeddings] fatal error, halting backfill (no auto-retry until service restart): ${err.message}`,
-        )
+        console.error(`[discord embeddings] fatal error, halting backfill (no auto-retry until service restart): ${err.message}`)
         stopped = true
         if (timer) clearTimeout(timer)
         return
@@ -396,8 +386,8 @@ export function startDiscordEmbeddingBackfill(): DiscordEmbeddingBackfillHandle 
     }
   }
 
-  if (!enabled) {
-    console.log("[discord embeddings] backfill disabled")
+  if (!enabled || !embeddings) {
+    if (!enabled) console.log("[discord embeddings] backfill disabled")
     return { stop: () => {} }
   }
 
@@ -411,63 +401,61 @@ export function startDiscordEmbeddingBackfill(): DiscordEmbeddingBackfillHandle 
   }
 }
 
-function keywordDiscordSearch(channelId: string, query: string, limit: number): Record<string, unknown>[] {
-  const db = getDb()
+function keywordDiscordSearch(db: Database.Database, channelId: string, query: string, limit: number): Record<string, unknown>[] {
   const terms = query.split(/\s+/).map((term) => term.trim()).filter(Boolean).slice(0, 8)
   const pattern = `%${terms.join("%")}%`
-  const rows = db
-    .prepare(
-      `select
-         m.message_id, m.channel_id, m.guild_id, m.author_id, m.author_username,
-         m.content, m.created_at, m.is_dm, m.mentions_bot, m.is_from_bot,
-         c.guild_name, c.channel_name
-       from discord_messages m
-       left join discord_channels c on c.channel_id = m.channel_id
-       where m.channel_id = ? and m.content like ?
-       order by cast(m.message_id as integer) desc
-       limit ?`,
-    )
-    .all(channelId, pattern, limit) as DiscordSearchRow[]
-  return rows.map((row) => publicRow(row, { match: "keyword" }))
+  const rows = db.prepare<unknown[], DiscordSearchRow>(`select
+     m.message_id, m.channel_id, m.guild_id, m.author_id, m.author_username,
+     m.content, m.created_at, m.is_dm, m.mentions_bot, m.is_from_bot,
+     c.guild_name, c.channel_name
+   from discord_messages m
+   left join discord_channels c on c.channel_id = m.channel_id
+   where m.channel_id = ? and m.content like ?
+   order by cast(m.message_id as integer) desc
+   limit ?`).all(channelId, pattern, limit)
+  return rows.map((row) => publicRow(db, row, { match: "keyword", semantic_similarity: 0 }))
 }
 
-async function semanticDiscordSearch(channelId: string, query: string, limit: number): Promise<Record<string, unknown>[]> {
-  const skipped = discordEmbeddingUnavailableReason()
-  if (skipped) return keywordDiscordSearch(channelId, query, limit)
+async function semanticDiscordSearch(
+  db: Database.Database,
+  embeddings: DiscordEmbeddings | undefined,
+  vecAvailable: () => boolean,
+  channelId: string,
+  query: string,
+  limit: number,
+): Promise<Record<string, unknown>[]> {
+  const skipped = discordEmbeddingUnavailableReason(embeddings, vecAvailable)
+  if (skipped || !embeddings) return keywordDiscordSearch(db, channelId, query, limit)
   if (DISCORD_SEARCH_CATCHUP_BATCH_SIZE > 0) {
-    await syncDiscordMessageEmbeddingsBatch({ channelId, limit: DISCORD_SEARCH_CATCHUP_BATCH_SIZE })
+    await syncDiscordMessageEmbeddingsBatch(db, embeddings, vecAvailable, { channelId, limit: DISCORD_SEARCH_CATCHUP_BATCH_SIZE })
   }
 
-  const [vector] = await embedTexts([query])
-  if (!vector) return keywordDiscordSearch(channelId, query, limit)
+  const [vector] = await embeddings.embedTexts([query])
+  if (!vector || vector.length !== DISCORD_MEMORY_EMBEDDING_DIMENSIONS) return keywordDiscordSearch(db, channelId, query, limit)
 
-  const db = getDb()
-  const rows = db
-    .prepare(
-      `select
-         m.message_id, m.channel_id, m.guild_id, m.author_id, m.author_username,
-         m.content, m.created_at, m.is_dm, m.mentions_bot, m.is_from_bot,
-         c.guild_name, c.channel_name,
-         v.distance
-       from discord_message_vec v
-       join discord_messages m on m.message_id = cast(v.rowid as text)
-       left join discord_channels c on c.channel_id = m.channel_id
-       where v.embedding match ? and k = ?
-       order by v.distance`,
-    )
-    .all(vectorParam(vector), Math.max(limit * 200, 1000)) as Array<DiscordSearchRow & { distance: number }>
+  const rows = db.prepare<unknown[], DiscordSearchRow & { distance: number }>(`select
+     m.message_id, m.channel_id, m.guild_id, m.author_id, m.author_username,
+     m.content, m.created_at, m.is_dm, m.mentions_bot, m.is_from_bot,
+     c.guild_name, c.channel_name,
+     v.distance
+   from discord_message_vec v
+   join discord_messages m on m.message_id = cast(v.rowid as text)
+   left join discord_channels c on c.channel_id = m.channel_id
+   where v.embedding match ? and k = ?
+   order by v.distance`).all(vectorParam(vector), Math.max(limit * 200, 1000))
 
   const results = rows
     .filter((row) => row.channel_id === channelId)
     .slice(0, limit)
-    .map((row) => publicRow(row, {
+    .map((row) => publicRow(db, row, {
       match: "semantic",
       semantic_distance: row.distance,
       semantic_similarity: 1 - row.distance,
     }))
 
-  return results.length > 0 ? results : keywordDiscordSearch(channelId, query, limit)
+  return results.length > 0 ? results : keywordDiscordSearch(db, channelId, query, limit)
 }
+
 
 function discordMemorySource(row: DiscordSearchRow): string {
   const location = row.is_dm === 1
@@ -477,44 +465,54 @@ function discordMemorySource(row: DiscordSearchRow): string {
   return `[discord] ${location} / ${author} / ${formatHumanTimestamp(row.created_at)}`
 }
 
+function keywordDiscordMemorySearch(db: Database.Database, query: string, limit: number, runtimeKind: RuntimeKind): DiscordMemorySearchResult[] {
+  const terms = query.split(/\s+/).map((term) => term.trim()).filter(Boolean).slice(0, 8)
+  if (terms.length === 0) return []
+  const rows = db.prepare<unknown[], DiscordSearchRow>(`select m.message_id, m.channel_id, m.guild_id, m.author_id, m.author_username, m.content, m.created_at, m.is_dm, m.mentions_bot, m.is_from_bot, c.guild_name, c.channel_name from discord_messages m left join discord_channels c on c.channel_id = m.channel_id where m.content like ? and not exists (select 1 from discord_memory_prunes p where p.message_id = m.message_id) order by cast(m.message_id as integer) desc limit ?`).all(`%${terms.join("%")}%`, Math.max(1, Math.min(10, Math.trunc(limit) || 5)))
+  return filterDiscordRowsForRuntime(db, rows, runtimeKind).map((row) => ({
+    id: `discord:${row.message_id}`, kind: "discord", messageId: row.message_id, channelId: row.channel_id,
+    guildId: row.guild_id, guildName: row.guild_name, channelName: row.channel_name, authorId: row.author_id,
+    authorUsername: row.author_username, createdAt: row.created_at, source: discordMemorySource(row), content: row.content,
+    preview: normalizeText(row.content), semanticSimilarity: 0,
+  }))
+}
+
 /** Search the global Discord vector index for model-facing long-term-memory results. */
 export async function searchDiscordMemoryEntries(
+  db: Database.Database,
+  embeddings: DiscordEmbeddings | undefined,
+  vecAvailable: () => boolean,
   query: string,
   limit: number,
   queryVector?: number[],
   runtimeKind: RuntimeKind = "main",
 ): Promise<DiscordMemorySearchResult[]> {
   const skipped = queryVector
-    ? (!isVecAvailable() ? "sqlite-vec unavailable" : null)
-    : discordEmbeddingUnavailableReason()
-  if (skipped) return []
-  if (DISCORD_SEARCH_CATCHUP_BATCH_SIZE > 0 && embeddingsConfigured()) {
-    await syncDiscordMessageEmbeddingsBatch({ limit: DISCORD_SEARCH_CATCHUP_BATCH_SIZE })
+    ? (!vecAvailable() ? "sqlite-vec unavailable" : null)
+    : discordEmbeddingUnavailableReason(embeddings, vecAvailable)
+  if (skipped || (!queryVector && !embeddings)) return keywordDiscordMemorySearch(db, query, limit, runtimeKind)
+  if (DISCORD_SEARCH_CATCHUP_BATCH_SIZE > 0 && embeddings?.configured()) {
+    await syncDiscordMessageEmbeddingsBatch(db, embeddings, vecAvailable, { limit: DISCORD_SEARCH_CATCHUP_BATCH_SIZE })
   }
 
-  const vector = queryVector ?? (await embedTexts([query]))[0]
-  if (!vector || vector.length !== MEMORY_EMBEDDING_DIMENSIONS) return []
-
+  const vector = queryVector ?? (embeddings ? (await embeddings.embedTexts([query]))[0] : undefined)
+  if (!vector || vector.length !== DISCORD_MEMORY_EMBEDDING_DIMENSIONS) return keywordDiscordMemorySearch(db, query, limit, runtimeKind)
   const boundedLimit = Math.max(1, Math.min(10, Math.trunc(limit) || 5))
-  const rows = getDb()
-    .prepare(
-      `select
-         m.message_id, m.channel_id, m.guild_id, m.author_id, m.author_username,
-         m.content, m.created_at, m.is_dm, m.mentions_bot, m.is_from_bot,
-         c.guild_name, c.channel_name,
-         v.distance
-       from discord_message_vec v
-       join discord_messages m on m.message_id = cast(v.rowid as text)
-       left join discord_channels c on c.channel_id = m.channel_id
-       where v.embedding match ? and k = ?
-         and not exists (
-           select 1 from discord_memory_prunes p where p.message_id = m.message_id
-         )
-       order by v.distance`,
-    )
-    .all(vectorParam(vector), Math.max(boundedLimit * 4, 20)) as Array<DiscordSearchRow & { distance: number }>
+  const rows = db.prepare<unknown[], DiscordSearchRow & { distance: number }>(`select
+     m.message_id, m.channel_id, m.guild_id, m.author_id, m.author_username,
+     m.content, m.created_at, m.is_dm, m.mentions_bot, m.is_from_bot,
+     c.guild_name, c.channel_name,
+     v.distance
+   from discord_message_vec v
+   join discord_messages m on m.message_id = cast(v.rowid as text)
+   left join discord_channels c on c.channel_id = m.channel_id
+   where v.embedding match ? and k = ?
+     and not exists (
+       select 1 from discord_memory_prunes p where p.message_id = m.message_id
+     )
+   order by v.distance`).all(vectorParam(vector), Math.max(boundedLimit * 4, 20))
 
-  return filterDiscordRowsForRuntime(rows, runtimeKind)
+  return filterDiscordRowsForRuntime(db, rows, runtimeKind)
     .filter((row) => 1 - row.distance >= MEMORY_SEMANTIC_MIN_SIMILARITY)
     .slice(0, boundedLimit)
     .map((row) => ({
@@ -539,6 +537,8 @@ export type MemoryPruneReason = "explicit_request" | "surfaced_incorrect" | "sur
 
 /** Deletes one Discord message and its vector memory, retaining a marker against re-ingestion. */
 export function pruneDiscordMemory(
+  db: Database.Database,
+  vecAvailable: () => boolean,
   id: string,
   reason: MemoryPruneReason,
   note?: string,
@@ -551,18 +551,11 @@ export function pruneDiscordMemory(
   }
 
   const messageId = match[1]!
-  const db = getDb()
-  const source = db.prepare("select channel_id from discord_messages where message_id = ?").get(messageId) as
-    | { channel_id: string }
-    | undefined
-  if (source) assertDiscordChannelAccess(source.channel_id, runtimeKind)
-  const indexed = db
-    .prepare("select 1 as present from discord_message_embedding_meta where message_id = ?")
-    .get(messageId) as { present: number } | undefined
-  const prior = db
-    .prepare("select reason, note, pruned_at from discord_memory_prunes where message_id = ?")
-    .get(messageId) as { reason: string; note: string | null; pruned_at: string } | undefined
-  if (!indexed && !prior) throw new Error(`Discord memory ${id} is not indexed or does not exist`)
+  const message = db.prepare<unknown[], { channel_id: string }>("select channel_id from discord_messages where message_id = ?").get(messageId)
+  if (message) assertDiscordChannelAccess(db, message.channel_id, runtimeKind)
+  const indexed = db.prepare<unknown[], { present: number }>("select 1 as present from discord_message_embedding_meta where message_id = ?").get(messageId)
+  const prior = db.prepare<unknown[], { reason: string; note: string | null; pruned_at: string }>("select reason, note, pruned_at from discord_memory_prunes where message_id = ?").get(messageId)
+  if (!message && !indexed && !prior) throw new Error(`Discord memory ${id} is not indexed or does not exist`)
 
   const cleanNote = String(note ?? "").trim() || null
   db.transaction(() => {
@@ -571,17 +564,15 @@ export function pruneDiscordMemory(
       values (?, ?, ?, datetime('now'))
       on conflict(message_id) do nothing
     `).run(messageId, reason, cleanNote)
-    if (isVecAvailable()) db.prepare("delete from discord_message_vec where rowid = ?").run(BigInt(messageId))
+    if (vecAvailable()) db.prepare("delete from discord_message_vec where rowid = ?").run(BigInt(messageId))
     db.prepare("delete from discord_messages where message_id = ?").run(messageId)
   })()
 
-  const saved = db
-    .prepare("select reason, note, pruned_at from discord_memory_prunes where message_id = ?")
-    .get(messageId) as { reason: string; note: string | null; pruned_at: string }
+  const saved = db.prepare<unknown[], { reason: string; note: string | null; pruned_at: string }>("select reason, note, pruned_at from discord_memory_prunes where message_id = ?").get(messageId)
+  if (!saved) throw new Error(`Discord memory ${id} was pruned but its marker could not be read`)
   return {
     ok: true,
     id: `discord:${messageId}`,
-    message_id: messageId,
     reason: saved.reason,
     note: saved.note,
     pruned_at: saved.pruned_at,
@@ -596,34 +587,39 @@ export function pruneDiscordMemory(
  * @param params - Channel plus either message id or query.
  * @returns Search result payload.
  */
-export async function searchDiscordMessages(params: {
-  channelId: string
-  query?: string
-  messageId?: string
-  limit?: number
-  runtimeKind?: RuntimeKind
-}): Promise<Record<string, unknown>> {
-  const channelId = resolveDiscordChannelId(params.channelId)
+export async function searchDiscordMessages(
+  db: Database.Database,
+  embeddings: DiscordEmbeddings | undefined,
+  vecAvailable: () => boolean,
+  params: {
+    channelId: string
+    query?: string
+    messageId?: string
+    limit?: number
+    runtimeKind?: RuntimeKind
+  },
+): Promise<Record<string, unknown>> {
+  const channelId = resolveDiscordChannelId(db, params.channelId)
   if (!channelId) throw new Error("channel_id is required")
-  assertDiscordChannelAccess(channelId, params.runtimeKind)
+  assertDiscordChannelAccess(db, channelId, params.runtimeKind)
 
   const messageId = String(params.messageId ?? "").trim()
   const query = String(params.query ?? "").trim()
   const limit = Math.max(1, Math.min(50, Math.trunc(params.limit ?? 10) || 10))
 
   if (messageId) {
-    const row = getMessage(channelId, messageId)
+    const row = getMessage(db, channelId, messageId)
     return {
       ok: true,
       channel_id: channelId,
       message_id: messageId,
-      results: row ? [publicRow(row, { match: "message_id" })] : [],
+      results: row ? [publicRow(db, row, { match: "message_id" })] : [],
     }
   }
 
   if (!query) throw new Error("query or message_id is required")
 
-  const results = await semanticDiscordSearch(channelId, query, limit)
+  const results = await semanticDiscordSearch(db, embeddings, vecAvailable, channelId, query, limit)
   return {
     ok: true,
     channel_id: channelId,

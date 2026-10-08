@@ -1,3 +1,4 @@
+import * as React from "react"
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
@@ -11,6 +12,24 @@ import python from "highlight.js/lib/languages/python"
 import rust from "highlight.js/lib/languages/rust"
 import sql from "highlight.js/lib/languages/sql"
 import typescript from "highlight.js/lib/languages/typescript"
+import { createRpcClient } from "@nano/chat-client"
+import {
+  controlAgentEvents,
+  controlAgentOverview,
+  controlAgentStream,
+  controlAgentsList,
+  controlDiscordChannels,
+  controlDiscordMessages,
+  controlEnqueue,
+} from "@nano/protocol"
+import type {
+  OperationDescriptor,
+  OperationInput,
+  OperationOutput,
+  StreamInput,
+  StreamItem,
+} from "@nano/protocol"
+import { invokeWebAction, renderWebEvent, renderWebPanels } from "./ui-plugins"
 
 hljs.registerLanguage("bash", bash)
 hljs.registerLanguage("css", css)
@@ -22,88 +41,22 @@ hljs.registerLanguage("rust", rust)
 hljs.registerLanguage("sql", sql)
 hljs.registerLanguage("typescript", typescript)
 
-type Panel = {
+export type Panel = {
   id: string
   name: string
   baseUrl: string
+  /** Gateway credential held only for this browser session; never persisted. */
+  token?: string
 }
 
-type Agent = {
-  id: string
-  name: string
-  baseUrl: string
-  status: string
-  lastSeenAt?: string
-  lastSeq: number
-}
-
-type WorkerStatus = {
-  agentId?: string
-  running?: boolean
-  idle?: boolean
-  tokenCount?: number
-  contextSize?: number
-  processStartedAt?: string
-  uptimeMs?: number
-  error?: string
-  client?: {
-    connected?: boolean
-    clientId?: string
-    capabilities?: string[]
-    workspace?: { root?: string }
-  }
-}
-
-type Compaction = {
-  agentId: string
-  seq: number
-  eventId: string
-  metricId?: number
-  timestamp: string
-  method?: string
-  before?: number
-  after?: number
-  savedTokens?: number
-  summary?: string
-}
-
-type WorkerEvent = {
-  id: string
-  agentId: string
-  seq: number
-  type: string
-  createdAt: string
-  payload: unknown
-}
-
-type Overview = {
-  agent: Agent
-  status: WorkerStatus
-  compactions: Compaction[]
-}
-
-type DiscordChannel = {
-  channel_id: string
-  guild_id: string | null
-  guild_name: string | null
-  channel_name: string | null
-  channel_type: number | null
-  is_dm: number
-  configured: number
-  topic: string | null
-  last_seen_at: string
-}
-
-type DiscordMessage = {
-  message_id: string
-  channel_id: string
-  author_username: string | null
-  content: string
-  created_at: string
-  is_from_bot: number
-}
-
-type ChatLine = {
+export type Agent = OperationOutput<typeof controlAgentsList>["agents"][number]
+export type WorkerStatus = Extract<NonNullable<OperationOutput<typeof controlAgentOverview>["status"]>, { running: boolean }>
+export type Compaction = OperationOutput<typeof controlAgentOverview>["compactions"][number]
+export type WorkerEvent = StreamItem<typeof controlAgentStream>
+export type DiscordChannel = OperationOutput<typeof controlDiscordChannels>["channels"][number]
+export type DiscordMessage = OperationOutput<typeof controlDiscordMessages>["messages"][number]
+type Overview = OperationOutput<typeof controlAgentOverview>
+export type ChatLine = {
   key: string
   seq: number
   at: string
@@ -115,12 +68,7 @@ type ChatLine = {
   toolResult?: string
   toolStatus?: "running" | "complete" | "error"
 }
-
-type ToolCallView = {
-  id: string
-  name: string
-  arguments: unknown
-}
+export type ToolCallView = { id: string; name: string; arguments: unknown }
 
 const PANEL_COOKIE = "nano_control_panels"
 const NOTES_WIDTH_STORAGE_KEY = "nano_notes_width"
@@ -148,9 +96,7 @@ function writeCookie(name: string, value: string): void {
 }
 
 function createId(prefix: string): string {
-  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
-    return `${prefix}-${crypto.randomUUID()}`
-  }
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return `${prefix}-${crypto.randomUUID()}`
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
@@ -162,83 +108,57 @@ function cleanBaseUrl(raw: string): string {
   return `http://${trimmed}`
 }
 
-function urlFor(panel: Panel, path: string): string {
-  const base = panel.baseUrl || window.location.origin
-  return new URL(path, base.endsWith("/") ? base : `${base}/`).toString()
-}
-
 function readPanels(): Panel[] {
   const raw = cookieValue(PANEL_COOKIE)
   if (raw) {
     try {
       const parsed = JSON.parse(raw) as Panel[]
       if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed
-          .filter((panel) => typeof panel.id === "string" && typeof panel.baseUrl === "string")
-          .map((panel) => ({
-            id: panel.id,
-            name: panel.name || panel.baseUrl || "this control",
-            baseUrl: cleanBaseUrl(panel.baseUrl),
-          }))
+        const panels = parsed
+          .filter((panel) => typeof panel?.id === "string" && typeof panel?.baseUrl === "string")
+          .map((panel) => ({ id: panel.id, name: panel.name || panel.baseUrl || "this control", baseUrl: cleanBaseUrl(panel.baseUrl) }))
+        if (panels.length > 0) return panels
       }
-    } catch {}
+    } catch {
+      // Ignore malformed persisted panel configuration and use the local panel.
+    }
   }
-
-  return [
-    {
-      id: "same-origin",
-      name: "this control",
-      baseUrl: "",
-    },
-  ]
+  return [{ id: "same-origin", name: "this control", baseUrl: "" }]
 }
 
 function savePanels(panels: Panel[]): void {
-  writeCookie(PANEL_COOKIE, JSON.stringify(panels))
+  // Explicitly omit ephemeral gateway tokens from the cookie.
+  writeCookie(PANEL_COOKIE, JSON.stringify(panels.map(({ id, name, baseUrl }) => ({ id, name, baseUrl }))))
 }
 
-async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, {
-    ...init,
-    headers: {
-      ...(init?.body ? { "content-type": "application/json" } : {}),
-      ...(init?.headers ?? {}),
-    },
-  })
-  const text = await res.text()
-  const data = text ? JSON.parse(text) : null
-  if (!res.ok) {
-    const message = data && typeof data === "object" && "error" in data ? String(data.error) : `${res.status} ${res.statusText}`
-    throw new Error(message)
+async function callPanel<D extends OperationDescriptor>(
+  panel: Panel,
+  descriptor: D,
+  input: OperationInput<D>,
+  signal?: AbortSignal,
+): Promise<OperationOutput<D>> {
+  const client = createRpcClient({ url: panel.baseUrl || window.location.origin, ...(panel.token ? { token: panel.token } : {}) })
+  try {
+    return await client.call(descriptor, input, signal ? { signal } : undefined)
+  } finally {
+    client.close()
   }
-  return data as T
 }
 
-async function consumeWorkerStream(url: string, signal: AbortSignal, onEvent: (event: WorkerEvent) => void): Promise<void> {
-  const res = await fetch(url, { signal })
-  if (!res.ok || !res.body) throw new Error(res.ok ? "stream body missing" : `${res.status} ${res.statusText}`)
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ""
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) return
-    buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n")
-    const blocks = buffer.split("\n\n")
-    buffer = blocks.pop() ?? ""
-    for (const block of blocks) {
-      const payload = block
-        .split("\n")
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trimStart())
-        .join("\n")
-      if (!payload) continue
-      try {
-        onEvent(JSON.parse(payload) as WorkerEvent)
-      } catch {}
-    }
+async function consumeWorkerStream(
+  panel: Panel,
+  input: StreamInput<typeof controlAgentStream>,
+  signal: AbortSignal,
+  onEvent: (event: WorkerEvent) => void,
+): Promise<void> {
+  const client = createRpcClient({ url: panel.baseUrl || window.location.origin, ...(panel.token ? { token: panel.token } : {}) })
+  try {
+    await client.stream(controlAgentStream, input, { signal, onItem: onEvent })
+  } finally {
+    client.close()
   }
 }
+
 
 function eventPayloadObject(event: WorkerEvent): Record<string, unknown> {
   return event.payload && typeof event.payload === "object" ? (event.payload as Record<string, unknown>) : {}
@@ -571,7 +491,6 @@ function linesFromEvents(events: WorkerEvent[]): ChatLine[] {
 
 function overviewStatusText(status: WorkerStatus | null): string {
   if (!status) return "not checked"
-  if (status.error) return "unreachable"
   if (status.running) return status.idle ? "waiting" : "awake"
   return "resting"
 }
@@ -771,6 +690,7 @@ export function App() {
   const [panels, setPanels] = useState<Panel[]>(() => readPanels())
   const [panelDraft, setPanelDraft] = useState("")
   const [panelNameDraft, setPanelNameDraft] = useState("")
+  const [panelTokenDraft, setPanelTokenDraft] = useState("")
   const [agentsByPanel, setAgentsByPanel] = useState<Record<string, Agent[]>>({})
   const [selectedKey, setSelectedKey] = useState("")
   const [events, setEvents] = useState<WorkerEvent[]>([])
@@ -858,8 +778,8 @@ export function App() {
     await Promise.all(
       panels.map(async (panel) => {
         try {
-          const data = await requestJson<{ agents: Agent[] }>(urlFor(panel, "/agents"))
-          next[panel.id] = data.agents ?? []
+          const data = await callPanel(panel, controlAgentsList, {})
+          next[panel.id] = data.agents
         } catch (err) {
           failures.push(`${panel.name}: ${err instanceof Error ? err.message : String(err)}`)
           next[panel.id] = []
@@ -882,13 +802,9 @@ export function App() {
     setError("")
     try {
       const [overviewData, eventData, discordData] = await Promise.all([
-        requestJson<Overview>(urlFor(selected.panel, `/agents/${encodeURIComponent(selected.agent.id)}/overview`)),
-        requestJson<{ events: WorkerEvent[] }>(
-          urlFor(selected.panel, `/agents/${encodeURIComponent(selected.agent.id)}/events?tail=1&limit=1000&view=chat`),
-        ),
-        requestJson<{ channels: DiscordChannel[] }>(
-          urlFor(selected.panel, `/agents/${encodeURIComponent(selected.agent.id)}/discord/channels`),
-        ).catch(() => ({ channels: [] })),
+        callPanel(selected.panel, controlAgentOverview, { agentId: selected.agent.id }),
+        callPanel(selected.panel, controlAgentEvents, { agentId: selected.agent.id, tail: true, limit: 1000, view: "chat" }),
+        callPanel(selected.panel, controlDiscordChannels, { agentId: selected.agent.id }),
       ])
       setOverview(overviewData)
       setEvents(eventData.events ?? [])
@@ -914,13 +830,12 @@ export function App() {
       return
     }
     setDiscordLoading(true)
-    void requestJson<{ messages: DiscordMessage[] }>(
-      urlFor(
-        selected.panel,
-        `/agents/${encodeURIComponent(selected.agent.id)}/discord/channels/${encodeURIComponent(selectedDiscordChannel)}/messages?limit=100`,
-      ),
-    )
-      .then((data) => setDiscordMessages((data.messages ?? []).slice().reverse()))
+    void callPanel(selected.panel, controlDiscordMessages, {
+      agentId: selected.agent.id,
+      channelId: selectedDiscordChannel,
+      limit: 100,
+    })
+      .then((data) => setDiscordMessages(data.messages.slice().reverse()))
       .catch(() => setDiscordMessages([]))
       .finally(() => setDiscordLoading(false))
   }, [selected, selectedDiscordChannel])
@@ -938,26 +853,20 @@ export function App() {
     streamRef.current?.abort()
     const controller = new AbortController()
     streamRef.current = controller
-    const streamUrl = urlFor(
-      selected.panel,
-      `/agents/${encodeURIComponent(selected.agent.id)}/stream?after_seq=${selected.agent.lastSeq}`,
-    )
-    void consumeWorkerStream(streamUrl, controller.signal, (event) => {
+    void consumeWorkerStream(selected.panel, { agentId: selected.agent.id, afterSeq: selected.agent.lastSeq }, controller.signal, (event) => {
       mergeEvents([event])
       if (event.type === "metric.recorded") void loadSelected()
     }).catch((error) => {
       if (!controller.signal.aborted) setError(`stream lost for ${selected.agent.name}: ${error instanceof Error ? error.message : String(error)}`)
     })
 
-    return () => {
-      controller.abort()
-    }
+    return () => controller.abort()
   }, [loadSelected, mergeEvents, selected])
 
   useEffect(() => {
     if (!selected) return
     const timer = setInterval(() => {
-      requestJson<Overview>(urlFor(selected.panel, `/agents/${encodeURIComponent(selected.agent.id)}/overview`))
+      void callPanel(selected.panel, controlAgentOverview, { agentId: selected.agent.id })
         .then(setOverview)
         .catch((err) => setError(err instanceof Error ? err.message : String(err)))
     }, 10_000)
@@ -975,19 +884,21 @@ export function App() {
           id: createId("panel"),
           name: panelNameDraft.trim() || baseUrl,
           baseUrl,
+          ...(panelTokenDraft.trim() ? { token: panelTokenDraft.trim() } : {}),
         },
       ]
       persistPanels(next)
       setPanelDraft("")
       setPanelNameDraft("")
+      setPanelTokenDraft("")
     },
-    [panelDraft, panelNameDraft, panels, persistPanels],
+    [panelDraft, panelNameDraft, panelTokenDraft, panels, persistPanels],
   )
 
   const removePanel = useCallback(
     (panelId: string) => {
       const next = panels.filter((panel) => panel.id !== panelId)
-      persistPanels(next.length ? next : readPanels())
+      persistPanels(next.length ? next : [{ id: "same-origin", name: "this control", baseUrl: "" }])
       if (selectedKey.startsWith(`${panelId}::`)) {
         setSelectedKey("")
         setEvents([])
@@ -1011,10 +922,7 @@ export function App() {
       setError("")
       setInput("")
       try {
-        await requestJson(urlFor(selected.panel, `/agents/${encodeURIComponent(selected.agent.id)}/events`), {
-          method: "POST",
-          body: JSON.stringify({ content }),
-        })
+        await invokeWebAction("send", async () => { await callPanel(selected.panel, controlEnqueue, { agentId: selected.agent.id, body: { content } }) })
         await loadSelected()
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
@@ -1036,213 +944,35 @@ export function App() {
   }, [])
 
   const compactions = overview?.compactions ?? []
-  const status = overview?.status ?? null
+  const status = overview?.status && "running" in overview.status ? overview.status : null
+
+  const reportActionFailure = (error: unknown): void => setError(error instanceof Error ? error.message : String(error))
+  const uiContext = {
+    panels, agentsByPanel, selectedKey, selected, selectedAgentName: selected?.agent.name ?? "agent",
+    error, status, chatLines, expandedTools, toggleTool,
+    refresh: () => void invokeWebAction("refresh", () => loadAgents()).catch(reportActionFailure),
+    connect: (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault()
+      void invokeWebAction("connect", () => addPanel(event)).catch(reportActionFailure)
+    },
+    remove: (panelId: string) => void invokeWebAction("remove", () => removePanel(panelId)).catch(reportActionFailure),
+    selectAgent: setSelectedKey,
+    panelNameDraft, setPanelNameDraft, panelDraft, setPanelDraft, panelTokenDraft, setPanelTokenDraft,
+    input, setInput, busy, send: sendMessage,
+    notesWidth, notesWidthMin: NOTES_WIDTH_MIN, notesWidthMax: NOTES_WIDTH_MAX,
+    startNotesResize, moveNotesResize, endNotesResize, handleNotesResizeKeyDown,
+    overviewStatusText, clientStatusText, formatTime, formatDuration, formatNumber,
+    discordChannelLabel, discordChannels, selectedDiscordChannel,
+    selectDiscordChannel: setSelectedDiscordChannel, discordLoading, discordMessages,
+    compactions, openCompaction, toggleCompaction: (key: string) => setOpenCompaction(key || null),
+    renderMessage: (line: ChatLine, expanded: boolean) => <TerminalMessage key={line.key} line={line} agentName={selected?.agent.name ?? "agent"} expanded={expanded} onToggle={toggleTool} />,
+  }
 
   return (
     <main className="place" style={{ "--notes-width": `${notesWidth}px` } as React.CSSProperties}>
-      <aside className="connections" aria-label="control panels">
-        <header>
-          <h1>nano</h1>
-          <button type="button" onClick={() => void loadAgents()}>
-            refresh
-          </button>
-        </header>
-
-        <form className="connect-form" onSubmit={addPanel}>
-          <input
-            value={panelNameDraft}
-            onChange={(event) => setPanelNameDraft(event.target.value)}
-            placeholder="name"
-            aria-label="control panel name"
-          />
-          <input
-            value={panelDraft}
-            onChange={(event) => setPanelDraft(event.target.value)}
-            placeholder="https://control.example"
-            aria-label="control panel url"
-          />
-          <button type="submit">connect</button>
-        </form>
-
-        <div className="agent-list">
-          {panels.map((panel) => (
-            <section key={panel.id}>
-              <div className="panel-line">
-                <span>{panel.name}</span>
-                {panel.id !== "same-origin" ? (
-                  <button type="button" onClick={() => removePanel(panel.id)} aria-label={`remove ${panel.name}`}>
-                    remove
-                  </button>
-                ) : null}
-              </div>
-              {(agentsByPanel[panel.id] ?? []).map((agent) => {
-                const key = `${panel.id}::${agent.id}`
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    className={key === selectedKey ? "agent-button is-current" : "agent-button"}
-                    onClick={() => setSelectedKey(key)}
-                  >
-                    <span>{agent.name}</span>
-                    <small>{agent.status}</small>
-                  </button>
-                )
-              })}
-              {(agentsByPanel[panel.id] ?? []).length === 0 ? <p className="quiet">no agents</p> : null}
-            </section>
-          ))}
-        </div>
-      </aside>
-
-      <section className="thread" aria-label="agent conversation">
-        <header className="thread-head">
-          <div>
-            <h2>{selected ? selected.agent.name : "choose an agent"}</h2>
-            <p>
-              {overviewStatusText(status)}
-              {status?.processStartedAt ? ` since ${formatTime(status.processStartedAt)}` : ""}
-            </p>
-            <p className="quiet">{clientStatusText(status)}</p>
-          </div>
-          <div className="readout" aria-label="current token status">
-            <span>{formatNumber(status?.contextSize)} ctx</span>
-            <span>{formatNumber(status?.tokenCount)} total</span>
-            <span>{formatDuration(status?.uptimeMs)}</span>
-          </div>
-        </header>
-
-        {error ? <p className="error-line">{error}</p> : null}
-
-        <div className="chat-pane">
-          <div className="messages">
-            {chatLines.length === 0 ? (
-              <p className="empty">No mirrored history yet. Send a message or open the stream to start collecting it.</p>
-            ) : (
-              chatLines.map((line) => {
-                const expanded = expandedTools.has(line.key)
-                return (
-                  <TerminalMessage
-                    key={line.key}
-                    line={line}
-                    agentName={selected?.agent.name ?? "agent"}
-                    expanded={expanded}
-                    onToggle={toggleTool}
-                  />
-                )
-              })
-            )}
-          </div>
-        </div>
-
-        <form className="composer" onSubmit={sendMessage}>
-          <input
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            disabled={!selected || busy}
-            placeholder={selected ? `message ${selected.agent.name}` : "choose an agent first"}
-            aria-label="message"
-          />
-          <button type="submit" disabled={!selected || busy || !input.trim()}>
-            {busy ? "sending" : "send"}
-          </button>
-        </form>
-      </section>
-
-      <aside className="notes" aria-label="agent notes">
-        <div
-          className="notes-resizer"
-          role="separator"
-          aria-label="resize right rail"
-          aria-orientation="vertical"
-          aria-valuemin={NOTES_WIDTH_MIN}
-          aria-valuemax={NOTES_WIDTH_MAX}
-          aria-valuenow={notesWidth}
-          tabIndex={0}
-          onPointerDown={startNotesResize}
-          onPointerMove={moveNotesResize}
-          onPointerUp={endNotesResize}
-          onPointerCancel={endNotesResize}
-          onKeyDown={handleNotesResizeKeyDown}
-        />
-        <section>
-          <h2>status</h2>
-          <dl>
-            <div>
-              <dt>state</dt>
-              <dd>{overviewStatusText(status)}</dd>
-            </div>
-            <div>
-              <dt>context</dt>
-              <dd>{formatNumber(status?.contextSize)}</dd>
-            </div>
-            <div>
-              <dt>tokens</dt>
-              <dd>{formatNumber(status?.tokenCount)}</dd>
-            </div>
-            <div>
-              <dt>uptime</dt>
-              <dd>{formatDuration(status?.uptimeMs)}</dd>
-            </div>
-          </dl>
-        </section>
-
-        <section>
-          <h2>discord history</h2>
-          {discordChannels.length === 0 ? <p className="quiet">no channels mirrored yet</p> : null}
-          <div className="discord-history">
-            <div className="discord-channels">
-              {discordChannels.map((channel) => (
-                <button
-                  key={channel.channel_id}
-                  type="button"
-                  className={channel.channel_id === selectedDiscordChannel ? "discord-channel is-current" : "discord-channel"}
-                  onClick={() => setSelectedDiscordChannel(channel.channel_id)}
-                >
-                  <span>{discordChannelLabel(channel)}</span>
-                  <small>{channel.guild_name || "dm"}</small>
-                </button>
-              ))}
-            </div>
-            {selectedDiscordChannel ? (
-              <div className="discord-messages">
-                {discordLoading ? <p className="quiet">loading...</p> : null}
-                {!discordLoading && discordMessages.length === 0 ? <p className="quiet">no messages</p> : null}
-                {discordMessages.map((message) => (
-                  <article key={message.message_id}>
-                    <div>
-                      <strong>{message.author_username || "unknown"}</strong>
-                      <time>{formatTime(message.created_at)}</time>
-                    </div>
-                    <p>{message.content || "(attachment or empty message)"}</p>
-                  </article>
-                ))}
-              </div>
-            ) : null}
-          </div>
-        </section>
-
-        <section>
-          <h2>recent compactions</h2>
-          {compactions.length === 0 ? <p className="quiet">none mirrored yet</p> : null}
-          <div className="compactions">
-            {compactions.map((item) => {
-              const key = item.eventId
-              const open = openCompaction === key
-              return (
-                <article key={key}>
-                  <button type="button" onClick={() => setOpenCompaction(open ? null : key)}>
-                    <span>{formatTime(item.timestamp)}</span>
-                    <strong>{formatNumber(item.savedTokens)} saved</strong>
-                    <small>{item.method ?? "compaction"}</small>
-                  </button>
-                  {open ? <MarkdownBody text={item.summary || "(no summary stored)"} /> : null}
-                </article>
-              )
-            })}
-          </div>
-        </section>
-      </aside>
+      {renderWebPanels("left", uiContext)}
+      {renderWebPanels("main", uiContext)}
+      {renderWebPanels("right", uiContext)}
     </main>
   )
 }

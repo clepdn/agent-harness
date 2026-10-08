@@ -4,13 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-client-node",
-    "prestart": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-client-node",
+    "predev": "npm --prefix ../.. run build:packages",
+    "prestart": "npm --prefix ../.. run build:packages",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@nano/plugins": "*",
     "@nano/harness-client-node": "*"
   },
   "devDependencies": {

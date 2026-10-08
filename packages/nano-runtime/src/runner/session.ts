@@ -3,11 +3,13 @@ import fs from "fs/promises"
 import path from "path"
 import type { DiscordMessageTarget, Message, UserMessage } from "../types"
 import type { ContextEffortState, ContextForkReason } from "../llm"
-import { NANO_HOME } from "../agent-config"
+
 import { atomicWriteFile, isMissingFileError, quarantineFile } from "../durable-file"
 import type { ToolDefinition } from "@nano/harness-core"
 import { findSummaryMessageIndex, messageStringContent } from "./messages"
 import type { RuntimeKind } from "./types"
+
+import { NANO_HOME } from "../agent-config"
 
 export type ModelSwapHandoff = {
   version: 1
@@ -24,70 +26,13 @@ export type ModelSwapHandoff = {
   frontendEventIds?: string[]
 }
 
-export async function saveModelSwapHandoff(handoff: ModelSwapHandoff): Promise<void> {
-  await ensureDataDir()
-  await atomicWriteFile(MODEL_SWAP_HANDOFF_FILE, JSON.stringify(handoff), 0o600)
-}
 
-export async function loadModelSwapHandoff(): Promise<ModelSwapHandoff | null> {
-  let raw: string
-  try {
-    raw = await fs.readFile(MODEL_SWAP_HANDOFF_FILE, "utf8")
-  } catch (error) {
-    if (isMissingFileError(error)) return null
-    throw error
-  }
-  const value = record(JSON.parse(raw))
-  const validEvent = (event: unknown): event is UserMessage => {
-    const item = record(event)
-    return Boolean(item && typeof item.source === "string" && typeof item.content === "string" &&
-      typeof item.triggeredAt === "string" && Number.isFinite(Date.parse(item.triggeredAt)))
-  }
-  if (!value || value.version !== 1 || typeof value.preset !== "string" || !value.preset.trim() ||
-      !Array.isArray(value.messages) || !value.messages.every(validMessage) ||
-      !Array.isArray(value.events) || !value.events.every(validEvent) || typeof value.note !== "string" ||
-      (value.id !== undefined && typeof value.id !== "string") ||
-      (value.eventIds !== undefined && (!Array.isArray(value.eventIds) || value.eventIds.length !== value.events.length || !value.eventIds.every(id => typeof id === "string"))) ||
-      (value.phase !== undefined && value.phase !== "closing" && value.phase !== "selected") ||
-      (value.frontendMessages !== undefined && (!Array.isArray(value.frontendMessages) || !value.frontendMessages.every(validMessage))) ||
-      (value.frontendId !== undefined && typeof value.frontendId !== "string") ||
-      (value.frontendEventIds !== undefined && (!Array.isArray(value.frontendEventIds) || !Array.isArray(value.frontendEvents) || value.frontendEventIds.length !== value.frontendEvents.length || !value.frontendEventIds.every(id => typeof id === "string"))) ||
-      (value.frontendEvents !== undefined && (!Array.isArray(value.frontendEvents) || !value.frontendEvents.every(validEvent)))) {
-    throw new Error("invalid durable model-swap handoff")
-  }
-  return value as ModelSwapHandoff
-}
 
-export async function clearModelSwapHandoff(): Promise<void> {
-  try {
-    await fs.unlink(MODEL_SWAP_HANDOFF_FILE)
-  } catch (error) {
-    if (!isMissingFileError(error)) throw error
-  }
-}
 
-// Session state belongs to the agent's durable home, never the executable or
-// source directory (which may be an immutable Nix store path).
-const DATA_DIR = NANO_HOME
-const MEMORY_DIR = path.join(DATA_DIR, "memories")
-// Durable handoff marker. It intentionally lives outside per-lane checkpoints
-// so a crash cannot make a fresh preset resume the old full transcript.
-const MODEL_SWAP_HANDOFF_FILE = path.join(DATA_DIR, "model-swap-handoff.json")
 
-function persistencePaths(kind: RuntimeKind = "main") {
-  const prefix = kind === "frontend" ? "frontend-" : ""
-  const sessionFile = path.join(DATA_DIR, `${prefix}session.json`)
-  return {
-    restSnapshotFile: path.join(DATA_DIR, `.nano-${prefix}rest-snapshot.json`),
-    sessionFile,
-    sessionBackupFile: `${sessionFile}.bak`,
-    discardedPrefix: kind === "frontend" ? "frontend-discarded" : "discarded",
-  }
-}
 
-async function ensureDataDir(): Promise<void> {
-  await fs.mkdir(DATA_DIR, { recursive: true, mode: 0o700 })
-}
+
+
 
 // ── Rest snapshot ─────────────────────────────────────────────────────────────
 
@@ -101,20 +46,6 @@ export function restSummaryFromMessages(messages: readonly Message[]): string {
   const summaryIndex = findSummaryMessageIndex(messages)
   return summaryIndex >= 0 ? messageStringContent(messages[summaryIndex]!) : "(no llm context summary yet)"
 }
-export async function saveRestSnapshot(
-  messages: readonly Message[],
-  note?: string,
-  kind: RuntimeKind = "main",
-  summaryOverride?: string,
-): Promise<void> {
-  const trimmedNote = typeof note === "string" ? note.trim() : ""
-  const snapshot: RestSnapshot = {
-    restedAt: new Date().toISOString(),
-    ...(trimmedNote ? { note: trimmedNote } : {}),
-    summary: summaryOverride ?? restSummaryFromMessages(messages),
-  }
-  await atomicWriteFile(persistencePaths(kind).restSnapshotFile, JSON.stringify(snapshot, null, 2))
-}
 
 function validRestSnapshot(value: unknown): value is RestSnapshot {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false
@@ -123,36 +54,6 @@ function validRestSnapshot(value: unknown): value is RestSnapshot {
     typeof candidate.summary === "string" && (candidate.note === undefined || typeof candidate.note === "string")
 }
 
-async function readRestSnapshot(consume: boolean, kind: RuntimeKind): Promise<RestSnapshot | null> {
-  const { restSnapshotFile } = persistencePaths(kind)
-  let raw: string
-  try {
-    raw = await fs.readFile(restSnapshotFile, "utf-8")
-  } catch (error) {
-    if (isMissingFileError(error)) return null
-    throw error
-  }
-
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-    if (!validRestSnapshot(parsed)) throw new Error("invalid rest snapshot shape")
-  } catch (error) {
-    const quarantined = await quarantineFile(restSnapshotFile)
-    if (quarantined) console.warn(`[runner] quarantined invalid rest snapshot at ${quarantined}: ${error instanceof Error ? error.message : String(error)}`)
-    return null
-  }
-  if (consume) await fs.unlink(restSnapshotFile)
-  return parsed as RestSnapshot
-}
-
-export async function consumeRestSnapshot(kind: RuntimeKind = "main"): Promise<RestSnapshot | null> {
-  return readRestSnapshot(true, kind)
-}
-
-export async function loadRestSnapshot(kind: RuntimeKind = "main"): Promise<RestSnapshot | null> {
-  return readRestSnapshot(false, kind)
-}
 
 // ── Session persistence ───────────────────────────────────────────────────────
 
@@ -341,34 +242,59 @@ async function readSessionFile(filePath: string): Promise<{ raw: string; snapsho
   }
 }
 
-/** Persist the active conversation together with its pinned tool catalog epoch. */
-export async function saveSession(snapshot: SessionSnapshot, kind: RuntimeKind = "main"): Promise<void> {
-  const { sessionFile, sessionBackupFile } = persistencePaths(kind)
-  const raw = JSON.stringify(snapshot)
-  parseSession(raw)
-  await ensureDataDir()
-  const current = await readSessionFile(sessionFile)
-  if (current) await atomicWriteFile(sessionBackupFile, current.raw)
-  await atomicWriteFile(sessionFile, raw)
+
+export interface SessionStore {
+  saveModelSwapHandoff(handoff: ModelSwapHandoff): Promise<void>
+  loadModelSwapHandoff(): Promise<ModelSwapHandoff | null>
+  clearModelSwapHandoff(): Promise<void>
+  saveRestSnapshot(messages: readonly Message[], note?: string, kind?: RuntimeKind, summaryOverride?: string): Promise<void>
+  loadRestSnapshot(kind?: RuntimeKind): Promise<RestSnapshot | null>
+  consumeRestSnapshot(kind?: RuntimeKind): Promise<RestSnapshot | null>
+  saveSession(snapshot: SessionSnapshot, kind?: RuntimeKind): Promise<void>
+  loadSession(kind?: RuntimeKind): Promise<SessionSnapshot | null>
+  clearSession(kind?: RuntimeKind): Promise<void>
+  archiveDiscardedSession(snapshot: SessionSnapshot, kind?: RuntimeKind): Promise<string>
+  quarantineSession(kind?: RuntimeKind): Promise<string[]>
 }
 
-/** Load a valid pinned session; legacy message arrays intentionally do not resume. */
-export async function loadSession(kind: RuntimeKind = "main"): Promise<SessionSnapshot | null> {
-  const { sessionFile, sessionBackupFile } = persistencePaths(kind)
-  const primary = await readSessionFile(sessionFile)
-  if (primary) {
-    console.log(`[runner] found saved session (${primary.snapshot.messages.length} messages, catalog epoch ${primary.snapshot.toolCatalogEpoch})`)
-    return primary.snapshot
+export function createSessionStore(home: string = NANO_HOME): SessionStore {
+  const dataDir = path.resolve(home)
+  const memoryDir = path.join(dataDir, "memories")
+  const handoffFile = path.join(dataDir, "model-swap-handoff.json")
+  const paths = (kind: RuntimeKind = "main") => {
+    const prefix = kind === "frontend" ? "frontend-" : ""
+    const sessionFile = path.join(dataDir, `${prefix}session.json`)
+    return {
+      restSnapshotFile: path.join(dataDir, `.nano-${prefix}rest-snapshot.json`),
+      sessionFile,
+      sessionBackupFile: `${sessionFile}.bak`,
+      discardedPrefix: kind === "frontend" ? "frontend-discarded" : "discarded",
+    }
   }
-  const backup = await readSessionFile(sessionBackupFile)
-  if (!backup) return null
-  await atomicWriteFile(sessionFile, backup.raw)
-  console.warn(`[runner] restored session from last-known-good backup (${backup.snapshot.messages.length} messages)`)
-  return backup.snapshot
-}
-
-export async function clearSession(kind: RuntimeKind = "main"): Promise<void> {
-  const { sessionFile, sessionBackupFile } = persistencePaths(kind)
+  const ensureDataDir = async (): Promise<void> => {
+    await fs.mkdir(dataDir, { recursive: true, mode: 0o700 })
+  }
+  const readRestSnapshot = async (consume: boolean, kind: RuntimeKind): Promise<RestSnapshot | null> => {
+    const { restSnapshotFile } = paths(kind)
+    let raw: string
+    try {
+      raw = await fs.readFile(restSnapshotFile, "utf-8")
+    } catch (error) {
+      if (isMissingFileError(error)) return null
+      throw error
+    }
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(raw)
+      if (!validRestSnapshot(parsed)) throw new Error("invalid rest snapshot shape")
+    } catch (error) {
+      const quarantined = await quarantineFile(restSnapshotFile)
+      if (quarantined) console.warn(`[runner] quarantined invalid rest snapshot at ${quarantined}: ${error instanceof Error ? error.message : String(error)}`)
+      return null
+    }
+    if (consume) await fs.unlink(restSnapshotFile)
+    return parsed
+  }
   const unlinkIfPresent = async (filePath: string): Promise<void> => {
     try {
       await fs.unlink(filePath)
@@ -376,30 +302,100 @@ export async function clearSession(kind: RuntimeKind = "main"): Promise<void> {
       if (!isMissingFileError(error)) throw error
     }
   }
-  await Promise.all([unlinkIfPresent(sessionFile), unlinkIfPresent(sessionBackupFile)])
-}
-
-/**
- * Archive the latest in-memory session where the model can inspect it, then
- * remove both resumable checkpoints so it cannot be resumed accidentally.
- */
-export async function archiveDiscardedSession(snapshot: SessionSnapshot, kind: RuntimeKind = "main"): Promise<string> {
-  const raw = JSON.stringify(snapshot, null, 2)
-  parseSession(raw)
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-")
-  const filename = `${persistencePaths(kind).discardedPrefix}-${timestamp}.json`
-  await atomicWriteFile(path.join(MEMORY_DIR, filename), raw)
-  await clearSession(kind)
-  return `memory://${filename}`
-}
-
-/** Remove all resumable full-session checkpoints after an unrecoverable loop abort. */
-export async function quarantineSession(kind: RuntimeKind = "main"): Promise<string[]> {
-  const { sessionFile, sessionBackupFile } = persistencePaths(kind)
-  const quarantined: string[] = []
-  for (const filePath of [sessionFile, sessionBackupFile]) {
-    const moved = await quarantineFile(filePath)
-    if (moved) quarantined.push(moved)
+  return {
+    async saveModelSwapHandoff(handoff) {
+      await ensureDataDir()
+      await atomicWriteFile(handoffFile, JSON.stringify(handoff), 0o600)
+    },
+    async loadModelSwapHandoff() {
+      let raw: string
+      try {
+        raw = await fs.readFile(handoffFile, "utf8")
+      } catch (error) {
+        if (isMissingFileError(error)) return null
+        throw error
+      }
+      const value = record(JSON.parse(raw))
+      const validEvent = (event: unknown): event is UserMessage => {
+        const item = record(event)
+        return Boolean(item && typeof item.source === "string" && typeof item.content === "string" && typeof item.triggeredAt === "string" && Number.isFinite(Date.parse(item.triggeredAt)))
+      }
+      if (!value || value.version !== 1 || typeof value.preset !== "string" || !value.preset.trim() ||
+          !Array.isArray(value.messages) || !value.messages.every(validMessage) ||
+          !Array.isArray(value.events) || !value.events.every(validEvent) || typeof value.note !== "string" ||
+          (value.id !== undefined && typeof value.id !== "string") ||
+          (value.eventIds !== undefined && (!Array.isArray(value.eventIds) || value.eventIds.length !== value.events.length || !value.eventIds.every(id => typeof id === "string"))) ||
+          (value.phase !== undefined && value.phase !== "closing" && value.phase !== "selected") ||
+          (value.frontendMessages !== undefined && (!Array.isArray(value.frontendMessages) || !value.frontendMessages.every(validMessage))) ||
+          (value.frontendId !== undefined && typeof value.frontendId !== "string") ||
+          (value.frontendEventIds !== undefined && (!Array.isArray(value.frontendEventIds) || !Array.isArray(value.frontendEvents) || value.frontendEventIds.length !== value.frontendEvents.length || !value.frontendEventIds.every(id => typeof id === "string"))) ||
+          (value.frontendEvents !== undefined && (!Array.isArray(value.frontendEvents) || !value.frontendEvents.every(validEvent)))) {
+        throw new Error("invalid durable model-swap handoff")
+      }
+      return value as ModelSwapHandoff
+    },
+    async clearModelSwapHandoff() {
+      await unlinkIfPresent(handoffFile)
+    },
+    async saveRestSnapshot(messages, note, kind = "main", summaryOverride) {
+      const trimmedNote = typeof note === "string" ? note.trim() : ""
+      const snapshot: RestSnapshot = {
+        restedAt: new Date().toISOString(),
+        ...(trimmedNote ? { note: trimmedNote } : {}),
+        summary: summaryOverride ?? restSummaryFromMessages(messages),
+      }
+      await atomicWriteFile(paths(kind).restSnapshotFile, JSON.stringify(snapshot, null, 2))
+    },
+    loadRestSnapshot(kind = "main") {
+      return readRestSnapshot(false, kind)
+    },
+    consumeRestSnapshot(kind = "main") {
+      return readRestSnapshot(true, kind)
+    },
+    async saveSession(snapshot, kind = "main") {
+      const { sessionFile, sessionBackupFile } = paths(kind)
+      const raw = JSON.stringify(snapshot)
+      parseSession(raw)
+      await ensureDataDir()
+      const current = await readSessionFile(sessionFile)
+      if (current) await atomicWriteFile(sessionBackupFile, current.raw)
+      await atomicWriteFile(sessionFile, raw)
+    },
+    async loadSession(kind = "main") {
+      const { sessionFile, sessionBackupFile } = paths(kind)
+      const primary = await readSessionFile(sessionFile)
+      if (primary) {
+        console.log(`[runner] found saved session (${primary.snapshot.messages.length} messages, catalog epoch ${primary.snapshot.toolCatalogEpoch})`)
+        return primary.snapshot
+      }
+      const backup = await readSessionFile(sessionBackupFile)
+      if (!backup) return null
+      await atomicWriteFile(sessionFile, backup.raw)
+      console.warn(`[runner] restored session from last-known-good backup (${backup.snapshot.messages.length} messages)`)
+      return backup.snapshot
+    },
+    async clearSession(kind = "main") {
+      const { sessionFile, sessionBackupFile } = paths(kind)
+      await Promise.all([unlinkIfPresent(sessionFile), unlinkIfPresent(sessionBackupFile)])
+    },
+    async archiveDiscardedSession(snapshot, kind = "main") {
+      const raw = JSON.stringify(snapshot, null, 2)
+      parseSession(raw)
+      const timestamp = new Date().toISOString().replace(/[:.]/g, "-")
+      const filename = `${paths(kind).discardedPrefix}-${timestamp}.json`
+      await atomicWriteFile(path.join(memoryDir, filename), raw)
+      const { sessionFile, sessionBackupFile } = paths(kind)
+      await Promise.all([unlinkIfPresent(sessionFile), unlinkIfPresent(sessionBackupFile)])
+      return `memory://${filename}`
+    },
+    async quarantineSession(kind = "main") {
+      const { sessionFile, sessionBackupFile } = paths(kind)
+      const quarantined: string[] = []
+      for (const filePath of [sessionFile, sessionBackupFile]) {
+        const moved = await quarantineFile(filePath)
+        if (moved) quarantined.push(moved)
+      }
+      return quarantined
+    },
   }
-  return quarantined
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { defineEvent, defineService, defineSlot, PluginBus, type Plugin } from "./index.js"
+import { defineEvent, defineService, defineSlot, PluginBus, type Plugin, type PluginScope } from "./index.js"
 
 test("stages registrations and rolls back a failed apply", async () => {
   const service = defineService<{ value: number }>("test.service")
@@ -202,6 +202,47 @@ test("withdraws a live service and unloads its dependents before reconciliation"
   await bus.close()
 })
 
+test("reactivates optional consumers without withdrawn services and rebinds on republish", async () => {
+  const service = defineService<{ value: number }>("withdraw.optional")
+  const providerValues = [{ value: 1 }, { value: 2 }]
+  const applyValues: Array<number | undefined> = []
+  const cleanupValues: Array<number | undefined> = []
+  let withdraw: (() => Promise<void>) | undefined
+  let providerScope!: PluginScope
+  const bus = new PluginBus()
+  await bus.install({
+    id: "optional-provider",
+    provides: [service],
+    apply(scope) {
+      providerScope = scope
+      withdraw = scope.provide(service, providerValues.shift()!)
+    },
+  })
+  await bus.install({
+    id: "optional-consumer",
+    optional: [service],
+    apply(scope) {
+      const captured = scope.optional(service)
+      applyValues.push(captured?.value)
+      scope.own(() => { cleanupValues.push(captured?.value) })
+    },
+  })
+  assert.deepEqual(applyValues, [1])
+  assert.deepEqual(cleanupValues, [])
+
+  assert.ok(withdraw)
+  await withdraw!()
+  assert.deepEqual(cleanupValues, [1])
+  assert.deepEqual(applyValues, [1, undefined])
+  assert.equal(bus.statuses().find(status => status.id === "optional-consumer")?.status, "ACTIVE")
+
+  providerScope.provide(service, providerValues.shift()!)
+  await bus.install({ id: "republish-boundary", apply() {} })
+  assert.deepEqual(applyValues, [1, undefined, 2])
+  assert.deepEqual(cleanupValues, [1, undefined])
+  await bus.close()
+})
+
 test("unloads active generations before replacement graph failures", async () => {
   const serviceA = defineService<number>("replacement.a")
   const serviceB = defineService<number>("replacement.b")
@@ -368,5 +409,69 @@ test("keeps provider guards live through dependent cleanup on close and disable"
   assert.deepEqual(disableOrder, ["consumer"])
   assert.equal(disableBus.optional(disableWrite), undefined)
   await disableBus.close()
+})
+
+test("watches committed slot snapshots and contains callback failures", async () => {
+  const slot = defineSlot<string>("watch.slot")
+  const bus = new PluginBus()
+  const snapshots: string[][] = []
+  const failures: string[][] = []
+  await bus.install({
+    id: "watcher",
+    apply(scope) {
+      scope.watch(slot, contributions => {
+        snapshots.push(contributions.map(item => item.value))
+      })
+      scope.watch(slot, async contributions => {
+        failures.push(contributions.map(item => item.value))
+        if (contributions.some(item => item.value === "first")) throw new Error("observer failed")
+      })
+    },
+  })
+  await bus.install({
+    id: "contributor",
+    apply(scope) { scope.register(slot, "value", "first") },
+  })
+  await Promise.resolve()
+  assert.deepEqual(snapshots, [[], ["first"]])
+  assert.deepEqual(failures, [[], ["first"]])
+  assert.equal(bus.statuses().find(status => status.id === "watcher")?.errors.some(error => error.phase === "callback"), true)
+
+  await bus.replace({
+    id: "contributor",
+    apply(scope) { scope.register(slot, "value", "replacement") },
+  })
+  await Promise.resolve()
+  assert.deepEqual(snapshots, [[], ["first"], ["replacement"]])
+  await bus.disable("contributor")
+  await Promise.resolve()
+  assert.deepEqual(snapshots, [[], ["first"], ["replacement"], []])
+  await bus.disable("watcher")
+  assert.equal(bus.inspect().listeners, 0)
+  await bus.close()
+})
+
+test("does not publish a failed plugin's staged slot contribution", async () => {
+  const slot = defineSlot<string>("watch.failed-slot")
+  const bus = new PluginBus()
+  const snapshots: string[][] = []
+  await bus.install({
+    id: "watcher-failed-slot",
+    apply(scope) {
+      scope.watch(slot, contributions => { snapshots.push(contributions.map(item => item.value)) })
+    }
+  })
+  await bus.install({
+    id: "failed-contributor",
+    apply(scope) {
+      scope.register(slot, "staged", "hidden")
+      throw new Error("apply failed")
+    },
+  })
+  await Promise.resolve()
+  assert.deepEqual(snapshots, [[]])
+  assert.deepEqual(bus.list(slot), [])
+  await bus.close()
+  assert.equal(bus.inspect().listeners, 0)
 })
 

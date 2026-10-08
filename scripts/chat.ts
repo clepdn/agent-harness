@@ -1,12 +1,40 @@
-import readline from "readline"
-import { createChatClient, type StreamEvent } from "@nano/chat-client"
 import { renderMarkdownAnsi } from "./terminal-markdown"
+import readline from "readline"
+import { readFileSync } from "node:fs"
+import { createRpcClient } from "@nano/chat-client"
+import type { RpcClient } from "@nano/chat-client"
+import type { OperationOutput, StreamEvent, StreamItem } from "@nano/protocol"
+import { controlAgentStatus, controlAgentStream, controlEnqueue, workerChatStream, workerChatSubmit, workerStatus } from "@nano/protocol"
+import { defineService, PluginBus } from "@nano/plugins"
+
+const tokenFlagIndex = process.argv.indexOf("--gateway-token-file")
+const gatewayTokenFile = tokenFlagIndex >= 0
+  ? process.argv[tokenFlagIndex + 1]
+  : process.argv.find((arg) => arg.startsWith("--gateway-token-file="))?.slice("--gateway-token-file=".length)
+if (tokenFlagIndex >= 0 && (!gatewayTokenFile || gatewayTokenFile.startsWith("--"))) {
+  throw new Error("--gateway-token-file requires a file path")
+}
+const tokenFilePath = gatewayTokenFile?.trim()
+if (gatewayTokenFile !== undefined && !tokenFilePath) throw new Error("--gateway-token-file requires a file path")
+let rpcToken = process.env.NANO_RPC_TOKEN?.trim()
+if (tokenFilePath !== undefined) {
+  try {
+    rpcToken = readFileSync(tokenFilePath, "utf8").trim()
+  } catch (error) {
+    throw new Error(`Unable to read --gateway-token-file: ${error instanceof Error ? error.message : String(error)}`)
+  }
+  if (!rpcToken) throw new Error("--gateway-token-file is empty")
+}
+const rpcResource = defineService<RpcClient>("nano.script-chat.rpc")
+const clientPlugins = new PluginBus()
 
 const HOST = process.env.NANO_HOST ?? "http://localhost"
 const directWorker = process.env.NANO_CHAT_DIRECT_WORKER?.trim().toLowerCase() === "true"
 const controlAgentId = directWorker ? undefined : (process.env.NANO_AGENT_ID ?? "nano").trim() || "nano"
 const PORT = directWorker ? process.env.PORT ?? "3000" : process.env.CONTROL_PORT ?? process.env.PORT ?? "3000"
 const BASE = process.env.NANO_SERVER_URL?.replace(/\/+$/, "") || `${HOST}:${PORT}`
+
+
 
 const c = {
   gray: (s: string) => `\x1b[90m${s}\x1b[0m`,
@@ -61,11 +89,58 @@ const createClientId = (): string => {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return `cli-${crypto.randomUUID()}`
   }
-  return `cli-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+  return `cli-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
+const clientId = createClientId()
+let rpc!: RpcClient
+const clientPluginReady = clientPlugins.install({
+  id: "nano.script-chat",
+  provides: [rpcResource],
+  apply(scope) {
+    const client = createRpcClient({ url: BASE, ...(rpcToken ? { token: rpcToken } : {}) })
+    rpc = client
+    scope.provide(rpcResource, client)
+    scope.own(() => client.close())
+  },
+})
+await clientPluginReady
+const sendMessage = async (content: string): Promise<void> => {
+  if (directWorker) await rpc.call(workerChatSubmit, { content, clientId })
+  else await rpc.call(controlEnqueue, { agentId: controlAgentId ?? "nano", body: { content, clientId } })
+}
+const getStatus = async (): Promise<OperationOutput<typeof workerStatus | typeof controlAgentStatus>> => {
+  return directWorker
+    ? rpc.call(workerStatus, {})
+    : rpc.call(controlAgentStatus, { agentId: controlAgentId ?? "nano" })
 }
 
-const clientId = createClientId()
-const client = createChatClient({ baseUrl: BASE, clientId, agentId: controlAgentId })
+const isStreamEvent = (value: unknown): value is StreamEvent => {
+  if (!value || typeof value !== "object" || !("type" in value)) return false
+  const event = value as { type: unknown; text?: unknown; source?: unknown; triggeredAt?: unknown; name?: unknown; args?: unknown; result?: unknown }
+  if (event.type === "text" || event.type === "thinking") return typeof event.text === "string"
+  if (event.type === "user") return typeof event.text === "string" && typeof event.source === "string" && typeof event.triggeredAt === "string"
+  if (event.type === "tool") return typeof event.name === "string" && !!event.args && typeof event.args === "object" && typeof event.result === "string"
+  if (event.type === "usage") return true
+  return false
+}
+
+const streamEvents = async (signal: AbortSignal, onEvent: (event: StreamEvent) => void): Promise<void> => {
+  if (directWorker) {
+    await rpc.stream(workerChatStream, {}, {
+      signal,
+      onItem: (item: StreamItem<typeof workerChatStream>) => onEvent(item),
+    })
+    return
+  }
+  await rpc.stream(controlAgentStream, { agentId: controlAgentId ?? "nano" }, {
+    signal,
+    onItem: (item: StreamItem<typeof controlAgentStream>) => {
+      if (item.type === "stream.event" && isStreamEvent(item.payload)) onEvent(item.payload)
+    },
+  })
+}
+
+
 
 let showAllTools = false
 let showThinking = false
@@ -233,7 +308,7 @@ const scheduleStreamSettleCheck = () => {
 
     streamStatusCheckInFlight = true
     try {
-      const status = await client.getStatus()
+      const status = await getStatus()
       if (!status.running || status.idle) {
         endActiveStream()
       } else {
@@ -292,20 +367,17 @@ const rl = readline.createInterface({
 
 print(c.gray("tips: /v toggle tool output · /t toggle thinking · /status · /q quit"))
 
-client
-  .getStatus()
+getStatus()
   .then((status) => {
     print(c.gray(status.running ? "nano is awake" : "nano is sleeping — your message will wake her"))
   })
   .catch((err) => print(c.red(err instanceof Error ? err.message : String(err))))
 
 const controller = new AbortController()
-client
-  .stream({ signal: controller.signal, onEvent: handleStreamEvent })
-  .catch((err) => {
-    if (controller.signal.aborted) return
-    print(c.red(err instanceof Error ? err.message : String(err)))
-  })
+streamEvents(controller.signal, handleStreamEvent).catch((err) => {
+  if (controller.signal.aborted) return
+  print(c.red(err instanceof Error ? err.message : String(err)))
+})
 
 rl.prompt()
 
@@ -325,7 +397,7 @@ rl.on("line", async (line) => {
 
   if (trimmed === "/status") {
     try {
-      const status = await client.getStatus()
+      const status = await getStatus()
       print(c.gray(status.running ? "nano is awake" : "nano is sleeping — your message will wake her"))
     } catch (err) {
       print(c.red(err instanceof Error ? err.message : String(err)))
@@ -349,7 +421,7 @@ rl.on("line", async (line) => {
   }
 
   try {
-    await client.send(trimmed)
+    await sendMessage(trimmed)
   } catch (err) {
     print(c.red(err instanceof Error ? err.message : String(err)))
   }
@@ -361,10 +433,10 @@ rl.on("SIGINT", () => {
   endActiveStream()
   controller.abort()
   rl.close()
-  process.exit(0)
 })
 
-rl.on("close", () => {
+rl.on("close", async () => {
   endActiveStream()
   controller.abort()
+  await clientPlugins.close()
 })

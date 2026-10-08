@@ -1,6 +1,3 @@
-import { emit } from "../stream"
-import { clearDiscordTypingScope } from "../discord/typing-lease"
-import { buildToolHandlers } from "./loop-tool-registry"
 import { executeToolCall, pushToolMessage } from "./loop-tool-runtime"
 import type { FunctionToolCall } from "./loop-shared"
 import type { LoopHooks, LoopState } from "./types"
@@ -25,7 +22,7 @@ function skipRemainingToolCalls(
   calls.slice(startIndex).forEach((pendingCall) => {
     const skippedContent = `skipped: interrupted by incoming ${source} event.`
     const result = pushToolMessage(convId, state, pendingCall, skippedContent)
-    emit({ type: "tool", name: pendingCall.name, args: { _skipped: true }, result })
+    state.services?.events?.emit({ type: "tool", name: pendingCall.name, args: { _skipped: true }, result })
   })
 }
 
@@ -40,7 +37,7 @@ function maybeInterruptAfterTool(
   if (state.pendingInputs.length === 0) return false
 
   const incoming = state.pendingInputs.shift()!
-  clearDiscordTypingScope(state)
+  state.services?.discord?.clearTypingScope(state)
   hooks.injectIncomingEvent(convId, incoming)
   skipRemainingToolCalls(convId, state, calls, nextIndex, incoming.source)
   return true
@@ -57,7 +54,6 @@ export async function processToolCalls(
   hooks: LoopHooks,
   calls: readonly FunctionToolCall[],
 ): Promise<ToolCallsOutcome> {
-  const handlers = buildToolHandlers()
   let shouldWaitForEvent = false
   for (let i = 0; i < calls.length; i++) {
     if (state.interruptRequested || state.discardRequested || state.operationSignal?.aborted) {
@@ -68,15 +64,14 @@ export async function processToolCalls(
     if (state.modelSwap && !MODEL_SWAP_ALLOWED_TOOLS[call.name]) {
       const skippedContent = "skipped: model swap handoff permits only journaling and end_session tools."
       const result = pushToolMessage(convId, state, call, skippedContent)
-      emit({ type: "tool", name: call.name, args: { _skipped: true }, result })
+      state.services?.events?.emit({ type: "tool", name: call.name, args: { _skipped: true }, result })
       continue
     }
-    const outcome = await executeToolCall(convId, state, hooks, handlers, call)
+    const outcome = await executeToolCall(convId, state, hooks, call)
     if (state.interruptRequested || state.discardRequested || state.operationSignal?.aborted) {
       skipRemainingToolCalls(convId, state, calls, i + 1, "operator interrupt")
       return "continue"
     }
-
     if (outcome.shouldRest) return "rest"
     if (outcome.shouldWaitForEvent) {
       shouldWaitForEvent = true
@@ -87,13 +82,7 @@ export async function processToolCalls(
       skipRemainingToolCalls(convId, state, calls, i + 1, "operator interrupt")
       return "continue"
     }
-
-    const interrupted = maybeInterruptAfterTool(convId, state, hooks, calls, i + 1)
-    if (interrupted) return "continue"
+    if (maybeInterruptAfterTool(convId, state, hooks, calls, i + 1)) return "continue"
   }
-
   return shouldWaitForEvent ? "wait" : "continue"
-}
-export const __loopToolsTest = {
-  maybeInterruptAfterTool,
 }

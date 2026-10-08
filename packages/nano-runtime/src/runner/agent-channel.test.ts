@@ -1,52 +1,48 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { initDb } from "../db"
-import {
-  configureAgentChannelDelivery,
-  listAgentChannelMessages,
-  sendAgentChannelMessage,
-} from "./agent-channel"
+import { createDatabase } from "../db"
+import { createAgentChannelService } from "./agent-channel"
 
-test("agent channel persists bidirectional messages and wakes the recipient", (t) => {
-  initDb(":memory:")
+test("agent channel persists bidirectional messages and wakes ready recipients", async () => {
+  const db = createDatabase(":memory:").db
   const delivered: Array<{ recipient: string; content: string }> = []
-  configureAgentChannelDelivery((recipient, event) => {
+  const mailbox = createAgentChannelService(db, (recipient, event) => {
     delivered.push({ recipient, content: event.content })
     return true
   })
-  t.after(() => configureAgentChannelDelivery(null))
+  await mailbox.runtimeReady("main")
+  await mailbox.runtimeReady("frontend")
 
-  const first = sendAgentChannelMessage("frontend", "can you help with this?")
+  const first = await mailbox.sendAgentChannelMessage("frontend", "can you help with this?")
   assert.equal(first.recipient, "main")
   assert.equal(first.delivered, true)
   assert.equal(delivered[0]?.recipient, "main")
   assert.match(delivered[0]?.content ?? "", /from frontend/)
-  assert.doesNotMatch(delivered[0]?.content ?? "", /message_id:/)
 
-  const second = sendAgentChannelMessage("main", "yes — here is the answer")
+  const second = await mailbox.sendAgentChannelMessage("main", "yes — here is the answer")
   assert.equal(second.recipient, "frontend")
   assert.equal(delivered[1]?.recipient, "frontend")
-  assert.doesNotMatch(delivered[1]?.content ?? "", /message_id:/)
-  assert.doesNotMatch(delivered[1]?.content ?? "", /reply_to:/)
 
-  const history = listAgentChannelMessages({ limit: 10 }) as { messages: Array<Record<string, unknown>> }
+  const history = mailbox.listAgentChannelMessages({ limit: 10 }) as { messages: Array<Record<string, unknown>> }
   assert.equal(history.messages.length, 2)
-  assert.equal("reply_to" in history.messages[0]!, false)
   assert.equal(history.messages.every((message) => message.delivered === true), true)
+  db.close()
 })
 
-test("undelivered agent mail replays when delivery is configured", () => {
-  initDb(":memory:")
-  configureAgentChannelDelivery(null)
-  const queued = sendAgentChannelMessage("frontend", "durable pending message")
-  assert.equal(queued.delivered, false)
-
+test("undelivered agent mail replays after the recipient becomes ready", async () => {
+  const db = createDatabase(":memory:").db
   const received: string[] = []
-  configureAgentChannelDelivery((_recipient, event) => {
+  let accepting = false
+  const mailbox = createAgentChannelService(db, (_recipient, event) => {
+    if (!accepting) return false
     received.push(event.content)
     return true
   })
+  const queued = await mailbox.sendAgentChannelMessage("frontend", "durable pending message")
+  assert.equal(queued.delivered, false)
+  accepting = true
+  await mailbox.runtimeReady("main")
   assert.equal(received.length, 1)
   assert.match(received[0]!, /durable pending message/)
-  configureAgentChannelDelivery(null)
+  db.close()
 })

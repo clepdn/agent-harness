@@ -290,7 +290,35 @@ const modelConfig = {
   respect_prompt_cache: respectPromptCache(modelT, respectPromptCache(contextT)),
 }
 
+export interface PluginSelection {
+  enabled: boolean
+  config?: ConfigValue
+}
+
+/** Reject invalid plugin selections without including configuration values. */
+export function validatePluginSelections(value: unknown): Record<string, PluginSelection> {
+  if (value === undefined) return {}
+  if (!isConfigObject(value)) throw new TypeError("plugins must be an object")
+  const selections: Record<string, PluginSelection> = Object.create(null)
+  for (const [id, selection] of Object.entries(value)) {
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/.test(id)) throw new TypeError("invalid plugin id")
+    if (!isConfigObject(selection)) throw new TypeError(`plugins.${id} must be an object`)
+    if (Object.keys(selection).some((key) => key !== "enabled" && key !== "config")) {
+      throw new TypeError(`plugins.${id} has an unknown selection field`)
+    }
+    if (selection.enabled !== undefined && typeof selection.enabled !== "boolean") {
+      throw new TypeError(`plugins.${id}.enabled must be a boolean`)
+    }
+    selections[id] = {
+      enabled: selection.enabled ?? true,
+      ...(selection.config !== undefined ? { config: selection.config } : {}),
+    }
+  }
+  return selections
+}
+
 export const config = {
+  plugins: validatePluginSelections(merged.plugins),
   llm_bridge_url: str(merged.llm_bridge_url, "").trim(),
   llm_bridge_api_key: str(merged.llm_bridge_api_key, "").trim(),
   server: {
@@ -451,14 +479,6 @@ export const config = {
   },
 }
 
-/**
- * Records the bot's user id once discovered from the gateway READY payload.
- * Used because the bot id may not be known until after first connect.
- */
-export function setDiscordBotUserId(id: string): void {
-  if (!id) return
-  ;(config.discord as { bot_user_id: string }).bot_user_id = id
-}
 
 // ── Secret redaction ──────────────────────────────────────────────────────────
 // Defense in depth: even though secrets stay out of process.env, a misbehaving
@@ -481,6 +501,18 @@ function collectSecrets(): SecretEntry[] {
     { label: "discord.bot_token",  value: config.discord.bot_token },
     { label: "web_search.exa_api_key", value: config.web_search.exa_api_key },
   ]
+  const visit = (value: ConfigValue | undefined, path: string): void => {
+    if (!isConfigObject(value)) return
+    for (const [key, item] of Object.entries(value)) {
+      const label = `${path}.${key}`
+      if (typeof item === "string" && /(?:^|_)(?:token|api_key|secret|password)$/.test(key)) {
+        entries.push({ label, value: item })
+      } else {
+        visit(item, label)
+      }
+    }
+  }
+  for (const [id, selection] of Object.entries(config.plugins)) visit(selection.config, `plugins.${id}.config`)
   return entries.filter((e) => e.value.length >= MIN_SECRET_LENGTH)
 }
 

@@ -1,36 +1,16 @@
-import { initializeBridgeModelMetadata, type BridgeModelMetadataTarget } from "./bridge-model-metadata"
 import { spawn } from "node:child_process"
-import { tryShim, SHIM_FAILED_ENV } from "./shim"
 import { REPO_ROOT } from "./agent-config"
-import { createServer } from "./server"
-import { initDb } from "./db"
-import { snapshotStateRevisions } from "./state-history"
-import { initMetricsDb } from "./metrics"
-import { initSnapcompactRenderer } from "./runner/compaction-companion"
-import { modelState, modelStateFor } from "./runner/model-state"
-import { REMOTE_COMPACTION_ENDPOINT } from "./runner/config"
-import { shutdown, activate, startBoredomTimer, recoverModelSwapHandoff } from "./runner/index"
-import { activateFrontend, shutdownFrontend, startFrontendBoredomTimer } from "./runner/frontend"
-import { configureAgentChannelDelivery } from "./runner/agent-channel"
-import { initJobManager } from "./runner/jobs"
-import { startDiscordGateway } from "./discord/gateway"
-import { setGatewayCallbacks } from "./discord/slash-commands"
-import { startDiscordEmbeddingBackfill } from "./discord/search"
-import { setDiscordToolsAvailable } from "./discord/availability"
-import { ensureSoulFilePlacement } from "./bootstrap"
-import { reconcileFrontendSoul } from "./frontend-soul"
-import { clearSession } from "./runner/session"
-import { clientTools } from "./client"
 import { config } from "./config"
+import { tryShim, SHIM_FAILED_ENV } from "./shim"
+import { createNanoApplication } from "./plugins/application"
+import type { NanoApplication } from "./plugins/application"
 
-// The control plane assigns each worker its port via PORT; standalone runs take
-// it from [server].port. Env wins so one config file can back many workers.
 const PORT = Number.parseInt(process.env.PORT ?? String(config.server.port), 10)
-const WORKER_HOST = process.env.NANO_WORKER_HOST?.trim() || config.server.listen
+const HOST = process.env.NANO_WORKER_HOST?.trim() || config.server.listen
 const RESTART_COMMAND = process.env.NANO_RESTART_COMMAND?.trim() || "npm run start:worker"
 const MANAGED_WORKER = process.env.NANO_MANAGED_WORKER?.trim().toLowerCase() === "true"
 
-function spawnReplacementProcess(): void {
+function spawnReplacement(): void {
   console.log(`[nano] spawning replacement: ${RESTART_COMMAND}`)
   const child = spawn(RESTART_COMMAND, {
     cwd: process.env.NANO_RESTART_CWD?.trim() || REPO_ROOT,
@@ -42,170 +22,64 @@ function spawnReplacementProcess(): void {
   child.unref()
 }
 
-async function main() {
-  // Check for shim mode before anything else.
-  // If the shim is active, this blocks until the child exits.
-  // On clean exit (0) the process terminates here.
-  // On failure we fall through to normal startup in safe mode.
+async function main(): Promise<void> {
   await tryShim()
-
-  if (process.env[SHIM_FAILED_ENV]) {
-    console.warn("[nano] started in safe mode — shim child failed, running from nix store")
-  }
-
-  if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error(`invalid worker port: ${process.env.PORT ?? config.server.port}`)
+  if (process.env[SHIM_FAILED_ENV]) console.warn("[nano] started in safe mode — shim child failed, running from nix store")
+  if (!Number.isInteger(PORT) || PORT < 1 || PORT > 65535) throw new Error("Invalid worker port")
   process.umask(0o077)
   console.log("[nano] starting up...")
-
-  await clientTools.start()
-  const frontendRuntime = config.frontend.enable ? modelStateFor("frontend") : null
-  const metadataTargets: BridgeModelMetadataTarget[] = [
-    ...(modelState.primaryModel ? [{ model: modelState.primaryModel, apiKey: modelState.primaryApiKey }] : []),
-    { model: modelState.fallbackModel, apiKey: modelState.fallbackApiKey },
-    ...(modelState.summaryModel ? [{ model: modelState.summaryModel, apiKey: modelState.summaryApiKey }] : []),
-    ...(frontendRuntime?.primaryModel ? [{ model: frontendRuntime.primaryModel, apiKey: frontendRuntime.primaryApiKey }] : []),
-  ]
-  await initializeBridgeModelMetadata(metadataTargets)
-
-  await ensureSoulFilePlacement()
-  let frontendSoulConflict = false
-  if (config.frontend.enable) {
-    const frontendSoul = await reconcileFrontendSoul()
-    frontendSoulConflict = frontendSoul.conflicted
-    if (frontendSoul.requiresFreshSession) {
-      await clearSession("frontend")
-      console.warn(`[frontend soul] ${frontendSoul.conflicted ? "merge conflict requires frontend reconciliation" : "rebased onto the current main soul"}; cleared the stale frontend session`)
-    }
-  }
-  initDb()
-  await snapshotStateRevisions()
-  initMetricsDb()
-
-  // If snapcompact bitmap frames are the configured deep-archive path, load the
-  // native renderer eagerly now so a broken setup fails startup — loud, cheap —
-  // instead of silently degrading to the text appendix later. Per-render
-  // failures at runtime still degrade gracefully; only load failure is fatal.
-  // This mirrors resolveDeepArchiveBackend's branch that builds a frames backend:
-  // deep_archive on, not the openai-remote path, primary model vision-capable.
-  {
-    const runtimeModels = config.frontend.enable
-      ? [modelState, modelStateFor("frontend")]
-      : [modelState]
-    const framesIntended = runtimeModels.some((models) => {
-      const activeModel = models.useFallback ? models.fallbackModel : models.primaryModel
-      const provider = (activeModel?.provider ?? "").toLowerCase()
-      return models.deepArchive &&
-        !(provider.includes("openai") && REMOTE_COMPACTION_ENDPOINT) &&
-        models.primaryVision
-    })
-    if (framesIntended) {
-      await initSnapcompactRenderer()
-    }
-  }
-
-  // Wire background jobs (e.g. subagents) to wake/steer the runner on completion.
-  // Without this, deliver stays null and completed-job notifications are silently dropped.
-  initJobManager(activate)
-
-  const discordEmbeddingBackfill = startDiscordEmbeddingBackfill()
-
-  let discordGateway: Awaited<ReturnType<typeof startDiscordGateway>> = null
-  try {
-    discordGateway = await startDiscordGateway()
-  } catch (err) {
-    console.warn("[discord gateway] startup failed:", err)
-  }
-  setDiscordToolsAvailable(Boolean(discordGateway))
-  await recoverModelSwapHandoff()
-
-  if (frontendSoulConflict) {
-    activateFrontend({
-      source: "system",
-      triggeredAt: new Date().toISOString(),
-      raw: null,
-      content: "[frontend soul merge conflict] Your virtual memory://soul.md contains unresolved merge markers after the main soul changed. Read memory://soul.md, reconcile the main and frontend versions, then edit the virtual soul to remove all markers. Your edits update the frontend patch; the main soul is unchanged.",
-    })
-  }
-
-  // Replay durable virtual-agent mail only after client, jobs, compaction, and
-  // Discord availability are initialized. A replay may wake either loop and
-  // its first pinned catalog must reflect the fully started worker.
-  if (config.frontend.enable) {
-    configureAgentChannelDelivery((recipient, event) => {
-      if (recipient === "frontend") return activateFrontend(event)
-      activate(event)
-      return true
-    })
-  }
-
-  let shuttingDown = false
-  let restartRequested = false
+  let application: NanoApplication | undefined
+  let closing: Promise<void> | undefined
+  let restart = false
   let restartReason: string | undefined
 
-  function requestRestart(reason?: string): void {
-    if (restartRequested || shuttingDown) return
-    restartRequested = true
-    restartReason = reason?.trim() || undefined
-    setTimeout(() => {
-      void gracefulShutdown("RESTART")
-    }, 50).unref?.()
+  async function close(reason: string): Promise<void> {
+    if (closing) return closing
+    closing = (async () => {
+      console.log(`[nano] ${reason}${restartReason ? ` (${restartReason})` : ""}, saving sessions and closing plugins...`)
+      const deadline = setTimeout(() => {
+        console.error("[nano] shutdown timed out; forcing exit")
+        process.exit(1)
+      }, 310_000)
+      try {
+        await application?.close()
+        if (restart && !MANAGED_WORKER) spawnReplacement()
+        process.exitCode = 0
+      } finally {
+        clearTimeout(deadline)
+      }
+    })()
+    return closing
   }
 
-  function requestShutdown(): void {
-    if (restartRequested || shuttingDown) return
-    setTimeout(() => {
-      void gracefulShutdown("SHUTDOWN")
-    }, 50).unref?.()
+  const requestClose = (reason: string) => {
+    setTimeout(() => { void close(reason).catch((error) => { console.error("[nano] shutdown failed:", error); process.exitCode = 1 }) }, 50).unref()
   }
-
-  const server = createServer({ requestRestart, requestShutdown })
-  setGatewayCallbacks({ requestRestart, requestShutdown })
-
-  await server.listen({ port: PORT, host: WORKER_HOST })
-  console.log(`[nano] listening on ${WORKER_HOST}:${PORT}`)
-  startBoredomTimer()
-  startFrontendBoredomTimer()
-
-  async function gracefulShutdown(sig: string) {
-    if (shuttingDown) return  // ignore duplicate signals
-    shuttingDown = true
-    const detail = restartRequested && restartReason ? ` (${restartReason})` : ""
-    console.log(`\n[nano] ${sig} received${detail}, saving session snapshot...`)
-
-    const timeout = new Promise<void>((resolve) =>
-      setTimeout(() => { console.log("[nano] shutdown timed out, forcing exit"); resolve() }, 300_000)
-    )
-
-    await Promise.race([Promise.all([shutdown(), shutdownFrontend()]).then(() => {}), timeout])
-
-    const cleanup = async () => {
-      discordEmbeddingBackfill.stop()
-      configureAgentChannelDelivery(null)
-      if (discordGateway) await discordGateway.stop()
-      setDiscordToolsAvailable(false)
-      await server.close()
-      await clientTools.stop()
-    }
-    const cleanupTimeout = new Promise<void>((resolve) =>
-      setTimeout(() => { console.log("[nano] cleanup timed out, exiting anyway"); resolve() }, 10_000)
-    )
-    await Promise.race([cleanup(), cleanupTimeout])
-    if (restartRequested && !MANAGED_WORKER) spawnReplacementProcess()
-    process.exit(0)
-  }
-
-  process.on("SIGINT", async () => {
-    if (shuttingDown) {
-      console.log("\n[nano] force exit")
-      process.exit(1)
-    }
-    await gracefulShutdown("SIGINT")
+  application = await createNanoApplication({
+    config,
+    listen: { port: PORT, host: HOST },
+    ...(config.prometheus.port > 0 ? { observability: { port: config.prometheus.port } } : {}),
+    disposeTimeoutMs: 300_000,
+    lifecycle: {
+      shutdown() { if (!closing) requestClose("SHUTDOWN") },
+      restart(reason) {
+        if (closing || restart) return
+        restart = true
+        restartReason = reason?.trim() || undefined
+        requestClose("RESTART")
+      },
+    },
   })
-
-  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"))
+  const failed = application.bus.statuses().filter((entry) => entry.status === "FAILED")
+  for (const entry of failed) console.error(`[nano] plugin ${entry.id} failed (${entry.phase ?? "unknown"}):`, entry.error)
+  process.on("SIGINT", () => {
+    if (closing) process.exit(1)
+    void close("SIGINT")
+  })
+  process.on("SIGTERM", () => { void close("SIGTERM") })
 }
 
-main().catch((err) => {
-  console.error("[nano] fatal:", err)
-  process.exit(1)
+void main().catch((error) => {
+  console.error("[nano] fatal:", error)
+  process.exitCode = 1
 })

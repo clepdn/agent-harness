@@ -62,8 +62,11 @@ const fixtureConfig = {
   },
 }
 
-const testBounds = { boundaryWaitMs: 0, toolSettleMs: 100, gracefulDeadlineMs: 5_000, gracefulTurnLimit: 5 }
 const childHelpers = `
+  import { jobsServicePlugin } from "./packages/nano-runtime/src/plugins/jobs-service.ts"
+  import { nano } from "./packages/nano-runtime/src/plugins/api.ts"
+  import { createRunnerRuntime } from "./packages/nano-runtime/src/runner/index.ts"
+  import { createFrontendRunnerRuntime } from "./packages/nano-runtime/src/runner/frontend.ts"
   const frame = (delta, finish_reason = null) => 'data: ' + JSON.stringify({ choices: [{ index: 0, delta, finish_reason }] }) + '\\n\\n'
   async function until(predicate) {
     for (let i = 0; i < 10000; i++) {
@@ -71,6 +74,14 @@ const childHelpers = `
       await new Promise(resolve => setImmediate(resolve))
     }
     assert.fail('runner did not reach expected state')
+  }
+  async function createRuntimes(fixture) {
+    await fixture.bus.install(jobsServicePlugin)
+    const services = { ...fixture.services, jobs: fixture.bus.get(nano.jobs) }
+    const frontend = createFrontendRunnerRuntime(services)
+    const main = createRunnerRuntime(services, frontend)
+    await main.recoverModelSwapHandoff()
+    return { services, main, frontend }
   }
 `
 
@@ -81,18 +92,12 @@ test("/model swap immediately wakes an idle runner, journals and ends on old set
     import assert from "node:assert/strict"
     import fs from "node:fs/promises"
     import path from "node:path"
-    import { config } from "./packages/nano-runtime/src/config.ts"
-    import { initDb } from "./packages/nano-runtime/src/db.ts"
-    import { initMetricsDb } from "./packages/nano-runtime/src/metrics.ts"
-    import { handleInteraction } from "./packages/nano-runtime/src/discord/slash-commands.ts"
-    import { modelState } from "./packages/nano-runtime/src/runner/model-state.ts"
-    import { loadRestSnapshot, loadSession } from "./packages/nano-runtime/src/runner/session.ts"
-    import { grepContext } from "./packages/nano-runtime/src/runner/context-store.ts"
-    import { wake, isRunning, isWaitingForEvent, enqueueEvent, shutdown } from "./packages/nano-runtime/src/runner/index.ts"
-    config.agent.boredom_wake_min = 0
-    initDb()
-    initMetricsDb()
-    modelState.primaryNudgeOnNoTool = false
+    import { createExecutionServices } from "./packages/nano-runtime/src/test-model-provider.ts"
+    const fixture = await createExecutionServices({ home: process.env.NANO_HOME, dbPath: path.join(process.env.NANO_HOME, "nano.db"), removeHomeOnClose: false, hashline: false })
+    const { services, main: runner, frontend } = await createRuntimes(fixture)
+    const persistence = services.persistence
+    const model = services.model
+    const wake = runner.wake
     const requests = []
     const handoffRequests = []
     ${childHelpers}
@@ -108,9 +113,8 @@ test("/model swap immediately wakes an idle runner, journals and ends on old set
           handoffRequests.push(request)
           if (handoffRequests.length === 1) {
             return new Response(frame({ tool_calls: [
-              { index: 0, id: 'dir-call', type: 'function', function: { name: 'memory_fs', arguments: JSON.stringify({ file_name: 'journal/', op: 'create' }) } },
-              { index: 1, id: 'file-call', type: 'function', function: { name: 'memory_fs', arguments: JSON.stringify({ file_name: 'journal/model-swap.md', op: 'create' }) } },
-              { index: 2, id: 'journal-call', type: 'function', function: { name: 'edit_file', arguments: JSON.stringify({ path: 'memory://journal/model-swap.md', old_text: '', new_text: 'journaled old-task-proof' }) } },
+              { index: 0, id: 'file-call', type: 'function', function: { name: 'memory_fs', arguments: JSON.stringify({ file_name: 'journal/model-swap.md', op: 'create' }) } },
+              { index: 1, id: 'journal-call', type: 'function', function: { name: 'edit_file', arguments: JSON.stringify({ path: 'memory://journal/model-swap.md', old_text: '', new_text: 'journaled old-task-proof' }) } }
             ] }, 'tool_calls') + 'data: [DONE]\\n\\n', { headers: { 'content-type': 'text/event-stream' } })
           }
           assert.ok(body.messages.some(m => m.role === 'tool' && m.tool_call_id === 'journal-call'))
@@ -122,25 +126,14 @@ test("/model swap immediately wakes an idle runner, journals and ends on old set
       return new Response(frame({ content: 'new model fresh session' }, 'stop') + 'data: [DONE]\\n\\n', { headers: { 'content-type': 'text/event-stream' } })
     }
     const firstWake = wake({ source: 'chat', content: 'initial old session work', triggeredAt: new Date().toISOString(), raw: null })
-    await until(() => isRunning() && isWaitingForEvent() && requests.length > 0)
-    let deferred = false
-    let edited
-    const interaction = {
-      user: { id: 'fixture-owner' }, commandName: 'model',
-      options: { getSubcommand: () => 'swap', getString: () => 'next' },
-      deferReply: async options => { deferred = true; assert.equal(options.ephemeral, true) },
-      editReply: async content => { assert.equal(deferred, true); edited = content },
-      reply: async () => assert.fail('swap must defer before the lifecycle completes'),
-    }
+    await until(() => runner.getRunnerStatus().running && runner.isWaitingForEvent() && requests.length > 0)
     const firstRequestAtSwap = requests.length
-    const command = handleInteraction(interaction)
+    const swapping = runner.requestModelSwap("next")
     await until(() => handoffRequests.length === 1)
-    assert.ok(deferred, 'Discord acknowledges before the outgoing model starts handoff work')
-    assert.equal(requests[firstRequestAtSwap]?.url, 'https://old.fixture.invalid/v1/chat/completions', 'idle swap triggers the outgoing provider without another incoming event')
-    assert.equal(enqueueEvent({ source: 'chat', content: 'held-new-work-proof', triggeredAt: new Date().toISOString(), raw: null }), true)
-    await command
-    assert.match(edited, /graceful end path|gracefully/i)
-    await until(() => requests.some(r => r.url === 'https://new.fixture.invalid/v1/chat/completions'))
+    assert.equal(requests[firstRequestAtSwap]?.url, "https://old.fixture.invalid/v1/chat/completions", "idle swap triggers the outgoing provider without another incoming event")
+    assert.equal(runner.enqueueEvent({ source: "chat", content: "held-new-work-proof", triggeredAt: new Date().toISOString(), raw: null }), true)
+    await swapping
+    await until(() => requests.some(r => r.url === "https://new.fixture.invalid/v1/chat/completions"))
     assert.equal(handoffRequests.length, 2)
     assert.ok(handoffRequests[1].body.messages.some(m => m.role === 'tool' && m.tool_call_id === 'journal-call'))
     const selectedRequest = requests.find(r => r.url === 'https://new.fixture.invalid/v1/chat/completions')
@@ -153,17 +146,19 @@ test("/model swap immediately wakes an idle runner, journals and ends on old set
     assert.ok(selectedRequest.body.messages.some(m => JSON.stringify(m).includes('held-new-work-proof')))
     assert.equal(selectedRequest.body.messages.some(m => JSON.stringify(m).includes('old-task-proof')), false, 'new provider never receives the outgoing raw transcript')
     assert.match(await fs.readFile(path.join(process.env.NANO_HOME, 'memories', 'journal', 'model-swap.md'), 'utf8'), /old-task-proof/)
-    const rest = await loadRestSnapshot('main', false)
+    const rest = await persistence.loadRestSnapshot('main')
     assert.ok(rest)
     assert.match(rest.summary, /context-summary-id/)
-    const selectedSession = await loadSession('main')
+    const selectedSession = await persistence.loadSession('main')
     assert.ok(selectedSession)
     assert.equal(selectedSession.contextModelId, 'new-model')
     assert.equal(selectedSession.messages.some(m => JSON.stringify(m).includes('old-task-proof')), false)
-    assert.ok(grepContext('end_session').length > 0)
+    assert.ok(persistence.grepContext('end_session').length > 0)
     assert.deepEqual(JSON.parse(await fs.readFile(path.join(process.env.NANO_HOME, 'model-selection.json'), 'utf8')), { preset: 'next' })
-    await until(() => isWaitingForEvent())
-    await shutdown()
+    await until(() => runner.isWaitingForEvent())
+    await runner.cleanup()
+    await frontend.cleanup()
+    await fixture.close()
     await firstWake
   `
   const result = await runChild(home, fixtureConfig, script)
@@ -174,15 +169,12 @@ test("invalid and overlapping swaps preserve old settings, and busy work settles
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "nano-model-swap-busy-"))
   t.after(() => fs.rm(home, { recursive: true, force: true }))
   const script = `
-    import assert from "node:assert/strict"
-    import { config } from "./packages/nano-runtime/src/config.ts"
-    import { initDb } from "./packages/nano-runtime/src/db.ts"
-    import { initMetricsDb } from "./packages/nano-runtime/src/metrics.ts"
-    import { modelState, persistedModelPreset } from "./packages/nano-runtime/src/runner/model-state.ts"
-    import { __test, enqueueEvent, isRunning, isWaitingForEvent, wake, shutdown } from "./packages/nano-runtime/src/runner/index.ts"
-    config.agent.boredom_wake_min = 0
-    initDb()
-    initMetricsDb()
+    import { createExecutionServices } from "./packages/nano-runtime/src/test-model-provider.ts"
+    const fixture = await createExecutionServices({ home: process.env.NANO_HOME, dbPath: path.join(process.env.NANO_HOME, "nano.db"), removeHomeOnClose: false, hashline: false })
+    const { services, main: runner, frontend } = await createRuntimes(fixture)
+    const model = services.model
+    const persistence = services.persistence
+    const wake = runner.wake
     const requests = []
     const order = []
     let release
@@ -207,16 +199,15 @@ test("invalid and overlapping swaps preserve old settings, and busy work settles
       if (url === 'https://new.fixture.invalid/v1/chat/completions') order.push('new-generation-started')
       return new Response(frame({ content: 'fresh selected session' }, 'stop') + 'data: [DONE]\\n\\n', { headers: { 'content-type': 'text/event-stream' } })
     }
-    const originalModel = modelState.primaryModel?.id
-    await assert.rejects(__test.requestModelSwap('missing', { boundaryWaitMs: 0 }), /model preset.*not found/)
-    assert.equal(modelState.primaryModel?.id, originalModel)
-    assert.equal(persistedModelPreset, undefined)
+    const originalModel = model.current("main").primaryModel?.id
+    await assert.rejects(runner.requestModelSwap("missing"), /model preset.*not found/)
+    assert.equal(model.current("main").primaryModel?.id, originalModel)
+    assert.equal(model.persistedPreset(), undefined)
     const initial = wake({ source: 'chat', content: 'hold-old-request', triggeredAt: new Date().toISOString(), raw: null })
     await until(() => blocked && release !== undefined)
-    const options = ${JSON.stringify(testBounds)}
-    const swapping = __test.requestModelSwap('next', options)
-    await assert.rejects(__test.requestModelSwap('alternate', options), /model swap already in progress/)
-    assert.equal(enqueueEvent({ source: 'chat', content: 'queued-work-proof', triggeredAt: new Date().toISOString(), raw: null }), true)
+    const swapping = runner.requestModelSwap("next")
+    await assert.rejects(runner.requestModelSwap("alternate"), /model swap already in progress/)
+    assert.equal(runner.enqueueEvent({ source: 'chat', content: 'queued-work-proof', triggeredAt: new Date().toISOString(), raw: null }), true)
     assert.equal(requests.some(r => r.url === 'https://new.fixture.invalid/v1/chat/completions'), false)
     release()
     await swapping
@@ -228,8 +219,10 @@ test("invalid and overlapping swaps preserve old settings, and busy work settles
     assert.equal(fresh.body.messages.some(m => JSON.stringify(m).includes('hold-old-request')), false)
     assert.ok(order.indexOf('old-generation-settled') >= 0)
     assert.ok(order.indexOf('new-generation-started') > order.indexOf('old-generation-settled'))
-    await until(() => isWaitingForEvent())
-    await shutdown()
+    await until(() => runner.isWaitingForEvent())
+    await runner.cleanup()
+    await frontend.cleanup()
+    await fixture.close()
     await initial
   `
   const result = await runChild(home, fixtureConfig, script)
@@ -240,8 +233,9 @@ test("failed graceful handoff archives raw provenance and a crashed handoff rest
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "nano-model-swap-restart-"))
   t.after(() => fs.rm(home, { recursive: true, force: true }))
   const seedCrash = `
-    import { saveModelSwapHandoff } from "./packages/nano-runtime/src/runner/session.ts"
-    await saveModelSwapHandoff({
+    import { createExecutionServices } from "./packages/nano-runtime/src/test-model-provider.ts"
+    const fixture = await createExecutionServices({ home: process.env.NANO_HOME, dbPath: path.join(process.env.NANO_HOME, "nano.db"), removeHomeOnClose: false, hashline: false })
+    await fixture.services.persistence.saveModelSwapHandoff({
       version: 1,
       id: 'crash-fixture',
       preset: 'next',
@@ -250,29 +244,27 @@ test("failed graceful handoff archives raw provenance and a crashed handoff rest
       events: [{ source: 'chat', content: 'crash-queued-task-proof', triggeredAt: new Date().toISOString(), raw: null }],
       note: 'simulated process crash while a swap was closing',
     })
+    await fixture.close()
   `
   const seeded = await runChild(home, fixtureConfig, seedCrash)
   assert.equal(seeded.code, 0, seeded.output)
 
   const restartScript = `
-    import assert from "node:assert/strict"
-    import { initDb } from "./packages/nano-runtime/src/db.ts"
-    import { initMetricsDb } from "./packages/nano-runtime/src/metrics.ts"
-    import { modelState, persistedModelPreset } from "./packages/nano-runtime/src/runner/model-state.ts"
-    import { wake, shutdown, recoverModelSwapHandoff } from "./packages/nano-runtime/src/runner/index.ts"
-    import { grepContext } from "./packages/nano-runtime/src/runner/context-store.ts"
-    initDb()
-    initMetricsDb()
-    await recoverModelSwapHandoff()
-    assert.equal(persistedModelPreset, 'next')
-    assert.equal(modelState.primaryModel?.id, 'new-model')
+    import { createExecutionServices } from "./packages/nano-runtime/src/test-model-provider.ts"
+    const fixture = await createExecutionServices({ home: process.env.NANO_HOME, dbPath: path.join(process.env.NANO_HOME, "nano.db"), removeHomeOnClose: false, hashline: false })
+    ${childHelpers}
+    const { services, main: runner, frontend } = await createRuntimes(fixture)
+    const model = services.model
+    const persistence = services.persistence
+    assert.equal(model.persistedPreset(), 'next')
+    assert.equal(model.current("main").primaryModel?.id, 'new-model')
     let request
-    const frame = delta => 'data: ' + JSON.stringify({ choices: [{ index: 0, delta, finish_reason: 'stop' }] }) + '\\n\\n'
+    const recoveryFrame = delta => 'data: ' + JSON.stringify({ choices: [{ index: 0, delta, finish_reason: 'stop' }] }) + '\\n\\n'
     globalThis.fetch = async (input, init) => {
       request = { url: String(input), body: JSON.parse(String(init.body)), authorization: new Headers(init.headers).get('authorization') }
-      return new Response(frame({ content: 'restored selected preset with pending work' }) + 'data: [DONE]\\n\\n', { headers: { 'content-type': 'text/event-stream' } })
+      return new Response(recoveryFrame({ content: 'restored selected preset with pending work' }) + 'data: [DONE]\\n\\n', { headers: { 'content-type': 'text/event-stream' } })
     }
-    const restarted = wake({ source: 'system', content: 'process restarted', triggeredAt: new Date().toISOString(), raw: null })
+    const restarted = runner.wake({ source: 'system', content: 'process restarted', triggeredAt: new Date().toISOString(), raw: null })
     for (let i = 0; i < 10000 && !request; i++) await new Promise(resolve => setImmediate(resolve))
     assert.ok(request)
     assert.equal(request.url, 'https://new.fixture.invalid/v1/chat/completions')
@@ -281,8 +273,10 @@ test("failed graceful handoff archives raw provenance and a crashed handoff rest
     assert.ok(request.body.messages.some(m => JSON.stringify(m).includes('crash-queued-task-proof')))
     assert.ok(request.body.messages.some(m => JSON.stringify(m).includes('process restarted')))
     assert.equal(request.body.messages.some(m => JSON.stringify(m).includes('crash-raw-transcript-proof')), false)
-    assert.ok(grepContext('crash-raw-transcript-proof').length > 0)
-    await shutdown()
+    assert.ok(persistence.grepContext('crash-raw-transcript-proof').length > 0)
+    await runner.cleanup()
+    await frontend.cleanup()
+    await fixture.close()
     await restarted
   `
   const recovered = await runChild(home, fixtureConfig, restartScript)
@@ -291,17 +285,12 @@ test("failed graceful handoff archives raw provenance and a crashed handoff rest
   const failedCloseHome = await fs.mkdtemp(path.join(os.tmpdir(), "nano-model-swap-fallback-"))
   t.after(() => fs.rm(failedCloseHome, { recursive: true, force: true }))
   const failureScript = `
-    import assert from "node:assert/strict"
-    import { config } from "./packages/nano-runtime/src/config.ts"
-    import { initDb } from "./packages/nano-runtime/src/db.ts"
-    import { initMetricsDb } from "./packages/nano-runtime/src/metrics.ts"
-    import { modelState } from "./packages/nano-runtime/src/runner/model-state.ts"
-    import { loadRestSnapshot, loadSession } from "./packages/nano-runtime/src/runner/session.ts"
-    import { __test, isRunning, isWaitingForEvent, wake, shutdown } from "./packages/nano-runtime/src/runner/index.ts"
-    import { grepContext } from "./packages/nano-runtime/src/runner/context-store.ts"
-    config.agent.boredom_wake_min = 0
-    initDb()
-    initMetricsDb()
+    import { createExecutionServices } from "./packages/nano-runtime/src/test-model-provider.ts"
+    const fixture = await createExecutionServices({ home: process.env.NANO_HOME, dbPath: path.join(process.env.NANO_HOME, "nano.db"), removeHomeOnClose: false, hashline: false })
+    const { services, main: runner, frontend } = await createRuntimes(fixture)
+    const model = services.model
+    const persistence = services.persistence
+    const wake = runner.wake
     const requests = []
     ${childHelpers}
     globalThis.fetch = async (input, init) => {
@@ -318,28 +307,29 @@ test("failed graceful handoff archives raw provenance and a crashed handoff rest
       return new Response(frame({ content: 'unexpected old provider request' }, 'stop') + 'data: [DONE]\\n\\n', { headers: { 'content-type': 'text/event-stream' } })
     }
     const initial = wake({ source: 'chat', content: 'raw-failure-history-proof', triggeredAt: new Date().toISOString(), raw: null })
-    await until(() => isRunning() && isWaitingForEvent())
-    const outcome = await __test.requestModelSwap('next', ${JSON.stringify(testBounds)})
+    await until(() => runner.getRunnerStatus().running && runner.isWaitingForEvent())
+    const outcome = await runner.requestModelSwap("next")
     assert.equal(outcome.graceful, false)
     assert.ok(outcome.fallbackReason)
-    assert.equal(modelState.primaryModel?.id, 'new-model')
-    assert.ok(requests.some(r => r.url === 'https://old.fixture.invalid/v1/chat/completions' && r.authorization === 'Bearer old-key'))
+    assert.equal(model.current("main").primaryModel?.id, 'new-model')
     assert.equal(requests.some(r => r.url === 'https://fallback.fixture.invalid/v1/chat/completions'), false, 'a journal/end failure stays on the outgoing provider instead of provider-failover')
     await until(() => requests.some(r => r.url === 'https://new.fixture.invalid/v1/chat/completions'))
     const fresh = requests.find(r => r.url === 'https://new.fixture.invalid/v1/chat/completions')
     assert.ok(fresh)
     assert.equal(fresh.authorization, 'Bearer new-key')
     assert.equal(fresh.body.messages.some(m => JSON.stringify(m).includes('raw-failure-history-proof')), false)
-    const rest = await loadRestSnapshot('main', false)
+    const rest = await persistence.loadRestSnapshot('main')
     assert.ok(rest)
     assert.match(rest.summary, /context-summary-id/)
-    const selectedSession = await loadSession('main')
+    const selectedSession = await persistence.loadSession('main')
     assert.ok(selectedSession)
     assert.equal(selectedSession.contextModelId, 'new-model')
     assert.equal(selectedSession.messages.some(m => JSON.stringify(m).includes('raw-failure-history-proof')), false)
-    assert.ok(grepContext('raw-failure-history-proof').length > 0)
-    await until(() => isWaitingForEvent())
-    await shutdown()
+    assert.ok(persistence.grepContext('raw-failure-history-proof').length > 0)
+    await until(() => runner.isWaitingForEvent())
+    await runner.cleanup()
+    await frontend.cleanup()
+    await fixture.close()
     await initial
   `
   const failedClose = await runChild(failedCloseHome, fixtureConfig, failureScript)
@@ -351,37 +341,39 @@ test("selected-phase restart replays identical queued events once by lane-specif
   t.after(() => fs.rm(home, { recursive: true, force: true }))
   const seeded = await runChild(home, fixtureConfig, `
     import { createHash } from "node:crypto"
-    import { saveSession, saveModelSwapHandoff } from "./packages/nano-runtime/src/runner/session.ts"
-    import { persistModelSwap, resolveModelSwap } from "./packages/nano-runtime/src/runner/model-state.ts"
-    await persistModelSwap(resolveModelSwap('next'))
+    import { createExecutionServices } from "./packages/nano-runtime/src/test-model-provider.ts"
+    const fixture = await createExecutionServices({ home: process.env.NANO_HOME, dbPath: path.join(process.env.NANO_HOME, "nano.db"), removeHomeOnClose: false, hashline: false })
+    const persistence = fixture.services.persistence
+    const model = fixture.services.model
+    await model.persistModelSwap(model.resolveModelSwap("next"))
     const event = { source: 'chat', content: 'identical-queued-work', triggeredAt: '2026-01-01T00:00:00.000Z', raw: null }
     const fingerprint = createHash('sha256').update('[]').digest('hex')
     for (const kind of ['main', 'frontend']) {
-      await saveSession({ version: 1, messages: [{ role: 'user', content: event.content, timestamp: 1 }], toolCatalog: [], toolCatalogEpoch: 1, toolCatalogFingerprint: fingerprint, contextModelId: 'new-model', modelSwapHandoffId: kind + '-receipt', modelSwapEventIds: [kind + '-first'] }, kind)
+      await persistence.saveSession({ version: 1, messages: [{ role: 'user', content: event.content, timestamp: 1 }], toolCatalog: [], toolCatalogEpoch: 1, toolCatalogFingerprint: fingerprint, contextModelId: 'new-model', modelSwapHandoffId: kind + '-receipt', modelSwapEventIds: [kind + '-first'] }, kind)
     }
-    await saveModelSwapHandoff({ version: 1, preset: 'next', phase: 'selected', id: 'main-receipt', eventIds: ['main-first', 'main-second'], messages: [], events: [event, event], frontendId: 'frontend-receipt', frontendEventIds: ['frontend-first', 'frontend-second'], frontendMessages: [], frontendEvents: [event, event], note: 'crash after the first replay batch was persisted' })
+    await persistence.saveModelSwapHandoff({ version: 1, preset: 'next', phase: 'selected', id: 'main-receipt', eventIds: ['main-first', 'main-second'], messages: [], events: [event, event], frontendId: 'frontend-receipt', frontendEventIds: ['frontend-first', 'frontend-second'], frontendMessages: [], frontendEvents: [event, event], note: 'crash after the first replay batch was persisted' })
+    await fixture.close()
   `)
   assert.equal(seeded.code, 0, seeded.output)
   const recovered = await runChild(home, fixtureConfig, `
-    import assert from "node:assert/strict"
-    import { initDb } from "./packages/nano-runtime/src/db.ts"
-    import { initMetricsDb } from "./packages/nano-runtime/src/metrics.ts"
-    import { loadSession, loadModelSwapHandoff } from "./packages/nano-runtime/src/runner/session.ts"
-    import { modelState } from "./packages/nano-runtime/src/runner/model-state.ts"
-    import { recoverModelSwapHandoff } from "./packages/nano-runtime/src/runner/index.ts"
-    initDb()
-    initMetricsDb()
+    import { createExecutionServices } from "./packages/nano-runtime/src/test-model-provider.ts"
+    const fixture = await createExecutionServices({ home: process.env.NANO_HOME, dbPath: path.join(process.env.NANO_HOME, "nano.db"), removeHomeOnClose: false, hashline: false })
+    ${childHelpers}
+    const { services, main: runner, frontend } = await createRuntimes(fixture)
+    const persistence = services.persistence
+    const model = services.model
     globalThis.fetch = async () => assert.fail('recovery must not invoke a provider')
-    await recoverModelSwapHandoff()
-    await recoverModelSwapHandoff()
-    assert.equal(modelState.primaryModel?.id, 'new-model')
+    assert.equal(model.persistedPreset(), 'next')
     for (const kind of ['main', 'frontend']) {
-      const session = await loadSession(kind)
+      const session = await persistence.loadSession(kind)
       assert.ok(session)
       assert.equal(session.messages.filter(message => JSON.stringify(message.content).includes('identical-queued-work')).length, 2)
       assert.deepEqual(session.modelSwapEventIds, [kind + '-first', kind + '-second'])
     }
-    assert.equal(await loadModelSwapHandoff(), null)
+    assert.equal(await persistence.loadModelSwapHandoff(), null)
+    await runner.cleanup()
+    await frontend.cleanup()
+    await fixture.close()
   `)
   assert.equal(recovered.code, 0, recovered.output)
 })

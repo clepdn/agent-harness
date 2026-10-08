@@ -1,20 +1,13 @@
-import { makeUserMessage, makeAssistantMessage } from "./test-helpers"
 import assert from "node:assert/strict"
 import test from "node:test"
-import { initDb } from "../db"
+import { createDatabase } from "../db"
 import type { Message } from "../types"
-import {
-  archiveContextMessages,
-  attachContextSummaryId,
-  contextSummaryId,
-  describeContextSummary,
-  expandContextSummary,
-  grepContext,
-  recordContextCompaction,
-  recordRestContextSnapshot,
-} from "./context-store"
+import { attachContextSummaryId, contextSummaryId, createContextStore } from "./context-store"
+import { makeUserMessage, makeAssistantMessage } from "./test-helpers"
 
-initDb()
+const database = createDatabase(":memory:").db
+const contextStore = createContextStore(database)
+test.after(() => database.close())
 
 /** Archived rows store the whole original message under `content`; pull its inner content out. */
 function sourceContent(message: { content: unknown }): unknown {
@@ -27,8 +20,8 @@ test("immutable context archive preserves exact messages and supports literal se
   const marker = `lossless-search-${Date.now()}`
   const message = { role: "user", content: `the exact hidden detail is ${marker}` } as Message
 
-  const [messageId] = archiveContextMessages([message], "test-checkpoint")
-  const results = grepContext(marker, 5)
+  const [messageId] = contextStore.archiveContextMessages([message], "test-checkpoint")
+  const results = contextStore.grepContext(marker, 5)
 
   assert.ok(messageId?.startsWith("msg_"))
   assert.equal(results.length, 1)
@@ -42,20 +35,20 @@ test("summary DAG expands parent provenance before newer direct messages", () =>
   const second = makeAssistantMessage("second exact source message") as Message
   const third = makeUserMessage("third exact source message") as Message
 
-  const parentId = recordContextCompaction({
+  const parentId = contextStore.recordContextCompaction({
     summaryText: "parent summary",
     compactedMessages: [first, second],
     method: "test-parent",
   })
   const parentContent = `[context summary v1]\n[segments]\n[context-summary-id ${parentId}]\nparent summary`
-  const childId = recordContextCompaction({
+  const childId = contextStore.recordContextCompaction({
     summaryText: "child summary",
     compactedMessages: [third],
     priorSummaryContent: parentContent,
     method: "test-child",
   })
 
-  const expanded = expandContextSummary(childId, 0, 10)
+  const expanded = contextStore.expandContextSummary(childId, 0, 10)
   assert.ok(expanded)
   assert.equal(expanded.totalMessages, 3)
   assert.deepEqual(
@@ -63,27 +56,27 @@ test("summary DAG expands parent provenance before newer direct messages", () =>
     [first.content, second.content, third.content],
   )
 
-  const scoped = grepContext("first exact", 5, childId)
+  const scoped = contextStore.grepContext("first exact", 5, childId)
   assert.equal(scoped.length, 1)
 })
 
 test("lcm description exposes summary content, lineage, and bounded expansion costs", () => {
   const parentMessage = makeUserMessage("describe parent source") as Message
   const childMessage = makeAssistantMessage("describe child source") as Message
-  const parentId = recordContextCompaction({
+  const parentId = contextStore.recordContextCompaction({
     summaryText: "describe parent summary",
     compactedMessages: [parentMessage],
     method: "test-describe-parent",
   })
   const parentContent = `[context summary v1]\n[segments]\n[context-summary-id ${parentId}]\ndescribe parent summary`
-  const childId = recordContextCompaction({
+  const childId = contextStore.recordContextCompaction({
     summaryText: "describe child summary",
     compactedMessages: [childMessage],
     priorSummaryContent: parentContent,
     method: "test-describe-child",
   })
 
-  const described = describeContextSummary(childId, 1)
+  const described = contextStore.describeContextSummary(childId, 1)
   assert.ok(described)
   assert.equal(described.type, "summary")
   assert.equal(described.summary.content, "describe child summary")
@@ -98,7 +91,7 @@ test("lcm description exposes summary content, lineage, and bounded expansion co
   assert.equal(described.expansion.totalMessages, 2)
   assert.equal(described.expansion.defaultPageSize, 12)
   assert.equal(described.expansion.tokenCap, 1)
-  assert.equal(describeContextSummary("sum_missing"), null)
+  assert.equal(contextStore.describeContextSummary("sum_missing"), null)
 })
 
 test("active summary messages carry a stable retrievable id", () => {
@@ -114,13 +107,12 @@ test("active summary messages carry a stable retrievable id", () => {
 
 test("summary provenance preserves repeated identical message occurrences", () => {
   const repeated = { role: "user", content: `repeated exact source ${Date.now()}` } as Message
-  const summaryId = recordContextCompaction({
+  const summaryId = contextStore.recordContextCompaction({
     summaryText: "two repeated messages",
     compactedMessages: [repeated, repeated],
     method: "test-repetition",
   })
-
-  const expanded = expandContextSummary(summaryId, 0, 10)
+  const expanded = contextStore.expandContextSummary(summaryId, 0, 10)
   assert.ok(expanded)
   assert.equal(expanded.totalMessages, 2)
   assert.equal(expanded.messages[0]?.id, expanded.messages[1]?.id)
@@ -128,7 +120,7 @@ test("summary provenance preserves repeated identical message occurrences", () =
 
 test("rest snapshot extends the current summary with the exact raw tail", () => {
   const oldSource = { role: "user", content: `older compacted message ${Date.now()}` } as Message
-  const parentId = recordContextCompaction({
+  const parentId = contextStore.recordContextCompaction({
     summaryText: "older living summary",
     compactedMessages: [oldSource],
     method: "test-before-rest",
@@ -142,7 +134,7 @@ test("rest snapshot extends the current summary with the exact raw tail", () => 
   ]
   const preSummaryWake = makeUserMessage("legacy wake message before summary") as Message
 
-  const snapshot = recordRestContextSnapshot([
+  const snapshot = contextStore.recordRestContextSnapshot([
     preSummaryWake,
     { role: "user", content: parentForest },
     ...tail,
@@ -151,7 +143,7 @@ test("rest snapshot extends the current summary with the exact raw tail", () => 
   assert.notEqual(snapshot.summaryId, parentId)
   assert.equal(contextSummaryId(snapshot.forest), snapshot.summaryId)
   assert.doesNotMatch(snapshot.forest, new RegExp(parentId))
-  const expanded = expandContextSummary(snapshot.summaryId, 0, 10)
+  const expanded = contextStore.expandContextSummary(snapshot.summaryId, 0, 10)
   assert.ok(expanded)
   assert.deepEqual(
     expanded.messages.map(sourceContent),
@@ -161,14 +153,14 @@ test("rest snapshot extends the current summary with the exact raw tail", () => 
 
 test("rest snapshot creates a recoverable summary before the first compaction", () => {
   const raw = { role: "user", content: `never compacted ${Date.now()}` } as Message
-  const snapshot = recordRestContextSnapshot([
+  const snapshot = contextStore.recordRestContextSnapshot([
     { role: "system", content: "bootstrap" },
     raw,
   ] as Message[])
 
   assert.match(snapshot.forest, /^\[context summary v1\]/)
   assert.equal(contextSummaryId(snapshot.forest), snapshot.summaryId)
-  const expanded = expandContextSummary(snapshot.summaryId)
+  const expanded = contextStore.expandContextSummary(snapshot.summaryId)
   assert.ok(expanded)
   assert.equal(expanded.totalMessages, 2)
   assert.deepEqual(
@@ -179,18 +171,18 @@ test("rest snapshot creates a recoverable summary before the first compaction", 
 
 test("frontend context archive cannot search or expand main context", () => {
   const marker = `lane-private-${Date.now()}`
-  archiveContextMessages([{ role: "user", content: `${marker} main` } as Message], "checkpoint", "main")
-  archiveContextMessages([{ role: "user", content: `${marker} frontend` } as Message], "checkpoint", "frontend")
+  contextStore.archiveContextMessages([{ role: "user", content: `${marker} main` } as Message], "checkpoint", "main")
+  contextStore.archiveContextMessages([{ role: "user", content: `${marker} frontend` } as Message], "checkpoint", "frontend")
 
-  assert.deepEqual(grepContext(marker, 10, undefined, "main").map((row) => row.content), [`${marker} main`])
-  assert.deepEqual(grepContext(marker, 10, undefined, "frontend").map((row) => row.content), [`${marker} frontend`])
+  assert.deepEqual(contextStore.grepContext(marker, 10, undefined, "main").map((row) => row.content), [`${marker} main`])
+  assert.deepEqual(contextStore.grepContext(marker, 10, undefined, "frontend").map((row) => row.content), [`${marker} frontend`])
 
-  const mainSummary = recordContextCompaction({
+  const mainSummary = contextStore.recordContextCompaction({
     summaryText: "main only",
     compactedMessages: [{ role: "user", content: `${marker} hidden` } as Message],
     method: "test-main-lane",
     runtimeKind: "main",
   })
-  assert.equal(describeContextSummary(mainSummary, undefined, "frontend"), null)
-  assert.equal(expandContextSummary(mainSummary, undefined, undefined, "frontend"), null)
+  assert.equal(contextStore.describeContextSummary(mainSummary, undefined, "frontend"), null)
+  assert.equal(contextStore.expandContextSummary(mainSummary, undefined, undefined, "frontend"), null)
 })

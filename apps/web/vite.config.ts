@@ -18,6 +18,7 @@ export default defineConfig(({ mode }) => {
     server: {
       host: true,
       proxy: {
+        "/rpc": { target: backendTarget, ws: true },
         "/agents": backendTarget,
         "/health": backendTarget,
         "/trigger": backendTarget,

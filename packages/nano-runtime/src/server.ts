@@ -1,398 +1,197 @@
-import Fastify from "fastify"
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify"
 import { AGENT_ID } from "./agent-config"
-import { config } from "./config"
-import { clientTools } from "./client"
-import { listWorkerEvents, publishWorkerEvent, subscribeWorkerEvents } from "./awp/outbox"
-import type { ControlCommand } from "./awp/types"
-import { wake, isRunning, isWaitingForEvent, enqueueEvent, getRunnerStatus, requestModelSwap } from "./runner/index"
-import { enqueueFrontendEvent, isFrontendRunning, isFrontendWaitingForEvent } from "./runner/frontend"
-import { modelState } from "./runner/model-state"
-import { buildDiscordBatchDigest, scanDiscordChannels } from "./discord/state"
-import { handleDiscordIngress } from "./discord/pipeline"
-import { fromBsky } from "./triggers/bsky"
-import { fromWebhook } from "./triggers/webhook"
-import { fromCron } from "./triggers/cron"
-import { fromChat } from "./triggers/chat"
-import { fromClientLifecycle } from "./triggers/client"
-import { subscribe } from "./stream"
-import { getMetrics, getMetricDetail, getDiscordMetricDetail } from "./metrics"
-import { parseChannelIds } from "./discord/parse"
-import { queryChannelMessages, queryChannels } from "./discord/db"
-import type { MetricListType } from "./metrics"
-import type { UserMessage } from "./types"
-import type { ToolCapability, WorkspaceDescriptor } from "@nano/harness-protocol"
+import { rpcGatewayPlugin, invokeRpcOperation, prepareRpcStream, authenticateRpcRequest, rpcErrorStatus, rpcErrorValue } from "./rpc-gateway"
+import type { RpcGatewayOptions, RpcIdentity, PreparedRpcStream } from "./rpc-gateway"
+import type { OperationDescriptor, OperationOutput, StreamDescriptor, StreamItem } from "@nano/protocol"
+import {
+  workerStatus, workerClientStatus, workerClientConnect, workerClientDisconnect, workerAwpEnqueue,
+  workerEventsList, workerEvents, workerControlShutdown, workerControlRestart,
+  workerTriggerDiscord, workerTriggerBsky, workerTriggerWebhook, workerTriggerCron, workerTriggerChat,
+  workerModelGet, workerModelSwap, workerChatStream, workerMetricsList, workerMetricsDetail, workerDiscordMetricDetail,
+  workerDiscordChannels, workerDiscordMessages,
+} from "@nano/protocol"
+import type { ToolCapability } from "@nano/harness-protocol"
 
-const DISCORD_BATCH_INTERVAL_MS = Math.max(1_000, config.discord.batch_interval_ms)
-const DISCORD_BATCH_MAX_MESSAGES = Math.max(5, Math.min(200, config.discord.batch_max_messages))
-const DISCORD_BATCH_SCAN = config.discord.channel_poll && config.discord.batch_scan
-const METRIC_LIST_TYPES = new Set<MetricListType>(["response", "summarization", "memory", "usage", "discord"])
-const METRIC_TYPE_ALIASES: Record<string, MetricListType> = {
-  compaction: "summarization",
-  memory: "memory",
-  memories: "memory",
-  summary: "summarization",
-  summaries: "summarization",
-  response: "response",
-  prompt_response: "response",
-  "prompt-response": "response",
-  completion: "response",
-}
-const TRIGGER_SOURCES = new Set(["discord", "bsky", "webhook", "cron", "chat", "client"])
+export function createServer(options: { rpcGateway?: RpcGatewayOptions } = {}) {
+  const identities = new WeakMap<FastifyRequest, RpcIdentity>()
 
-function parseMetricTypes(raw: string | undefined): MetricListType[] | undefined {
-  if (!raw?.trim()) return undefined
-
-  const types: MetricListType[] = []
-  for (const item of raw.split(",")) {
-    const normalized = item.trim().toLowerCase()
-    const type = METRIC_TYPE_ALIASES[normalized] ?? normalized
-    if (!METRIC_LIST_TYPES.has(type as MetricListType)) continue
-    if (!types.includes(type as MetricListType)) types.push(type as MetricListType)
+  function routeError(reply: FastifyReply, error: unknown, statusOverride?: number) {
+    const rpcError = rpcErrorValue(error)
+    return reply.code(statusOverride ?? rpcErrorStatus(error)).send({ error: rpcError.message, code: rpcError.code })
   }
-  return types.length ? types : undefined
-}
 
-export function createServer(options: {
-  requestRestart?: (reason?: string) => void
-  requestShutdown?: () => void
-  dispatchClientLifecycle?: (event: UserMessage) => boolean
-} = {}) {
-  const imageMaxBytes = Math.max(1, Number.parseInt(process.env.IMAGE_TOOL_MAX_BYTES ?? "1000000", 10) || 1_000_000)
-  const app = Fastify({ logger: false, bodyLimit: Math.max(2_000_000, imageMaxBytes * 2 + 1_000_000) })
-  let discordBatchInFlight = false
-  let discordBatchTimer: ReturnType<typeof setInterval> | null = null
-
-  app.options("/*", async (_req, reply) => reply.code(204).send())
-  app.get("/health", async () => ({
-    ok: true,
-    agentId: AGENT_ID,
-    instanceId: process.env.NANO_WORKER_INSTANCE_ID?.trim() || null,
-  }))
-
-  const runDiscordBatch = async (): Promise<void> => {
-    if (discordBatchInFlight) return
-    discordBatchInFlight = true
+  async function routeOperation<D extends OperationDescriptor>(request: FastifyRequest, reply: FastifyReply, descriptor: D, input: unknown): Promise<OperationOutput<D> | FastifyReply> {
+    const gateway = options.rpcGateway
+    if (!gateway) return routeError(reply, Object.assign(new Error("RPC operation registry is unavailable"), { code: "UNAVAILABLE" as const }))
+    const controller = new AbortController()
+    const onAborted = () => controller.abort()
+    const onResponseClose = () => { if (!reply.raw.writableEnded) controller.abort() }
+    request.raw.once("aborted", onAborted)
+    reply.raw.once("close", onResponseClose)
     try {
-      const runtimeKind = config.frontend.enable ? "frontend" as const : "main" as const
-      if (runtimeKind === "frontend") {
-        if (!isFrontendRunning() || !isFrontendWaitingForEvent()) return
-      } else {
-        if (!isRunning() || !isWaitingForEvent()) return
-      }
-
-      if (DISCORD_BATCH_SCAN) {
-        await scanDiscordChannels({ limit: DISCORD_BATCH_MAX_MESSAGES, runtimeKind })
-      }
-
-      const digest = buildDiscordBatchDigest({
-        maxMessages: DISCORD_BATCH_MAX_MESSAGES,
-        intervalMs: DISCORD_BATCH_INTERVAL_MS,
-        runtimeKind,
-      })
-      if (!digest) return
-
-      const event: UserMessage = {
-        source: "discord",
-        triggeredAt: new Date().toISOString(),
-        content: digest.content,
-        discordTargets: digest.targets,
-        raw: {
-          type: "discord_batch",
-          digest,
-          source: "gateway_cache",
-        },
-      }
-      if (runtimeKind === "frontend") enqueueFrontendEvent(event, { onlyIfWaiting: true })
-      else enqueueEvent(event, { onlyIfWaiting: true })
-    } catch (err) {
-      console.warn("[discord batch] failed:", err instanceof Error ? err.message : String(err))
+      return await invokeRpcOperation(gateway, descriptor, input, request, controller.signal, identities.get(request))
+    } catch (error) {
+      return routeError(reply, error, descriptor === workerClientConnect && rpcErrorValue(error).code === "UNAVAILABLE" ? 502 : undefined)
     } finally {
-      discordBatchInFlight = false
+      request.raw.off("aborted", onAborted)
+      reply.raw.off("close", onResponseClose)
     }
   }
 
-  const hasDiscordToken = Boolean(config.discord.bot_token)
-  if (hasDiscordToken) {
-    discordBatchTimer = setInterval(() => {
-      void runDiscordBatch()
-    }, DISCORD_BATCH_INTERVAL_MS)
-    if (typeof discordBatchTimer.unref === "function") discordBatchTimer.unref()
-
-    setTimeout(() => {
-      void runDiscordBatch()
-    }, 5_000).unref?.()
+  async function routeStream<D extends StreamDescriptor>(request: FastifyRequest, reply: FastifyReply, descriptor: D, input: unknown, writeItem: (item: StreamItem<D>) => void): Promise<FastifyReply | void> {
+    const gateway = options.rpcGateway
+    if (!gateway) return routeError(reply, Object.assign(new Error("RPC stream registry is unavailable"), { code: "UNAVAILABLE" as const }))
+    let prepared: PreparedRpcStream<D>
+    try {
+      prepared = await prepareRpcStream(gateway, descriptor, input, request, identities.get(request))
+    } catch (error) {
+      return routeError(reply, error)
+    }
+    reply.hijack()
+    const response = reply.raw
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "x-accel-buffering": "no" })
+    response.write(":ok\n\n")
+    const controller = new AbortController()
+    const onAborted = () => controller.abort()
+    const onResponseClose = () => controller.abort()
+    request.raw.once("aborted", onAborted)
+    response.once("close", onResponseClose)
+    try {
+      for await (const item of prepared.run(controller.signal)) writeItem(item)
+    } catch (error) {
+      if (!controller.signal.aborted && !response.destroyed) response.write(`event: error\ndata: ${JSON.stringify(rpcErrorValue(error))}\n\n`)
+    } finally {
+      controller.abort()
+      request.raw.off("aborted", onAborted)
+      response.off("close", onResponseClose)
+      if (!response.writableEnded && !response.destroyed) response.end()
+    }
   }
 
-  app.addHook("onClose", async () => {
-    if (!discordBatchTimer) return
-    clearInterval(discordBatchTimer)
-    discordBatchTimer = null
+  const imageMaxBytes = Math.max(1, Number.parseInt(process.env.IMAGE_TOOL_MAX_BYTES ?? "1000000", 10) || 1_000_000)
+  const app = Fastify({ logger: false, bodyLimit: Math.max(2_000_000, imageMaxBytes * 2 + 1_000_000) })
+  if (options.rpcGateway) app.register(rpcGatewayPlugin(options.rpcGateway))
+  app.addHook("onRequest", async (request, reply) => {
+    if (request.method === "OPTIONS" || request.url.startsWith("/rpc/")) return
+    const gateway = options.rpcGateway
+    if (!gateway) return
+    try {
+      identities.set(request, await authenticateRpcRequest(request, gateway.auth(), gateway))
+    } catch (error) {
+      return routeError(reply, error)
+    }
   })
 
-  publishWorkerEvent("worker.hello", {
-    agentId: AGENT_ID,
-    pid: process.pid,
-    startedAt: new Date().toISOString(),
-  })
+  app.options("/*", async (_req, reply) => reply.code(204).send())
+  app.get("/health", async () => ({ ok: true, agentId: AGENT_ID, instanceId: process.env.NANO_WORKER_INSTANCE_ID?.trim() || null }))
 
-  function isUserMessage(value: unknown): value is UserMessage {
-    if (!value || typeof value !== "object") return false
-    const event = value as Partial<UserMessage>
-    return (
-      typeof event.content === "string" &&
-      typeof event.triggeredAt === "string" &&
-      typeof event.source === "string" &&
-      TRIGGER_SOURCES.has(event.source)
-    )
-  }
 
-  function dispatchEvent(event: UserMessage, options: { onlyIfWaiting?: boolean; priority?: boolean } = {}): boolean {
-    if (isRunning()) return enqueueEvent(event, options)
-    if (options.onlyIfWaiting) return false
-    void wake(event)
-    return true
-  }
-  const dispatchClientLifecycle = options.dispatchClientLifecycle ?? dispatchEvent
+  app.get("/awp/status", async (request, reply) => routeOperation(request, reply, workerStatus, {}))
 
-  app.get("/awp/status", async () => ({
-    agentId: AGENT_ID,
-    ...getRunnerStatus(),
-    client: clientTools.status(),
-  }))
-
-  app.get("/awp/client/status", async () => clientTools.status())
+  app.get("/awp/client/status", async (request, reply) => routeOperation(request, reply, workerClientStatus, {}))
 
   // Handshake: a client running from the operator's own working directory
   // connects out to this control plane and mounts its executor (pointed at its
   // pwd) as the active tool target. Tools then run directly against the
   // operator's files with no upload/abstraction step. Reverted on disconnect.
   app.post("/client/connect", async (req, reply) => {
-    const body = (req.body ?? {}) as {
-      endpoint?: unknown
-      workspace?: unknown
-      capabilities?: unknown
-    }
-    if (typeof body.endpoint !== "string" || !body.endpoint.trim()) {
-      return reply.code(400).send({ error: "endpoint is required" })
-    }
-    const capabilities = Array.isArray(body.capabilities)
-      ? body.capabilities.filter((c): c is ToolCapability => typeof c === "string")
-      : undefined
-    const workspace =
-      body.workspace && typeof body.workspace === "object"
-        ? (body.workspace as WorkspaceDescriptor)
-        : undefined
-    try {
-      const info = await clientTools.connect({
-        endpoint: body.endpoint.trim(),
-        ...(workspace ? { workspace } : {}),
-        ...(capabilities ? { capabilities } : {}),
-      })
-      const status = clientTools.status()
-      const accepted = dispatchClientLifecycle(fromClientLifecycle(
-        "connected",
-        status.workspace,
-        status.capabilities,
-        status.clientId,
-      ))
-      return reply.send({
-        ok: true,
-        agentId: AGENT_ID,
-        client: info,
-        status,
-        notified: accepted,
-      })
-    } catch (error) {
-      return reply.code(502).send({
-        error: error instanceof Error ? error.message : String(error),
-      })
-    }
+    const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {}
+    const capabilities = Array.isArray(body.capabilities) ? body.capabilities.filter((value): value is ToolCapability => typeof value === "string") : undefined
+    const input = { endpoint: body.endpoint, ...(body.workspace !== undefined ? { workspace: body.workspace } : {}), ...(capabilities ? { capabilities } : {}) }
+    const result = await routeOperation(req, reply, workerClientConnect, input)
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
-  app.post("/client/disconnect", async (_req, reply) => {
-    const previous = clientTools.status()
-    const info = await clientTools.disconnect()
-    const accepted = dispatchClientLifecycle(fromClientLifecycle(
-      "disconnected",
-      previous.workspace,
-      previous.capabilities,
-      previous.clientId,
-    ))
-    return reply.send({ ok: true, agentId: AGENT_ID, client: info, notified: accepted })
+  app.post("/client/disconnect", async (req, reply) => {
+    const result = await routeOperation(req, reply, workerClientDisconnect, {})
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
   app.post("/awp/events", async (req, reply) => {
-    const body =
-      req.body && typeof req.body === "object"
-        ? (req.body as Partial<ControlCommand> | UserMessage)
-        : ({} as Partial<ControlCommand>)
-    const isEnqueueCommand = "type" in body && body.type === "event.enqueue"
-    const event = isEnqueueCommand ? body.event : body
-    const options = isEnqueueCommand ? body.options : undefined
-
-    if (!isUserMessage(event)) {
-      return reply.code(400).send({ error: "expected a UserMessage or event.enqueue command" })
-    }
-
-    const accepted = dispatchEvent(event, options)
-    return reply.send({
-      ok: accepted,
-      agentId: AGENT_ID,
-      running: isRunning(),
-    })
+    const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {}
+    const isCommand = body.type === "event.enqueue" && body.event && typeof body.event === "object"
+    const event = isCommand ? body.event : body
+    const options = isCommand && body.options && typeof body.options === "object" ? body.options : undefined
+    const result = await routeOperation(req, reply, workerAwpEnqueue, { event, ...(options ? { options } : {}) })
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
-  app.get("/awp/events", async (req) => {
+  app.get("/awp/events", async (req, reply) => {
     const query = req.query as { after_seq?: string; limit?: string; tail?: string }
-    const mode = query.tail === "1" || query.tail === "true" ? "tail" : "after"
-    return {
-      agentId: AGENT_ID,
-      events: listWorkerEvents(
-        Number.parseInt(query.after_seq ?? "0", 10) || 0,
-        Number.parseInt(query.limit ?? "500", 10) || 500,
-        mode,
-      ),
-    }
+    const result = await routeOperation(req, reply, workerEventsList, { afterSeq: Number.parseInt(query.after_seq ?? "0", 10) || 0, limit: Number.parseInt(query.limit ?? "500", 10) || 500, tail: query.tail === "1" || query.tail === "true" })
+    if (reply.sent) return result
+    return reply.send({ agentId: AGENT_ID, events: result })
   })
 
-  app.post("/awp/shutdown", async (_req, reply) => {
-    if (!options.requestShutdown) return reply.code(503).send({ error: "process shutdown is not available" })
-    options.requestShutdown()
-    return reply.send({ ok: true, agentId: AGENT_ID, shuttingDown: true })
+  app.post("/awp/shutdown", async (req, reply) => {
+    const result = await routeOperation(req, reply, workerControlShutdown, {})
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
   app.post("/awp/restart", async (req, reply) => {
-    if (!options.requestRestart) {
-      return reply.code(503).send({ error: "restart is not available in this process" })
-    }
-
-    const body = req.body && typeof req.body === "object" ? (req.body as { reason?: unknown }) : {}
-    const reason = typeof body.reason === "string" ? body.reason : undefined
-    options.requestRestart(reason)
-    return reply.send({ ok: true, agentId: AGENT_ID, restarting: true })
+    const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {}
+    const result = await routeOperation(req, reply, workerControlRestart, { ...(typeof body.reason === "string" ? { reason: body.reason } : {}) })
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
-  app.get("/awp/stream", (req, reply) => {
+  app.get("/awp/stream", async (req, reply) => {
     const query = req.query as { after_seq?: string; limit?: string }
     const afterSeq = Math.max(0, Number.parseInt(query.after_seq ?? "0", 10) || 0)
     const limit = Math.max(1, Math.min(1000, Number.parseInt(query.limit ?? "500", 10) || 500))
-
-    reply.hijack()
-
-    const res = reply.raw
-    res.writeHead(200, {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-      "x-accel-buffering": "no",
-    })
-
-    res.write(":ok\n\n")
-
-    const liveBuffer: ReturnType<typeof listWorkerEvents> = []
-    let replaying = true
-    let lastSeq = afterSeq
-    const seenIds = new Set<string>()
-
-    const send = (event: ReturnType<typeof listWorkerEvents>[number]) => {
-      if (seenIds.has(event.id)) return
-      seenIds.add(event.id)
-      if (event.seq > 0) lastSeq = Math.max(lastSeq, event.seq)
-      try {
-        res.write(`id: ${event.seq}\n`)
-        res.write(`event: ${event.type}\n`)
-        res.write(`data: ${JSON.stringify(event)}\n\n`)
-      } catch {}
-    }
-
-    const unsubscribe = subscribeWorkerEvents((event) => {
-      if (replaying) {
-        liveBuffer.push(event)
-        return
+    return routeStream(req, reply, workerEvents, { afterSeq, limit }, (item) => {
+      if ("seq" in item) {
+        const event = item.value
+        reply.raw.write(`id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`)
+      } else {
+        reply.raw.write(`event: gap\ndata: ${JSON.stringify(item)}\n\n`)
       }
-      send(event)
-    })
-
-    try {
-      for (const event of listWorkerEvents(afterSeq, limit)) send(event)
-    } catch (err) {
-      send(
-        publishWorkerEvent("worker.heartbeat", {
-          error: `failed to replay worker events: ${err instanceof Error ? err.message : String(err)}`,
-        }),
-      )
-    }
-
-    replaying = false
-    for (const event of liveBuffer.sort((a, b) => a.seq - b.seq)) {
-      if (event.seq === 0 || event.seq > lastSeq || !seenIds.has(event.id)) send(event)
-    }
-
-    const keepalive = setInterval(() => {
-      try {
-        publishWorkerEvent("worker.heartbeat", {
-          agentId: AGENT_ID,
-          running: isRunning(),
-          idle: isWaitingForEvent(),
-        })
-        res.write(":ping\n\n")
-      } catch {
-        clearInterval(keepalive)
-        unsubscribe()
-      }
-    }, 15_000)
-
-    req.raw.on("close", () => {
-      clearInterval(keepalive)
-      unsubscribe()
     })
   })
 
   app.post("/trigger/discord", async (req, reply) => {
-    const result = handleDiscordIngress(req.body)
-    return reply.send({
-      ok: true,
-      ...result,
-    })
-  })
-
-  app.get("/discord/channels", async () => ({
-    agentId: AGENT_ID,
-    channels: queryChannels(parseChannelIds()),
-  }))
-
-  app.get("/discord/channels/:channelId/messages", async (req) => {
-    const { channelId } = req.params as { channelId: string }
-    const query = req.query as { before?: string; limit?: string }
-    const limit = Math.max(1, Math.min(200, Number.parseInt(query.limit ?? "100", 10) || 100))
-    return {
-      agentId: AGENT_ID,
-      channelId,
-      messages: queryChannelMessages(channelId, query.before ?? "", limit).map(({ raw_json: _rawJson, ...message }) => message),
-    }
+    const result = await routeOperation(req, reply, workerTriggerDiscord, { body: req.body ?? null })
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
   app.post("/trigger/bsky", async (req, reply) => {
-    const event = fromBsky(req.body)
-    isRunning() ? enqueueEvent(event) : wake(event)
-    return reply.send({ ok: true })
+    const result = await routeOperation(req, reply, workerTriggerBsky, { body: req.body ?? null })
+    if (reply.sent) return result
+    return reply.send(result)
+  })
+  app.get("/discord/channels", async (req, reply) => {
+    const result = await routeOperation(req, reply, workerDiscordChannels, {})
+    if (reply.sent) return result
+    return reply.send({ agentId: AGENT_ID, channels: result })
   })
 
+  app.get("/discord/channels/:channelId/messages", async (req, reply) => {
+    const params = req.params as { channelId: string }
+    const query = req.query as { before?: string; limit?: string }
+    const result = await routeOperation(req, reply, workerDiscordMessages, {
+      channelId: params.channelId,
+      ...(query.before ? { before: query.before } : {}),
+      ...(query.limit ? { limit: Number.parseInt(query.limit, 10) || 100 } : {}),
+    })
+    if (reply.sent) return result
+    return reply.send({ agentId: AGENT_ID, channelId: params.channelId, messages: result })
+  })
   app.post("/trigger/webhook", async (req, reply) => {
-    const event = fromWebhook(req.body)
-    isRunning() ? enqueueEvent(event) : wake(event)
-    return reply.send({ ok: true })
+    const result = await routeOperation(req, reply, workerTriggerWebhook, { body: req.body ?? null })
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
   app.post("/trigger/restart", async (req, reply) => {
-    if (!options.requestRestart) {
-      return reply.code(503).send({ error: "restart is not available in this process" })
-    }
-
-    const body = req.body && typeof req.body === "object" ? (req.body as { reason?: unknown }) : {}
-    const reason = typeof body.reason === "string" ? body.reason : "webhook restart"
-    options.requestRestart(reason)
-    return reply.send({ ok: true, restarting: true })
+    const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {}
+    const result = await routeOperation(req, reply, workerControlRestart, { reason: typeof body.reason === "string" ? body.reason : "webhook restart" })
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
   // ── Model swap ──────────────────────────────────────────────────────────────
@@ -400,145 +199,66 @@ export function createServer(options: {
   // validate, journal/end or archive raw provenance, persist the preset, then
   // schedule a new bootstrap. It never mutates an active Context in place.
 
-  app.get("/awp/model", async () => ({
-    primary: modelState.primaryModel
-      ? { id: modelState.primaryModel.id, provider: modelState.primaryModel.provider, baseUrl: modelState.primaryModel.baseUrl }
-      : null,
-    fallback: { id: modelState.fallbackModel.id, provider: modelState.fallbackModel.provider, baseUrl: modelState.fallbackModel.baseUrl },
-    respectPromptCache: modelState.respectPromptCache,
-    useFallback: modelState.useFallback,
-    enableThinking: modelState.enableThinking,
-    thinkingEffort: modelState.thinkingEffort,
-    vision: modelState.primaryVision,
-  }))
-
-  app.post("/awp/swap-model", async (req, reply) => {
-    const body = req.body && typeof req.body === "object" ? (req.body as { preset?: unknown }) : {}
-    const presetName = typeof body.preset === "string" ? body.preset.trim() : ""
-
-    if (!presetName) {
-      return reply.code(400).send({ error: "preset is required" })
-    }
-
-    try {
-      const result = await requestModelSwap(presetName)
-      return reply.send({
-        ok: true,
-        action: "swapped",
-        preset: result.preset,
-        model: result.model,
-        provider: result.provider,
-        graceful: result.graceful,
-        ...(result.fallbackReason ? { fallbackReason: result.fallbackReason } : {}),
-      })
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      if (/model swap already in progress|overlapping model swap/i.test(message)) {
-        return reply.code(409).send({ error: message })
-      }
-      const invalidPreset = /model preset .* not found|preset .* has no model field|failed to build model from preset|preset is required/i.test(message)
-      return reply.code(invalidPreset ? 400 : 503).send({ error: message })
-    }
+  app.get("/awp/model", async (req, reply) => {
+    const result = await routeOperation(req, reply, workerModelGet, {})
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
-  app.post("/trigger/cron", async (_req, reply) => {
-    const event = fromCron()
-    isRunning() ? enqueueEvent(event) : wake(event)
-    return reply.send({ ok: true })
+  app.post("/awp/swap-model", async (req, reply) => {
+    const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {}
+    const result = await routeOperation(req, reply, workerModelSwap, { preset: body.preset })
+    if (reply.sent) return result
+    return reply.send(result)
+  })
+
+  app.post("/trigger/cron", async (req, reply) => {
+    const result = await routeOperation(req, reply, workerTriggerCron, { body: req.body ?? null })
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
   app.post("/trigger/chat", async (req, reply) => {
-    const event = fromChat(req.body)
-    if (!event.content.trim()) {
-      return reply.code(400).send({ error: "content is required" })
-    }
-    isRunning() ? enqueueEvent(event) : wake(event)
-    return reply.send({ ok: true, running: true })
+    const body = req.body && typeof req.body === "object" ? req.body as Record<string, unknown> : {}
+    const result = await routeOperation(req, reply, workerTriggerChat, { body: { ...body, source: "chat", triggeredAt: new Date().toISOString(), content: body.content ?? "", raw: body } })
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
-  app.get("/chat/stream", (req, reply) => {
-    reply.hijack()
-
-    const res = reply.raw
-    res.writeHead(200, {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache",
-      connection: "keep-alive",
-      "x-accel-buffering": "no",
-    })
-
-    res.write(":ok\n\n")
-
-    const unsubscribe = subscribe((event) => {
-      try {
-        res.write(`data: ${JSON.stringify(event)}\n\n`)
-      } catch {}
-    })
-
-    const keepalive = setInterval(() => {
-      try {
-        res.write(":ping\n\n")
-      } catch {
-        clearInterval(keepalive)
-        unsubscribe()
-      }
-    }, 15_000)
-
-    req.raw.on("close", () => {
-      clearInterval(keepalive)
-      unsubscribe()
-    })
+  app.get("/chat/stream", async (req, reply) => {
+    return routeStream(req, reply, workerChatStream, {}, (event) => reply.raw.write(`data: ${JSON.stringify(event)}\n\n`))
   })
 
-  app.get("/status", async () => ({
-    ...getRunnerStatus(),
-  }))
+  app.get("/status", async (req, reply) => routeOperation(req, reply, workerStatus, {}))
 
-  app.get("/metrics", async (req) => {
-    const query = req.query as {
-      limit?: string
-      cursor?: string
-      type?: string
-      includeRaw?: string
-      q?: string
-      from?: string
-      to?: string
-      cursor_memories?: string
-      cursor_summarization?: string
-      cursor_response?: string
-      cursor_usage?: string
-      cursor_discord?: string
-    }
-    return getMetrics({
-      limit: query.limit ? parseInt(query.limit, 10) : undefined,
-      cursor: query.cursor ? parseInt(query.cursor, 10) : undefined,
-      cursors: {
-        memories: query.cursor_memories,
-        summarization: query.cursor_summarization,
-        response: query.cursor_response,
-        usage: query.cursor_usage,
-        discord: query.cursor_discord,
-      },
-      type: parseMetricTypes(query.type),
+  app.get("/metrics", async (req, reply) => {
+    const query = req.query as Record<string, string | undefined>
+    const result = await routeOperation(req, reply, workerMetricsList, {
+      limit: query.limit ? Number.parseInt(query.limit, 10) : undefined,
+      cursor: query.cursor ? Number.parseInt(query.cursor, 10) : undefined,
+      type: query.type,
       includeRaw: query.includeRaw === "true" || query.includeRaw === "1",
       q: query.q,
       from: query.from,
       to: query.to,
+      cursors: { memories: query.cursor_memories, summarization: query.cursor_summarization, response: query.cursor_response, usage: query.cursor_usage, discord: query.cursor_discord },
     })
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
   app.get("/metrics/discord/:id", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const metric = getDiscordMetricDetail(id)
-    if (!metric) return reply.code(404).send({ error: "discord metric not found" })
-    return metric
+    const params = req.params as { id: string }
+    const result = await routeOperation(req, reply, workerDiscordMetricDetail, { id: params.id })
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
   app.get("/metrics/:id", async (req, reply) => {
-    const { id } = req.params as { id: string }
-    const metric = getMetricDetail(parseInt(id, 10))
-    if (!metric) return reply.code(404).send({ error: "metric not found" })
-    return metric
+    const params = req.params as { id: string }
+    const result = await routeOperation(req, reply, workerMetricsDetail, { id: Number.parseInt(params.id, 10) })
+    if (reply.sent) return result
+    return reply.send(result)
   })
 
   return app

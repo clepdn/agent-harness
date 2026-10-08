@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { Context, type Model } from "./llm"
+import { providerResolver } from "./test-model-provider"
 
 const model: Model = {
   id: "context-test",
@@ -79,6 +80,7 @@ test("complete owns request settings and atomically appends the assistant", asyn
   })
   const context = new Context({
     model,
+    providerResolver,
     apiKey: "test",
     thinkingLevel: "high",
     toolChoice: "none",
@@ -102,7 +104,7 @@ test("complete refuses to append a stale response when the Context changes in fl
     await blocked
     return completionResponse()
   })
-  const context = new Context({ model, apiKey: "test", items: [user("first")] })
+  const context = new Context({ model, providerResolver, apiKey: "test", items: [user("first")] })
 
   const pending = context.complete()
   context.append(user("new input"))
@@ -118,7 +120,7 @@ test("cache warming replays the exact successful wire prompt and never appends o
     bodies.push(JSON.parse(String(init.body)))
     return completionResponse("discard me")
   })
-  const context = new Context({ model: { ...model, id: "gpt-6-sol" }, apiKey: "test", systemPrompt: "stable instructions",
+  const context = new Context({ model: { ...model, id: "gpt-6-sol" }, providerResolver, apiKey: "test", systemPrompt: "stable instructions",
     thinkingLevel: "high", toolChoice: "auto", tools: [{ name: "lookup", description: "Lookup", parameters: { type: "object" } }], items: [user("hello")] })
   assert.equal(await context.warmCache(), undefined, "an unseeded context makes no request")
   await context.complete({ captureCacheWarmRequest: true })
@@ -144,7 +146,7 @@ test("streaming requests retain their prompt for warming, and prewarm errors nev
     if (reject) return Response.json({ error: { message: "unsupported prewarm" } }, { status: 400 })
     return body.stream ? streamResponse() : completionResponse()
   })
-  const context = new Context({ model, apiKey: "test", items: [user("hello")] })
+  const context = new Context({ model, providerResolver, apiKey: "test", items: [user("hello")] })
   await context.complete({ captureCacheWarmRequest: true, onEvent: () => {} })
   const before = context.snapshot()
   const lastUsed = context.lastCacheUseAt
@@ -177,7 +179,7 @@ test("GPT-6 effort changes preserve the prefix and survive restore, truncation, 
     bridge: true,
     effortCapabilities: { supportedEfforts: ["low", "high", "max"], defaultEffort: "low", changeMode: "configuration-update" },
   }
-  const context = new Context({ model: bridgeModel, apiKey: "test", thinkingLevel: "low", items: [user("first")] })
+  const context = new Context({ model: bridgeModel, providerResolver, apiKey: "test", thinkingLevel: "low", items: [user("first")] })
   await context.complete()
   const fingerprint = context.configurationFingerprint
   assert.equal(context.changeEffort("high"), context)
@@ -191,7 +193,7 @@ test("GPT-6 effort changes preserve the prefix and survive restore, truncation, 
   await context.warmCache({ mode: "prewarm" })
   assert.deepEqual(bodies[2].messages, bodies[1].messages)
 
-  const restored = Context.restore({ model: bridgeModel, apiKey: "test", id: context.id, items: context.snapshot(), effortState: context.effortState })
+  const restored = Context.restore({ model: bridgeModel, providerResolver, apiKey: "test", id: context.id, items: context.snapshot(), effortState: context.effortState })
   assert.equal(restored.thinkingLevel, "high")
   restored.changeEffort("max").append(user("harder"))
   await restored.complete()
@@ -219,7 +221,7 @@ test("cache-reset effort changes need acceptance and unavailable metadata leaves
     bodies.push(JSON.parse(String(init.body)))
     return completionResponse()
   })
-  const context = new Context({ model: {
+  const context = new Context({ providerResolver, model: {
     ...model, id: "gpt-5.6-sol", bridge: true,
     effortCapabilities: { supportedEfforts: ["low", "high"], changeMode: "cache-reset" },
   }, apiKey: "test", thinkingLevel: "low", items: [user("hello")] })
@@ -234,7 +236,7 @@ test("cache-reset effort changes need acceptance and unavailable metadata leaves
   assert.equal(bodies[0].reasoning_effort, "high")
   assert.equal(bodies[0].messages.some((item) => item.type === "configuration_update"), false)
 
-  const unavailable = new Context({ model: { ...model, bridge: true }, apiKey: "test", thinkingLevel: "custom-configured", items: [user("hello")] })
+  const unavailable = new Context({ model: { ...model, bridge: true }, providerResolver, apiKey: "test", thinkingLevel: "custom-configured", items: [user("hello")] })
   assert.deepEqual(unavailable.availableEfforts, [])
   assert.throws(() => unavailable.changeEffort("high"), /capability metadata/)
   await unavailable.complete()
@@ -264,7 +266,7 @@ test("empty user content preserves a wire boundary between effort updates", asyn
     bodies.push(JSON.parse(String(init.body)))
     return completionResponse()
   })
-  const context = new Context({ model: {
+  const context = new Context({ providerResolver, model: {
     ...model, bridge: true,
     effortCapabilities: { supportedEfforts: ["low", "high", "max"], changeMode: "configuration-update" },
   }, apiKey: "test", thinkingLevel: "low" })
@@ -287,7 +289,7 @@ test("an effort change in flight rejects the old response without rewriting its 
     await blocked
     return completionResponse()
   })
-  const context = new Context({ model: {
+  const context = new Context({ providerResolver, model: {
     ...model, bridge: true,
     effortCapabilities: { supportedEfforts: ["low", "high"], changeMode: "configuration-update" },
   }, apiKey: "test", thinkingLevel: "low", items: [user("hello")] })

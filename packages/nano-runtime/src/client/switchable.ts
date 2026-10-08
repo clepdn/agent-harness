@@ -40,6 +40,8 @@ export class SwitchableToolClient implements ConfiguredToolClient {
   private active: ConfiguredToolClient
   private remote: HttpToolClient | null = null
   private connectedAt: string | undefined
+  private pending: AbortController | null = null
+  private operation = 0
 
   constructor(agentId: string, fallback: ConfiguredToolClient) {
     this.agentId = agentId
@@ -47,57 +49,74 @@ export class SwitchableToolClient implements ConfiguredToolClient {
     this.active = fallback
   }
 
-  async start(): Promise<void> {
-    await this.fallback.start()
+  async start(signal?: AbortSignal): Promise<void> {
+    await this.fallback.start(signal)
   }
 
   async stop(): Promise<void> {
-    await this.disconnect()
+    this.operation++
+    this.pending?.abort(new Error("client stopped"))
+    this.pending = null
+    const remote = this.remote
+    this.remote = null
+    this.active = this.fallback
+    this.connectedAt = undefined
+    if (remote) {
+      try { await remote.stop() } catch {}
+    }
     await this.fallback.stop()
   }
-
-  /**
-   * Mount a remote client's executor as the active tool target. Performs the
-   * executor-side health handshake (HttpToolClient.start) so we pick up the
-   * real capabilities + workspace the client is exposing. If the executor is
-   * unreachable, the previous target is left untouched and an error is thrown.
-   */
-  async connect(connection: RemoteClientConnection): Promise<ActiveClientInfo> {
+  async connect(connection: RemoteClientConnection, signal?: AbortSignal): Promise<ActiveClientInfo> {
+    signal?.throwIfAborted()
+    this.pending?.abort(new Error("client connection superseded"))
+    const operation = ++this.operation
+    const staging = new AbortController()
+    this.pending = staging
+    const requestSignal = signal ? AbortSignal.any([staging.signal, signal]) : staging.signal
     const remote = new HttpToolClient({
       agentId: this.agentId,
       endpoint: connection.endpoint,
       ...(connection.capabilities ? { capabilities: connection.capabilities } : {}),
       ...(connection.workspace ? { workspace: connection.workspace } : {}),
     })
-    await remote.start()
-    const status = remote.status()
-    if (!status.connected) {
-      throw new Error(`client executor at ${connection.endpoint} is unreachable`)
+    try {
+      await remote.start(requestSignal)
+      requestSignal.throwIfAborted()
+      if (operation !== this.operation) throw new Error("client connection was superseded")
+      if (!remote.status().connected) throw new Error(`client executor at ${connection.endpoint} is unreachable`)
+      const previousRemote = this.remote
+      this.remote = remote
+      this.active = remote
+      this.connectedAt = new Date().toISOString()
+      const info = this.info()
+      if (this.pending === staging) this.pending = null
+      if (previousRemote) void previousRemote.stop().catch(() => {})
+      return info
+    } catch (error) {
+      await remote.stop()
+      throw error
+    } finally {
+      if (this.pending === staging) this.pending = null
     }
-    // Drop any prior remote before swapping in the new one.
-    await this.disconnectRemoteOnly()
-    this.remote = remote
-    this.active = remote
-    this.connectedAt = new Date().toISOString()
-    return this.info()
   }
 
   /** Revert to the default (local) tool client. */
   async disconnect(): Promise<ActiveClientInfo> {
-    await this.disconnectRemoteOnly()
+    this.operation++
+    this.pending?.abort(new Error("client disconnected"))
+    this.pending = null
+    const remote = this.remote
+    this.remote = null
     this.active = this.fallback
     this.connectedAt = undefined
+    if (remote) {
+      try { await remote.stop() } catch {}
+    }
     return this.info()
   }
 
-  private async disconnectRemoteOnly(): Promise<void> {
-    if (this.remote) {
-      try {
-        await this.remote.stop()
-      } catch {}
-      this.remote = null
-    }
-  }
+
+
 
   info(): ActiveClientInfo {
     const remote = this.active === this.remote && this.remote !== null

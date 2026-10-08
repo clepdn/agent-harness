@@ -3,6 +3,7 @@ import test from "node:test"
 import { fromDiscord } from "../triggers/discord"
 import { extractFileAttachments, extractImageAttachments } from "./parse"
 
+
 test("discord files are exposed as download links in live model context", () => {
   const payload = {
     message: {

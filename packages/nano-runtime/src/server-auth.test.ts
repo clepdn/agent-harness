@@ -1,12 +1,50 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { createServer } from "./server"
-import { fromClientLifecycle } from "./triggers/client"
 import http from "node:http"
 import type { AddressInfo } from "node:net"
+import type { Plugin } from "@nano/plugins"
+import { createServer } from "./server"
+import { createExecutionServices, type TestExecutionFixture } from "./test-model-provider"
+import { workerClientOperationsPlugin, workerOperationsPlugin } from "./plugins/worker-operations"
+import { createRunnerPlugin } from "./plugins/runner"
+import { nano } from "./plugins/api"
+import type { UserMessage } from "./types"
+
+function lifecycleObserver(events: UserMessage[]): Plugin {
+  return {
+    id: `server-auth-observer-${Math.random().toString(36).slice(2)}`,
+    apply(scope) {
+      scope.on(nano.wake, ({ event }) => { events.push(event) })
+    },
+  }
+}
+
+async function installWorkerServices(fixture: TestExecutionFixture, events: UserMessage[]): Promise<void> {
+  await fixture.bus.install(lifecycleObserver(events))
+  await fixture.bus.install({
+    id: `server-auth-lifecycle-${Math.random().toString(36).slice(2)}`,
+    provides: [nano.lifecycle],
+    apply(scope) {
+      scope.provide(nano.lifecycle, { shutdown() {}, restart() {} })
+    },
+  })
+  await fixture.bus.install(createRunnerPlugin())
+  await fixture.bus.install(workerOperationsPlugin)
+  await fixture.bus.install(workerClientOperationsPlugin)
+}
+
+function gateway(fixture: TestExecutionFixture) {
+  return {
+    auth: () => ({ mode: "local-open" as const, allowedOrigins: [], permissions: ["*"] }),
+    operations: () => fixture.bus.list(nano.operations),
+    streams: () => fixture.bus.list(nano.streams),
+  }
+}
 
 test("worker routes need no bearer token and do not enable permissive CORS", async () => {
-  const app = createServer()
+  const fixture = await createExecutionServices()
+  await installWorkerServices(fixture, [])
+  const app = createServer({ rpcGateway: gateway(fixture) })
   try {
     assert.equal((await app.inject({ method: "GET", url: "/health" })).statusCode, 200)
     const crossOriginHealth = await app.inject({ method: "GET", url: "/health", headers: { origin: "https://evil.example" } })
@@ -14,88 +52,77 @@ test("worker routes need no bearer token and do not enable permissive CORS", asy
     assert.equal((await app.inject({ method: "GET", url: "/awp/status" })).statusCode, 200)
   } finally {
     await app.close()
+    await fixture.close()
   }
-})
-
-test("client lifecycle messages describe the mounted workspace", () => {
-  const connected = fromClientLifecycle("connected", { id: "tui", root: "/workspace" }, ["shell", "read_file"], "tui-client")
-  assert.equal(connected.source, "client")
-  assert.match(connected.content, /client workspace connected/)
-  assert.match(connected.content, /workspace_root: \/workspace/)
-  assert.match(connected.content, /capabilities: shell, read_file/)
-  assert.equal(connected.clientId, "tui-client")
-
-  const disconnected = fromClientLifecycle("disconnected", { id: "tui", root: "/workspace" }, ["shell"])
-  assert.match(disconnected.content, /client workspace disconnected/)
-  assert.deepEqual(disconnected.raw, {
-    type: "client.workspace.disconnected",
-    workspace: { id: "tui", root: "/workspace" },
-    capabilities: ["shell"],
-    clientId: undefined,
-  })
 })
 
 test("client connect and disconnect routes dispatch lifecycle messages", async () => {
   const executor = http.createServer((req, res) => {
     if (req.url === "/health") {
       res.writeHead(200, { "content-type": "application/json" })
-      res.end(JSON.stringify({
-        capabilities: ["shell", "read_file"],
-        workspace: { id: "tui", root: "/workspace" },
-      }))
+      res.end(JSON.stringify({ clientId: "tui-client", capabilities: ["shell", "read_file"], workspace: { id: "tui", root: "/workspace" } }))
       return
     }
     res.writeHead(404).end()
   })
   await new Promise<void>((resolve) => executor.listen(0, "127.0.0.1", resolve))
   const endpoint = `http://127.0.0.1:${(executor.address() as AddressInfo).port}`
-  const events: import("./types").UserMessage[] = []
-  const app = createServer({
-    dispatchClientLifecycle: (event) => {
-      events.push(event)
-      return true
-    },
-  })
+  const events: UserMessage[] = []
+  const fixture = await createExecutionServices()
+  await installWorkerServices(fixture, events)
+  const app = createServer({ rpcGateway: gateway(fixture) })
   try {
     const connected = await app.inject({ method: "POST", url: "/client/connect", payload: { endpoint } })
     assert.equal(connected.statusCode, 200)
     assert.equal(connected.json().notified, true)
-    assert.match(events[0]?.content ?? "", /workspace connected/)
+    assert.equal(events.length, 1)
+    assert.equal(events[0]?.source, "client")
+    assert.deepEqual(events[0]?.raw, {
+      type: "client.workspace.connected",
+      workspace: { id: "tui", root: "/workspace" },
+      capabilities: ["shell", "read_file"],
+      clientId: endpoint,
+    })
     assert.match(events[0]?.content ?? "", /workspace_root: \/workspace/)
 
     const disconnected = await app.inject({ method: "POST", url: "/client/disconnect" })
     assert.equal(disconnected.statusCode, 200)
     assert.equal(disconnected.json().notified, true)
-    assert.match(events[1]?.content ?? "", /workspace disconnected/)
+    assert.equal(events.length, 2)
+    assert.equal(events[1]?.source, "client")
+    assert.deepEqual(events[1]?.raw, {
+      type: "client.workspace.disconnected",
+      workspace: { id: "tui", root: "/workspace" },
+      capabilities: ["shell", "read_file"],
+      clientId: endpoint,
+    })
     assert.match(events[1]?.content ?? "", /workspace_root: \/workspace/)
   } finally {
     await app.close()
+    await fixture.close()
     await new Promise<void>((resolve, reject) => executor.close((error) => error ? reject(error) : resolve()))
   }
 })
 
 test("failed client connection does not notify the agent", async () => {
-  const events: import("./types").UserMessage[] = []
-  const app = createServer({
-    dispatchClientLifecycle: (event) => {
-      events.push(event)
-      return true
-    },
-  })
+  const events: UserMessage[] = []
+  const fixture = await createExecutionServices()
+  await installWorkerServices(fixture, events)
+  const app = createServer({ rpcGateway: gateway(fixture) })
   try {
-    const workspace = { id: "tui", root: "/workspace" }
-    const connected = await app.inject({
+    const response = await app.inject({
       method: "POST",
       url: "/client/connect",
-      payload: {
-        endpoint: "http://127.0.0.1:1",
-        workspace,
-        capabilities: ["shell"],
-      },
+      payload: { endpoint: "http://127.0.0.1:1", workspace: { id: "tui", root: "/workspace" }, capabilities: ["shell"] },
     })
-    assert.equal(connected.statusCode, 502)
+    assert.equal(response.statusCode, 502)
     assert.equal(events.length, 0)
+    const status = await app.inject({ method: "GET", url: "/awp/client/status" })
+    assert.equal(status.statusCode, 200)
+    assert.equal(status.json().connected, fixture.services.client.status().connected)
+    assert.equal(fixture.services.client.info().remote, false)
   } finally {
     await app.close()
+    await fixture.close()
   }
 })

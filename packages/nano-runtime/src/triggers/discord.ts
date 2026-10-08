@@ -1,5 +1,5 @@
+import type Database from "better-sqlite3"
 import type { UserMessage } from "../types"
-import { getDb } from "../db"
 import {
   asObject,
   asString,
@@ -7,10 +7,16 @@ import {
   extractImageAttachments,
   renderDiscordUserMentions,
 } from "../discord/parse"
-import { getCachedPronouns } from "../discord/pronouns"
-import { getOrCreateDiscordFriendlyId } from "../discord/friendly-id"
-import { modelState } from "../runner/model-state"
 import { discordEmojiMarkup } from "../discord/context-emojis"
+
+export interface DiscordTriggerOptions {
+  readonly db?: Database.Database
+  readonly modelVision?: boolean
+  readonly pronouns?: (userId: string) => string | null
+  readonly friendlyId?: (messageId: string, channelId: string) => string
+}
+
+const defaultOptions: DiscordTriggerOptions = { modelVision: false }
 
 function asIsoTimestamp(value: unknown, fallback: string): string {
   if (typeof value !== "string" && typeof value !== "number") return fallback
@@ -69,12 +75,10 @@ function embeddedReferencedMessage(
   }
 }
 
-function replyContextLine(message: Record<string, unknown>, body: Record<string, unknown>): string | null {
+function replyContextLine(message: Record<string, unknown>, body: Record<string, unknown>, options: DiscordTriggerOptions): string | null {
   const refId = referencedMessageId(message, body)
-  if (!refId) return null
-
-  const db = getDb()
-  const stored = db
+  if (!refId || !options.db) return null
+  const stored = options.db
     .prepare(
       `select message_id, author_username, content
        from discord_messages
@@ -90,15 +94,14 @@ function replyContextLine(message: Record<string, unknown>, body: Record<string,
   return `reply_to: ${author}: ${JSON.stringify(reply.content)}`
 }
 
-function formatImageBlock(images: ReturnType<typeof extractImageAttachments>): string {
+function formatImageBlock(images: ReturnType<typeof extractImageAttachments>, modelVision: boolean): string {
   if (images.length === 0) return ""
   const lines = images.map((img) => {
     const meta = [img.filename, img.contentType].filter(Boolean).join(", ")
     return `- ${img.url}${meta ? ` (${meta})` : ""}`
   })
-  return `\n\nimages (discord cdn links — download with shell${modelState.primaryVision ? ", then inspect with image_tool if useful" : ""}):\n${lines.join("\n")}`
+  return `\n\nimages (discord cdn links — download with shell${modelVision ? ", then inspect with image_tool if useful" : ""}):\n${lines.join("\n")}`
 }
-
 function formatFileBlock(files: ReturnType<typeof extractFileAttachments>): string {
   if (files.length === 0) return ""
   const lines = files.map((file) => {
@@ -110,7 +113,8 @@ function formatFileBlock(files: ReturnType<typeof extractFileAttachments>): stri
   return `\n\nfiles (discord cdn download links — download with shell if useful):\n${lines.join("\n")}`
 }
 
-export function fromDiscord(body: unknown): UserMessage {
+export function fromDiscord(body: unknown, suppliedOptions: DiscordTriggerOptions = defaultOptions): UserMessage {
+  const options = suppliedOptions
   const b = body as Record<string, unknown>
   const message = (typeof b.message === "object" && b.message
     ? (b.message as Record<string, unknown>)
@@ -161,15 +165,15 @@ export function fromDiscord(body: unknown): UserMessage {
   const authorId = String(author?.id ?? b.author_id ?? "")
   let pronouns = ""
   if (authorId) {
-    const cached = getCachedPronouns(authorId)
+    const cached = options.pronouns ? options.pronouns(authorId) : null
     if (cached) pronouns = cached
   }
   const pronounsSuffix = pronouns ? ` (${pronouns})` : ""
 
   const channelId = String(message.channel_id ?? b.channel_id ?? channel?.id ?? "unknown")
   const messageId = String(message.id ?? b.message_id ?? "unknown")
-  const friendlyId = channelId !== "unknown" && messageId !== "unknown"
-    ? getOrCreateDiscordFriendlyId(messageId, channelId)
+  const friendlyId = channelId !== "unknown" && messageId !== "unknown" && options.friendlyId
+    ? options.friendlyId(messageId, channelId)
     : null
   const location = isDm
     ? "DM"
@@ -177,9 +181,9 @@ export function fromDiscord(body: unknown): UserMessage {
   const header = isDm ? "[discord/dm]" : "[discord/channel]"
   const action = isDm
     ? "This is a direct message. Reply if it needs a response."
-    : "This message was shared with everyone in the channel. Reply if you have something useful to add or the conversation seems directed at you; otherwise, no reply is needed."
-  const replyLine = replyContextLine(message, b)
-  const imageBlock = formatImageBlock(extractImageAttachments(body))
+    : "This message was shared with everyone in the channel. Reply if there is something useful to add or the conversation seems directed at you; otherwise, no reply is needed."
+  const replyLine = replyContextLine(message, b, options)
+  const imageBlock = formatImageBlock(extractImageAttachments(body), options.modelVision === true)
   const fileBlock = formatFileBlock(extractFileAttachments(body))
   const userBlock = `<user>\n${content}\n</user>`
 
@@ -205,7 +209,7 @@ export function fromDiscord(body: unknown): UserMessage {
 }
 
 /** Formats a reaction add as a Discord wake event targeting the reacted-to message. */
-export function fromDiscordReaction(body: unknown): UserMessage {
+export function fromDiscordReaction(body: unknown, options: DiscordTriggerOptions = defaultOptions): UserMessage {
   const root = asRecord(body) ?? {}
   const original = asRecord(root.message) ?? {}
   const reactor = asRecord(root.reactor) ?? {}
@@ -240,15 +244,15 @@ export function fromDiscordReaction(body: unknown): UserMessage {
       referenced_message: original,
     },
   }
-  const event = fromDiscord(payload)
+  const event = fromDiscord(payload, options)
   for (const target of event.discordTargets ?? []) target.content = originalContent
   return event
 }
 
 /** Formats a debounced DM burst as one runner event without dropping earlier messages. */
-export function fromDiscordMessages(bodies: readonly unknown[]): UserMessage {
+export function fromDiscordMessages(bodies: readonly unknown[], options: DiscordTriggerOptions = defaultOptions): UserMessage {
   if (bodies.length === 0) throw new Error("at least one Discord message is required")
-  const events = bodies.map(fromDiscord)
+  const events = bodies.map((body) => fromDiscord(body, options))
   if (events.length === 1) return events[0]!
 
   const latest = events.at(-1)!

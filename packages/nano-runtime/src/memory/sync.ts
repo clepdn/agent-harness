@@ -7,19 +7,14 @@
 import fs from "fs/promises"
 import path from "path"
 import { createHash } from "crypto"
-import { NANO_HOME as HOME_DIR } from "../agent-config"
-import { getDb, isVecAvailable, MEMORY_EMBEDDING_DIMENSIONS } from "../db"
-import { EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, embeddingsConfigured, embedTexts } from "../embeddings"
+import type Database from "better-sqlite3"
+import type { EmbeddingsService } from "../embeddings"
 import {
   basenameWithoutExt,
   chunkLargeSection,
-  CORE_FILE,
-  detectMemoryKind,
-  JOURNAL_DIR,
+  memoryPaths,
   MEMORY_EMBEDDING_BATCH_SIZE,
   MEMORY_EMBEDDING_PROTOTYPES,
-  pathExists,
-  PEOPLE_DIR,
   titleFromPath,
   type MemoryChunkInput,
   type MemoryDocumentRow,
@@ -60,6 +55,15 @@ export function vectorParam(vector: number[]): Float32Array {
 
 // ── file walking ───────────────────────────────────────────────────────
 
+async function pathExists(target: string): Promise<boolean> {
+  try {
+    await fs.access(target)
+    return true
+  } catch {
+    return false
+  }
+}
+
 async function walkMarkdownFiles(root: string): Promise<string[]> {
   if (!(await pathExists(root))) return []
 
@@ -77,11 +81,13 @@ async function walkMarkdownFiles(root: string): Promise<string[]> {
   return found.sort()
 }
 
-async function listMemoryFiles(): Promise<string[]> {
+async function listMemoryFiles(home: string): Promise<string[]> {
+  const memoriesDir = path.join(home, "memories")
+  const coreFile = path.join(memoriesDir, "core.md")
   const files: string[] = []
-  if (await pathExists(CORE_FILE)) files.push(CORE_FILE)
-  files.push(...(await walkMarkdownFiles(JOURNAL_DIR)))
-  files.push(...(await walkMarkdownFiles(PEOPLE_DIR)))
+  if (await pathExists(coreFile)) files.push(coreFile)
+  files.push(...(await walkMarkdownFiles(path.join(memoriesDir, "journal"))))
+  files.push(...(await walkMarkdownFiles(path.join(memoriesDir, "people"))))
   return files
 }
 
@@ -168,16 +174,19 @@ export function parseMarkdownDocument(filePath: string, content: string): { titl
  * @param row - Chunk metadata.
  * @returns Multi-line embedding input.
  */
-export function embeddingTextForChunk(row: {
-  path: string
-  kind: MemoryKind
-  documentTitle: string
-  title: string
-  headingPath: string | null
-  text: string
-  tags?: string | null
-}): string {
-  const relativePath = path.relative(HOME_DIR, row.path)
+export function embeddingTextForChunk(
+  row: {
+    path: string
+    kind: MemoryKind
+    documentTitle: string
+    title: string
+    headingPath: string | null
+    text: string
+    tags?: string | null
+  },
+  home: string,
+): string {
+  const relativePath = path.relative(home, row.path)
   return [
     `kind: ${row.kind}`,
     `file: ${relativePath}`,
@@ -194,116 +203,18 @@ export function embeddingTextForChunk(row: {
 
 // ── index sync ─────────────────────────────────────────────────────────
 
-async function readMemoryDocumentRows(): Promise<Map<string, MemoryDocumentRow>> {
-  const rows = getDb()
-    .prepare("select id, path, kind, title, content_hash, mtime_ms from memory_documents")
-    .all() as MemoryDocumentRow[]
-
-  return new Map(rows.map((row) => [row.path, row]))
+export interface MemoryIndexerDependencies {
+  home: string
+  db: Database.Database
+  vecAvailable: boolean
+  embeddings?: EmbeddingsService
 }
 
-/**
- * Walks memory files, detects changes, and upserts chunks into the FTS index.
- * Triggers embedding sync afterward.
- */
-export async function syncMemoryIndex(): Promise<void> {
-  const db = getDb()
-  const files = await listMemoryFiles()
-  const known = await readMemoryDocumentRows()
-  const present = new Set(files)
-
-  const deleteChunksByDocument = db.prepare("delete from memory_chunks where document_id = ?")
-  const insertDocument = db.prepare(`
-    insert into memory_documents (path, kind, title, mtime_ms, content_hash, updated_at)
-    values (@path, @kind, @title, @mtime_ms, @content_hash, datetime('now'))
-    on conflict(path) do update set
-      kind = excluded.kind,
-      title = excluded.title,
-      mtime_ms = excluded.mtime_ms,
-      content_hash = excluded.content_hash,
-      updated_at = datetime('now')
-  `)
-  const selectDocumentId = db.prepare("select id from memory_documents where path = ?")
-  const insertChunk = db.prepare(`
-    insert into memory_chunks (document_id, chunk_index, title, heading_path, chunk_text, tags)
-    values (?, ?, ?, ?, ?, ?)
-  `)
-  const deleteDocumentByPath = db.prepare("delete from memory_documents where path = ?")
-
-  const updates: Array<{
-    path: string
-    kind: MemoryKind
-    title: string
-    mtimeMs: number
-    hash: string
-    chunks: MemoryChunkInput[]
-    action: "inserted" | "updated"
-  }> = []
-
-  for (const filePath of files) {
-    const kind = detectMemoryKind(filePath)
-    if (!kind) continue
-
-    const [content, stat] = await Promise.all([fs.readFile(filePath, "utf-8"), fs.stat(filePath)])
-    const hash = contentHash(content)
-    const previous = known.get(filePath)
-    if (previous && previous.content_hash === hash && previous.mtime_ms === Math.floor(stat.mtimeMs)) continue
-
-    const parsed = parseMarkdownDocument(filePath, content)
-    updates.push({
-      path: filePath,
-      kind,
-      title: parsed.title,
-      mtimeMs: Math.floor(stat.mtimeMs),
-      hash,
-      chunks: parsed.chunks,
-      action: previous ? "updated" : "inserted",
-    })
-  }
-
-  const removedPaths: string[] = []
-
-  db.transaction(() => {
-    for (const item of updates) {
-      insertDocument.run({
-        path: item.path,
-        kind: item.kind,
-        title: item.title,
-        mtime_ms: item.mtimeMs,
-        content_hash: item.hash,
-      })
-      const row = selectDocumentId.get(item.path) as { id: number } | undefined
-      if (!row) continue
-
-      deleteChunksByDocument.run(row.id)
-      item.chunks.forEach((chunk, index) => {
-        insertChunk.run(row.id, index, chunk.title, chunk.headingPath, chunk.text, chunk.tags)
-      })
-
-      console.log(
-        `[memory] ${item.action} kind=${item.kind} chunks=${item.chunks.length} path=${path.relative(HOME_DIR, item.path)}`,
-      )
-    }
-
-    for (const filePath of known.keys()) {
-      if (present.has(filePath)) continue
-      deleteDocumentByPath.run(filePath)
-      removedPaths.push(filePath)
-      console.log(`[memory] removed path=${path.relative(HOME_DIR, filePath)}`)
-    }
-  })()
-
-  if (updates.length === 0 && removedPaths.length === 0) {
-    await syncMemoryEmbeddings()
-    return
-  }
-
-  await syncMemoryEmbeddings()
+export interface MemoryIndexer {
+  syncMemoryIndex(): Promise<void>
 }
 
-// ── embedding sync ─────────────────────────────────────────────────────
-
-let embeddingSkipWarned = false
+const MEMORY_VECTOR_DIMENSIONS = 3072
 
 type MemoryEmbeddingRow = {
   chunkId: number
@@ -319,169 +230,282 @@ type MemoryEmbeddingRow = {
   contentHash: string | null
 }
 
-async function syncMemoryEmbeddings(): Promise<void> {
-  if (!isVecAvailable()) return
-  const db = getDb()
-  db.prepare("delete from memory_embedding_meta where chunk_id not in (select id from memory_chunks)").run()
-  db.prepare("delete from memory_chunk_vec where rowid not in (select id from memory_chunks)").run()
-  if (!embeddingsConfigured()) {
-    if (!embeddingSkipWarned) {
-      console.warn("[memory] embeddings disabled: set EMBEDDING_API_KEY")
-      embeddingSkipWarned = true
-    }
-    return
-  }
-  if (EMBEDDING_DIMENSIONS !== MEMORY_EMBEDDING_DIMENSIONS) {
-    if (!embeddingSkipWarned) {
-      console.warn(
-        `[memory] embeddings disabled: EMBEDDING_DIMENSIONS=${EMBEDDING_DIMENSIONS} but sqlite-vec table is ${MEMORY_EMBEDDING_DIMENSIONS}`,
-      )
-      embeddingSkipWarned = true
-    }
-    return
+/** Construct an indexer bound to one runtime's filesystem and services. */
+export function createMemoryIndexer(deps: MemoryIndexerDependencies): MemoryIndexer {
+  const { home, db, vecAvailable, embeddings } = deps
+  const { journalDir, peopleDir, coreFile } = memoryPaths(home)
+  let embeddingSkipWarned = false
+
+  function detectKind(filePath: string): MemoryKind | null {
+    if (filePath === coreFile) return "core"
+    if (filePath.startsWith(`${journalDir}${path.sep}`)) return "journal"
+    if (filePath.startsWith(`${peopleDir}${path.sep}`)) return "people"
+    return null
   }
 
-  try {
-    await syncMemoryEmbeddingPrototypes()
-  } catch (err: any) {
-    console.warn(`[memory] prototype embedding sync failed: ${err?.message ?? String(err)}`)
-    return
+  async function readMemoryDocumentRows(): Promise<Map<string, MemoryDocumentRow>> {
+    const rows = db
+      .prepare("select id, path, kind, title, content_hash, mtime_ms from memory_documents")
+      .all() as MemoryDocumentRow[]
+
+    return new Map(rows.map((row) => [row.path, row]))
   }
 
-  const rows = db
-    .prepare(`
-      select
-        c.id as chunkId,
-        d.path as path,
-        d.kind as kind,
-        d.title as documentTitle,
-        c.title as title,
-        c.heading_path as headingPath,
-        c.chunk_text as text,
-        c.tags as tags,
-        m.model as model,
-        m.dimensions as dimensions,
-        m.content_hash as contentHash
-      from memory_chunks c
-      join memory_documents d on d.id = c.document_id
-      left join memory_embedding_meta m on m.chunk_id = c.id
-      order by d.kind, d.path, c.chunk_index
+  async function syncMemoryIndex(): Promise<void> {
+    const files = await listMemoryFiles(home)
+    const known = await readMemoryDocumentRows()
+    const present = new Set(files)
+
+    const deleteChunksByDocument = db.prepare("delete from memory_chunks where document_id = ?")
+    const insertDocument = db.prepare(`
+      insert into memory_documents (path, kind, title, mtime_ms, content_hash, updated_at)
+      values (@path, @kind, @title, @mtime_ms, @content_hash, datetime('now'))
+      on conflict(path) do update set
+        kind = excluded.kind,
+        title = excluded.title,
+        mtime_ms = excluded.mtime_ms,
+        content_hash = excluded.content_hash,
+        updated_at = datetime('now')
     `)
-    .all() as MemoryEmbeddingRow[]
+    const selectDocumentId = db.prepare("select id from memory_documents where path = ?")
+    const insertChunk = db.prepare(`
+      insert into memory_chunks (document_id, chunk_index, title, heading_path, chunk_text, tags)
+      values (?, ?, ?, ?, ?, ?)
+    `)
+    const deleteDocumentByPath = db.prepare("delete from memory_documents where path = ?")
 
-  const pending = rows
-    .map((row) => {
-      const text = embeddingTextForChunk(row)
-      return { ...row, embeddingText: text, embeddingHash: embeddingInputHash(text) }
-    })
-    .filter(
-      (row) =>
-        row.model !== EMBEDDING_MODEL ||
-        row.dimensions !== MEMORY_EMBEDDING_DIMENSIONS ||
-        row.contentHash !== row.embeddingHash,
-    )
+    const updates: Array<{
+      path: string
+      kind: MemoryKind
+      title: string
+      mtimeMs: number
+      hash: string
+      chunks: MemoryChunkInput[]
+      action: "inserted" | "updated"
+    }> = []
 
-  if (pending.length === 0) return
+    for (const filePath of files) {
+      const kind = detectKind(filePath)
+      if (!kind) continue
 
-  const upsertMeta = db.prepare(`
-    insert into memory_embedding_meta (chunk_id, model, dimensions, content_hash, updated_at)
-    values (?, ?, ?, ?, datetime('now'))
-    on conflict(chunk_id) do update set
-      model = excluded.model,
-      dimensions = excluded.dimensions,
-      content_hash = excluded.content_hash,
-      updated_at = datetime('now')
-  `)
-  const upsertVector = db.prepare("insert or replace into memory_chunk_vec(rowid, embedding) values (?, ?)")
+      const [content, stat] = await Promise.all([fs.readFile(filePath, "utf-8"), fs.stat(filePath)])
+      const hash = contentHash(content)
+      const previous = known.get(filePath)
+      if (previous && previous.content_hash === hash && previous.mtime_ms === Math.floor(stat.mtimeMs)) continue
 
-  let embedded = 0
-  for (let i = 0; i < pending.length; i += MEMORY_EMBEDDING_BATCH_SIZE) {
-    const batch = pending.slice(i, i + MEMORY_EMBEDDING_BATCH_SIZE)
-    let vectors: number[][]
-    try {
-      vectors = await embedTexts(batch.map((row) => row.embeddingText))
-    } catch (err: any) {
-      console.warn(`[memory] embedding batch failed: ${err?.message ?? String(err)}`)
-      return
+      const parsed = parseMarkdownDocument(filePath, content)
+      updates.push({
+        path: filePath,
+        kind,
+        title: parsed.title,
+        mtimeMs: Math.floor(stat.mtimeMs),
+        hash,
+        chunks: parsed.chunks,
+        action: previous ? "updated" : "inserted",
+      })
     }
 
     db.transaction(() => {
-      batch.forEach((row, index) => {
+      for (const item of updates) {
+        insertDocument.run({
+          path: item.path,
+          kind: item.kind,
+          title: item.title,
+          mtime_ms: item.mtimeMs,
+          content_hash: item.hash,
+        })
+        const row = selectDocumentId.get(item.path) as { id: number } | undefined
+        if (!row) continue
+
+        deleteChunksByDocument.run(row.id)
+        item.chunks.forEach((chunk, index) => {
+          insertChunk.run(row.id, index, chunk.title, chunk.headingPath, chunk.text, chunk.tags)
+        })
+
+        console.log(
+          `[memory] ${item.action} kind=${item.kind} chunks=${item.chunks.length} path=${path.relative(home, item.path)}`,
+        )
+      }
+
+      for (const filePath of known.keys()) {
+        if (present.has(filePath)) continue
+        deleteDocumentByPath.run(filePath)
+        console.log(`[memory] removed path=${path.relative(home, filePath)}`)
+      }
+    })()
+
+    await syncMemoryEmbeddings()
+  }
+
+  async function syncMemoryEmbeddings(): Promise<void> {
+    if (!vecAvailable) return
+    db.prepare("delete from memory_embedding_meta where chunk_id not in (select id from memory_chunks)").run()
+    db.prepare("delete from memory_chunk_vec where rowid not in (select id from memory_chunks)").run()
+    if (!embeddings || !embeddings.configured()) {
+      if (!embeddingSkipWarned && embeddings) {
+        console.warn("[memory] embeddings disabled: set EMBEDDING_API_KEY")
+        embeddingSkipWarned = true
+      }
+      return
+    }
+    if (embeddings.dimensions !== MEMORY_VECTOR_DIMENSIONS) {
+      if (!embeddingSkipWarned) {
+        console.warn(
+          `[memory] embeddings disabled: dimensions=${embeddings.dimensions} but sqlite-vec table is ${MEMORY_VECTOR_DIMENSIONS}`,
+        )
+        embeddingSkipWarned = true
+      }
+      return
+    }
+
+    try {
+      await syncMemoryEmbeddingPrototypes()
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err)
+      console.warn(`[memory] prototype embedding sync failed: ${message}`)
+      return
+    }
+
+    const rows = db
+      .prepare(`
+        select
+          c.id as chunkId,
+          d.path as path,
+          d.kind as kind,
+          d.title as documentTitle,
+          c.title as title,
+          c.heading_path as headingPath,
+          c.chunk_text as text,
+          c.tags as tags,
+          m.model as model,
+          m.dimensions as dimensions,
+          m.content_hash as contentHash
+        from memory_chunks c
+        join memory_documents d on d.id = c.document_id
+        left join memory_embedding_meta m on m.chunk_id = c.id
+        order by d.kind, d.path, c.chunk_index
+      `)
+      .all() as MemoryEmbeddingRow[]
+
+    const pending = rows
+      .map((row) => {
+        const text = embeddingTextForChunk(row, home)
+        return { ...row, embeddingText: text, embeddingHash: embeddingInputHash(text) }
+      })
+      .filter(
+        (row) =>
+          row.model !== embeddings.model ||
+          row.dimensions !== MEMORY_VECTOR_DIMENSIONS ||
+          row.contentHash !== row.embeddingHash,
+      )
+
+    if (pending.length === 0) return
+
+    const upsertMeta = db.prepare(`
+      insert into memory_embedding_meta (chunk_id, model, dimensions, content_hash, updated_at)
+      values (?, ?, ?, ?, datetime('now'))
+      on conflict(chunk_id) do update set
+        model = excluded.model,
+        dimensions = excluded.dimensions,
+        content_hash = excluded.content_hash,
+        updated_at = datetime('now')
+    `)
+    const upsertVector = db.prepare("insert or replace into memory_chunk_vec(rowid, embedding) values (?, ?)")
+
+    let embedded = 0
+    for (let i = 0; i < pending.length; i += MEMORY_EMBEDDING_BATCH_SIZE) {
+      const batch = pending.slice(i, i + MEMORY_EMBEDDING_BATCH_SIZE)
+      let vectors: number[][]
+      try {
+        vectors = await embeddings.embedTexts(batch.map((row) => row.embeddingText))
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err)
+        console.warn(`[memory] embedding batch failed: ${message}`)
+        return
+      }
+
+      if (vectors.some((vector) => vector && vector.length !== MEMORY_VECTOR_DIMENSIONS)) {
+        console.warn(`[memory] embedding batch skipped: expected ${MEMORY_VECTOR_DIMENSIONS} dimensions`)
+        return
+      }
+
+      db.transaction(() => {
+        batch.forEach((row, index) => {
+          const vector = vectors[index]
+          if (!vector) return
+          upsertVector.run(BigInt(row.chunkId), vectorParam(vector))
+          upsertMeta.run(row.chunkId, embeddings.model, MEMORY_VECTOR_DIMENSIONS, row.embeddingHash)
+          embedded += 1
+        })
+      })()
+    }
+
+    console.log(`[memory] embedded chunks=${embedded} model=${embeddings.model} dimensions=${MEMORY_VECTOR_DIMENSIONS}`)
+  }
+
+  async function syncMemoryEmbeddingPrototypes(): Promise<void> {
+    if (!embeddings) return
+    const rows = db
+      .prepare("select id, name, category, model, dimensions, content_hash as contentHash from memory_embedding_prototypes")
+      .all() as Array<{
+        id: number
+        name: string
+        category: string
+        model: string
+        dimensions: number
+        contentHash: string
+      }>
+    const known = new Map(rows.map((row) => [row.id, row]))
+    const pending = MEMORY_EMBEDDING_PROTOTYPES.map((prototype) => ({
+      ...prototype,
+      hash: embeddingInputHash(`${prototype.category}\n${prototype.name}\n${prototype.text}`),
+    })).filter((prototype) => {
+      const row = known.get(prototype.id)
+      return (
+        !row ||
+        row.name !== prototype.name ||
+        row.category !== prototype.category ||
+        row.model !== embeddings.model ||
+        row.dimensions !== MEMORY_VECTOR_DIMENSIONS ||
+        row.contentHash !== prototype.hash
+      )
+    })
+
+    if (pending.length === 0) return
+
+    const vectors = await embeddings.embedTexts(pending.map((prototype) => prototype.text))
+    if (vectors.some((vector) => vector && vector.length !== MEMORY_VECTOR_DIMENSIONS)) {
+      throw new Error(`prototype embedding dimension mismatch: expected ${MEMORY_VECTOR_DIMENSIONS}`)
+    }
+    const upsertPrototype = db.prepare(`
+      insert into memory_embedding_prototypes (id, name, category, model, dimensions, content_hash, updated_at)
+      values (?, ?, ?, ?, ?, ?, datetime('now'))
+      on conflict(id) do update set
+        name = excluded.name,
+        category = excluded.category,
+        model = excluded.model,
+        dimensions = excluded.dimensions,
+        content_hash = excluded.content_hash,
+        updated_at = datetime('now')
+    `)
+    const upsertVector = db.prepare("insert or replace into memory_prototype_vec(rowid, embedding) values (?, ?)")
+
+    db.transaction(() => {
+      pending.forEach((prototype, index) => {
         const vector = vectors[index]
         if (!vector) return
-        if (vector.length !== MEMORY_EMBEDDING_DIMENSIONS) {
-          throw new Error(`embedding dimension mismatch: got ${vector.length}, expected ${MEMORY_EMBEDDING_DIMENSIONS}`)
-        }
-        upsertVector.run(BigInt(row.chunkId), vectorParam(vector))
-        upsertMeta.run(row.chunkId, EMBEDDING_MODEL, MEMORY_EMBEDDING_DIMENSIONS, row.embeddingHash)
-        embedded += 1
+        upsertVector.run(BigInt(prototype.id), vectorParam(vector))
+        upsertPrototype.run(
+          prototype.id,
+          prototype.name,
+          prototype.category,
+          embeddings.model,
+          MEMORY_VECTOR_DIMENSIONS,
+          prototype.hash,
+        )
       })
     })()
   }
 
-  console.log(`[memory] embedded chunks=${embedded} model=${EMBEDDING_MODEL} dimensions=${MEMORY_EMBEDDING_DIMENSIONS}`)
-}
-
-async function syncMemoryEmbeddingPrototypes(): Promise<void> {
-  const db = getDb()
-  const rows = db
-    .prepare("select id, name, category, model, dimensions, content_hash as contentHash from memory_embedding_prototypes")
-    .all() as Array<{
-      id: number
-      name: string
-      category: string
-      model: string
-      dimensions: number
-      contentHash: string
-    }>
-  const known = new Map(rows.map((row) => [row.id, row]))
-  const pending = MEMORY_EMBEDDING_PROTOTYPES.map((prototype) => ({
-    ...prototype,
-    hash: embeddingInputHash(`${prototype.category}\n${prototype.name}\n${prototype.text}`),
-  })).filter((prototype) => {
-    const row = known.get(prototype.id)
-    return (
-      !row ||
-      row.name !== prototype.name ||
-      row.category !== prototype.category ||
-      row.model !== EMBEDDING_MODEL ||
-      row.dimensions !== MEMORY_EMBEDDING_DIMENSIONS ||
-      row.contentHash !== prototype.hash
-    )
-  })
-
-  if (pending.length === 0) return
-
-  const vectors = await embedTexts(pending.map((prototype) => prototype.text))
-  const upsertPrototype = db.prepare(`
-    insert into memory_embedding_prototypes (id, name, category, model, dimensions, content_hash, updated_at)
-    values (?, ?, ?, ?, ?, ?, datetime('now'))
-    on conflict(id) do update set
-      name = excluded.name,
-      category = excluded.category,
-      model = excluded.model,
-      dimensions = excluded.dimensions,
-      content_hash = excluded.content_hash,
-      updated_at = datetime('now')
-  `)
-  const upsertVector = db.prepare("insert or replace into memory_prototype_vec(rowid, embedding) values (?, ?)")
-
-  db.transaction(() => {
-    pending.forEach((prototype, index) => {
-      const vector = vectors[index]
-      if (!vector) return
-      if (vector.length !== MEMORY_EMBEDDING_DIMENSIONS) {
-        throw new Error(`prototype embedding dimension mismatch: got ${vector.length}, expected ${MEMORY_EMBEDDING_DIMENSIONS}`)
-      }
-      upsertVector.run(BigInt(prototype.id), vectorParam(vector))
-      upsertPrototype.run(
-        prototype.id,
-        prototype.name,
-        prototype.category,
-        EMBEDDING_MODEL,
-        MEMORY_EMBEDDING_DIMENSIONS,
-        prototype.hash,
-      )
-    })
-  })()
+  return { syncMemoryIndex }
 }

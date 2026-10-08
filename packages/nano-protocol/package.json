@@ -9,12 +9,20 @@
       "types": "./dist/index.d.ts",
       "development": "./src/index.ts",
       "import": "./dist/index.js"
+    },
+    "./rpc": {
+      "types": "./dist/rpc.d.ts",
+      "development": "./src/rpc.ts",
+      "import": "./dist/rpc.js"
     }
   },
   "scripts": {
     "prebuild": "node ../../scripts/clean-dist.mjs",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@nano/plugins": "*"
   },
   "devDependencies": {
     "typescript": "^6.0.2"

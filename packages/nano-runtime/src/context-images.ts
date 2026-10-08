@@ -4,8 +4,11 @@ import { fromMarkdown } from "mdast-util-from-markdown"
 import { NANO_HOME } from "./agent-config"
 import { config } from "./config"
 import type { ImageContent, Message } from "./llm"
-import { loadDiscordAvatar } from "./discord/context-avatars"
-import { loadDiscordEmoji } from "./discord/context-emojis"
+
+export type DiscordContextImageLoader = {
+  loadAvatar: (ref: Extract<ContextImageReference, { kind: "discord-avatar" }>) => Promise<ContextImageAttachment>
+  loadEmoji: (ref: Extract<ContextImageReference, { kind: "discord-emoji" }>) => Promise<ContextImageAttachment>
+}
 
 export type ContextImageReference =
   | { kind: "markdown"; path: string; label: string }
@@ -56,7 +59,7 @@ function withinHome(file: string, home = NANO_HOME): boolean {
 }
 
 /** Resolve inline and reference-style Markdown images, ignoring code examples. */
-export function markdownImageReferences(markdown: string, documentPath: string, fullDocument = markdown): ContextImageReference[] {
+export function markdownImageReferences(markdown: string, documentPath: string, fullDocument = markdown, home = NANO_HOME): ContextImageReference[] {
   if (!config.context_images.markdown) return []
   const definitions = new Map<string, string>()
   const definitionText: string[] = []
@@ -74,23 +77,23 @@ export function markdownImageReferences(markdown: string, documentPath: string, 
     let decoded: string
     try { decoded = decodeURIComponent(url) } catch { return }
     const file = decoded.startsWith("memory://")
-      ? path.resolve(NANO_HOME, "memories", decoded.slice("memory://".length))
+      ? path.resolve(home, "memories", decoded.slice("memory://".length))
       : path.resolve(path.dirname(documentPath), decoded)
-    if (!withinHome(file) || seen.has(file)) return
+    if (!withinHome(file, home) || seen.has(file)) return
     seen.add(file)
-    refs.push({ kind: "markdown", path: file, label: `${node.alt || "Image"} — ${url} (from ${path.relative(NANO_HOME, documentPath)})` })
+    refs.push({ kind: "markdown", path: file, label: `${node.alt || "Image"} — ${url} (from ${path.relative(home, documentPath)})` })
   })
   return refs
 }
 
 /** Also use definitions outside a selected excerpt, without loading their images. */
-export async function markdownExcerptImageReferences(markdown: string, documentPath: string): Promise<ContextImageReference[]> {
-  if (!config.context_images.markdown || !withinHome(documentPath)) return []
+export async function markdownExcerptImageReferences(markdown: string, documentPath: string, home = NANO_HOME): Promise<ContextImageReference[]> {
+  if (!config.context_images.markdown || !withinHome(documentPath, home)) return []
   const realPath = await fs.realpath(documentPath).catch(() => documentPath)
-  const realHome = await fs.realpath(NANO_HOME).catch(() => NANO_HOME)
+  const realHome = await fs.realpath(home).catch(() => home)
   if (!withinHome(realPath, realHome)) return []
   const full = await fs.readFile(documentPath, "utf8").catch(() => markdown)
-  return markdownImageReferences(markdown, documentPath, full)
+  return markdownImageReferences(markdown, documentPath, full, home)
 }
 
 export function imageMime(bytes: Uint8Array): string {
@@ -102,8 +105,8 @@ export function imageMime(bytes: Uint8Array): string {
   throw new Error("expected a PNG, JPEG, GIF, or WebP image")
 }
 
-async function loadLocalImage(ref: Extract<ContextImageReference, { kind: "markdown" }>): Promise<ContextImageAttachment> {
-  const [home, file] = await Promise.all([fs.realpath(NANO_HOME), fs.realpath(ref.path)])
+async function loadLocalImage(ref: Extract<ContextImageReference, { kind: "markdown" }>, imageHome: string): Promise<ContextImageAttachment> {
+  const [home, file] = await Promise.all([fs.realpath(imageHome), fs.realpath(ref.path)])
   if (!withinHome(file, home)) throw new Error("image resolves outside the agent home")
   const handle = await fs.open(file, "r")
   try {
@@ -118,7 +121,8 @@ async function loadLocalImage(ref: Extract<ContextImageReference, { kind: "markd
 }
 
 /** Keep text intact for routing/recall; materialize image bytes only for vision requests. */
-export async function prepareContextImages(messages: Message[]): Promise<void> {
+export async function prepareContextImages(messages: Message[], loaders?: DiscordContextImageLoader, home = NANO_HOME): Promise<void> {
+
   const seenDiscordImages = new Set<string>()
   for (const message of messages) {
     if (message.role === "assistant" || message.imagesSuppressed) continue
@@ -136,9 +140,10 @@ export async function prepareContextImages(messages: Message[]): Promise<void> {
       const failure = `[image unavailable: ${ref.label}]`
       if (notes.has(failure)) continue
       try {
-        const image = ref.kind === "markdown" ? await loadLocalImage(ref)
-          : ref.kind === "discord-emoji" ? await loadDiscordEmoji(ref)
-          : await loadDiscordAvatar(ref)
+        const image = ref.kind === "markdown" ? await loadLocalImage(ref, home)
+          : ref.kind === "discord-emoji" ? await loaders?.loadEmoji(ref)
+          : await loaders?.loadAvatar(ref)
+        if (!image) throw new Error("Discord image loader unavailable")
         // @me may resolve to a user already pictured in this context.
         if (discordImage && seenDiscordImages.has(image.key)) continue
         ;(message.imageAttachments ??= []).push(image)

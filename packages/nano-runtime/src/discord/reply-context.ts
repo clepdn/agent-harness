@@ -1,12 +1,12 @@
 /**
  * Reply context extraction from Discord message payloads.
  *
- * Pure JSON parsing — no database access.
+ * JSON parsing and database-backed reply target lookup.
  *
  * @module discord/reply-context
  */
 
-import { getDb } from "../db"
+import type Database from "better-sqlite3"
 import { asObject, asString } from "./parse"
 
 // ── types ──────────────────────────────────────────────────────────────
@@ -88,7 +88,7 @@ export function extractEmbeddedReferencedMessage(rawJson: string): DiscordReplyC
  * @param rows - Messages with raw_json to scan for references.
  * @returns Map from message id to the reply target context.
  */
-export function buildReplyTargetContextMap(rows: Array<{ message_id: string; raw_json: string }>): Map<string, DiscordReplyContext> {
+export function buildReplyTargetContextMap(db: Database.Database, rows: Array<{ message_id: string; raw_json: string }>): Map<string, DiscordReplyContext> {
   const refsByMessage = new Map<string, { refId: string; embedded: DiscordReplyContext | null }>()
   for (const row of rows) {
     const refId = extractReferencedMessageId(row.raw_json)
@@ -98,7 +98,6 @@ export function buildReplyTargetContextMap(rows: Array<{ message_id: string; raw
   if (refsByMessage.size === 0) return new Map()
 
   const refIds = Array.from(new Set([...refsByMessage.values()].map((ref) => ref.refId)))
-  const db = getDb()
   const placeholders = refIds.map(() => "?").join(", ")
   const targetRows = db
     .prepare(

@@ -1,13 +1,17 @@
+import type Database from "better-sqlite3"
 import { config } from "../config"
-import { enqueueEvent, isRunning, wake } from "../runner/index"
-import { enqueueFrontendEvent, isFrontendRunning, wakeFrontend } from "../runner/frontend"
-import { fromDiscord } from "../triggers/discord"
+import { fromDiscord, type DiscordTriggerOptions } from "../triggers/discord"
+import type { RuntimeKind } from "../runner/types"
 import type { UserMessage } from "../types"
 import { isChannelActiveNow } from "./cooldown"
 import { markDiscordMessagesDispatched } from "./db"
 import { ingestDiscordEvent, type DiscordIngestResult } from "./state"
 
-const DISCORD_WAKE_ON_EVENT = config.discord.wake_on_event
+export type DiscordWakeRuntime = (
+  event: UserMessage,
+  runtimeKind: RuntimeKind,
+  options?: { priority?: boolean },
+) => void | Promise<void>
 
 export type DiscordIngressOutcome = {
   ingested: boolean
@@ -15,6 +19,13 @@ export type DiscordIngressOutcome = {
   reason: "ingest_only" | "wake_on_event" | "dm_priority" | "cooldown"
   note?: string
 }
+export interface DiscordPipelineOptions {
+  readonly trigger?: DiscordTriggerOptions
+  readonly runtimeFor?: (ingest: DiscordIngestResult) => RuntimeKind
+  readonly isChannelActive?: (channelId: string) => boolean
+}
+
+const DISCORD_WAKE_ON_EVENT = config.discord.wake_on_event
 
 export function discordRuntimeFor(ingest: DiscordIngestResult): "main" | "frontend" {
   const ownerDm = ingest.isDm === true && Boolean(config.discord.owner_id) && ingest.authorId === config.discord.owner_id
@@ -22,18 +33,21 @@ export function discordRuntimeFor(ingest: DiscordIngestResult): "main" | "fronte
 }
 
 export function handleDiscordIngress(
+  db: Database.Database,
   payload: unknown,
+  wakeRuntime: DiscordWakeRuntime,
   preparedIngest?: DiscordIngestResult,
   preparedEvent?: UserMessage,
+  options: DiscordPipelineOptions = {},
 ): DiscordIngressOutcome {
-  const ingest = preparedIngest ?? ingestDiscordEvent(payload)
+  const ingest = preparedIngest ?? ingestDiscordEvent(db, payload)
   const wakeForDm = ingest.bucket === "dm"
   const wakeForChannel = !ingest.isDm && ingest.configured === true && DISCORD_WAKE_ON_EVENT
   const isWakeEligible = ingest.isNew && !ingest.isFromSelf && (wakeForDm || wakeForChannel)
 
   // Cooldown channels: keep ingesting for memory, but never wake outside the
   // configured active hours (even for @mentions; DMs bypass cooldowns).
-  const outsideActiveHours = !wakeForDm && ingest.channelId != null && !isChannelActiveNow(ingest.channelId)
+  const outsideActiveHours = !wakeForDm && ingest.channelId != null && !(options.isChannelActive ?? isChannelActiveNow)(ingest.channelId)
   if (isWakeEligible && outsideActiveHours) {
     return {
       ingested: ingest.stored,
@@ -54,15 +68,11 @@ export function handleDiscordIngress(
     }
   }
 
-  const event = preparedEvent ?? fromDiscord(payload)
-  const runtime = discordRuntimeFor(ingest)
-  if (runtime === "frontend") {
-    if (isFrontendRunning()) enqueueFrontendEvent(event, { priority: wakeForDm })
-    else void wakeFrontend(event)
-  } else if (isRunning()) enqueueEvent(event, { priority: wakeForDm })
-  else void wake(event)
+  const event = preparedEvent ?? fromDiscord(payload, options.trigger)
+  const runtimeKind = (options.runtimeFor ?? discordRuntimeFor)(ingest)
+  void wakeRuntime(event, runtimeKind, { priority: wakeForDm })
 
-  if (ingest.messageId) markDiscordMessagesDispatched([ingest.messageId])
+  if (ingest.messageId) markDiscordMessagesDispatched(db, [ingest.messageId])
 
   return {
     ingested: ingest.stored,

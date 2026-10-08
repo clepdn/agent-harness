@@ -25,14 +25,14 @@
  */
 
 import { readFileSync } from "node:fs"
-import { writeMemory } from "../agent-state-tools"
 import type { Message } from "../types"
+import type { MemoryService } from "../plugins/api"
 import {
   JOURNAL_BEFORE_COMPACTION,
   REMOTE_COMPACTION_ENDPOINT,
   REMOTE_COMPACTION_MODEL,
 } from "./config"
-import { modelState, type RuntimeModelConfig } from "./model-state"
+import type { RuntimeModelConfig } from "./model-state"
 import { messageStringContent } from "./messages"
 
 /** UTC date stamp for the journal path (journal/YYYY-MM-DD.md). */
@@ -46,22 +46,23 @@ function journalDateStamp(now: Date = new Date()): string {
  * Best-effort — a journaling failure must never block the compaction that
  * frees context. Returns true if the write succeeded.
  */
-export async function journalCompactionSummary(summaryText: string): Promise<boolean> {
-  if (!JOURNAL_BEFORE_COMPACTION) return false
+export async function journalCompactionSummary(summaryText: string, writer?: MemoryService["writeMemory"]): Promise<boolean> {
+  if (!JOURNAL_BEFORE_COMPACTION || !writer) return false
   const trimmed = summaryText.trim()
   if (!trimmed) return false
   const stamp = journalDateStamp()
   const heading = `\n\n## context compaction (${new Date().toISOString()})\n\n` +
     `_auto-captured before burning older history — this is what the same-model summary carried forward:_\n\n`
   try {
-    await writeMemory(`journal/${stamp}.md`, `${heading}${trimmed}\n`, "append")
+    await writer(`journal/${stamp}.md`, `${heading}${trimmed}\n`, "append")
     return true
   } catch (err) {
     console.warn(`[compaction] journal-first write failed: ${(err as Error)?.message ?? err}`)
     return false
   }
-}
 
+
+}
 // ── Deep archive (layer 3) ──────────────────────────────────────────────────
 
 export interface DeepArchiveResult {
@@ -331,13 +332,13 @@ export class FirstAvailableArchive implements DeepArchiveBackend {
 /** Provider string → deep-archive backend. */
 export function resolveDeepArchiveBackend(
   provider: string | undefined,
-  forceSnapcompact = false,
-  runtimeModelState: RuntimeModelConfig = modelState,
+  forceSnapcompact: boolean,
+  runtimeModelState: RuntimeModelConfig,
 ): DeepArchiveBackend {
   if (forceSnapcompact) {
     return new FirstAvailableArchive([new SnapcompactFramesArchive(), new TextAppendixArchive()])
   }
-  // Read from modelState so deep_archive swaps with the model preset at runtime.
+  // Read the caller-provided runtime state so deep_archive swaps remain lane-local.
   if (!runtimeModelState.deepArchive) return new NoopArchive()
   const p = (provider ?? "").toLowerCase()
   if (p.includes("openai") && REMOTE_COMPACTION_ENDPOINT) return new OpenAiRemoteArchive()

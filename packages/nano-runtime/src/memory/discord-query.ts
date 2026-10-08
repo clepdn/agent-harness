@@ -7,8 +7,20 @@
  * @module memory/discord-query
  */
 
+import type Database from "better-sqlite3"
 import { normalizeHandle } from "./shared"
-import { getDb } from "../db"
+
+export interface MemoryQueryDependencies {
+  db?: Database.Database
+}
+
+export interface MemoryQueryRuntime {
+  memoryQueryForUserMessage(raw: string): MemoryQueryParts
+  conciseDiscordMemoryQuery(raw: string): MemoryQueryParts | null
+  conciseDiscordBatchMemoryQuery(raw: string): MemoryQueryParts | null
+  memoryQueryToString(parts: MemoryQueryParts): string
+  stripWakeEnvelope(raw: string): string
+}
 
 export type MemoryQueryParts = {
   sender: string | null
@@ -47,7 +59,12 @@ function unwrapUserContent(raw: string): string {
  * @param isDm - Whether the message is a DM.
  * @returns Short label like `"DM"`, `"guild/#channel"`, or `"#channel"`.
  */
-export function discordChannelLabel(channelId: string | null, fallbackContext: string | null, isDm: boolean): string {
+function discordChannelLabel(
+  db: Database.Database | undefined,
+  channelId: string | null,
+  fallbackContext: string | null,
+  isDm: boolean,
+): string {
   if (isDm) return "DM"
 
   const fallback = fallbackContext
@@ -55,9 +72,9 @@ export function discordChannelLabel(channelId: string | null, fallbackContext: s
     .replace(/\s*\(\d+\)\s*$/, "")
     .trim()
 
-  if (channelId) {
+  if (channelId && db) {
     try {
-      const row = getDb()
+      const row = db
         .prepare("select guild_id, guild_name, channel_name, is_dm from discord_channels where channel_id = ?")
         .get(channelId) as
         | {
@@ -76,7 +93,7 @@ export function discordChannelLabel(channelId: string | null, fallbackContext: s
         if (channel) return `#${channel}`
       }
     } catch {
-      // If the main db is unavailable in tests or scripts, keep the parsed context.
+      // If database lookup fails, retain the parsed context.
     }
   }
 
@@ -92,7 +109,7 @@ export function discordChannelLabel(channelId: string | null, fallbackContext: s
  * @param raw - Raw trigger message content.
  * @returns Parsed parts, or `null` when the message is not a discord trigger.
  */
-export function conciseDiscordMemoryQuery(raw: string): MemoryQueryParts | null {
+function conciseDiscordMemoryQueryWithDb(db: Database.Database | undefined, raw: string): MemoryQueryParts | null {
   const withoutWakeEnvelope = stripWakeEnvelope(raw)
   if (!/\[discord\/(?:dm|channel)\]/i.test(withoutWakeEnvelope)) return null
 
@@ -120,7 +137,7 @@ export function conciseDiscordMemoryQuery(raw: string): MemoryQueryParts | null 
   const dmChannelId = context.match(/^DM\s+(\d+)/i)?.[1] ?? null
   const namedChannelId = context.match(/\((\d+)\)\s*$/)?.[1] ?? null
   const channelId = dmChannelId ?? namedChannelId
-  const location = discordChannelLabel(channelId, contextLine, isDm)
+  const location = discordChannelLabel(db, channelId, contextLine, isDm)
 
   if (!author && !location && !message) return null
   return {
@@ -128,6 +145,16 @@ export function conciseDiscordMemoryQuery(raw: string): MemoryQueryParts | null 
     source: location || null,
     body: message,
   }
+}
+
+/**
+ * Parses a Discord message without consulting a database.
+ *
+ * @param raw - Raw trigger message content.
+ * @returns Parsed parts, or `null` when the message is not a Discord trigger.
+ */
+export function conciseDiscordMemoryQuery(raw: string): MemoryQueryParts | null {
+  return conciseDiscordMemoryQueryWithDb(undefined, raw)
 }
 
 // ── discord batch digest ───────────────────────────────────────────────
@@ -207,10 +234,34 @@ export function conciseDiscordBatchMemoryQuery(raw: string): MemoryQueryParts | 
  */
 export function memoryQueryForUserMessage(raw: string): MemoryQueryParts {
   return (
-    conciseDiscordMemoryQuery(raw) ??
+    conciseDiscordMemoryQueryWithDb(undefined, raw) ??
     conciseDiscordBatchMemoryQuery(raw) ??
     { sender: null, source: null, body: stripWakeEnvelope(raw) }
   )
+}
+
+/**
+ * Creates Discord query parsers bound to the caller's optional database.
+ *
+ * @param deps - Runtime dependencies.
+ * @returns Query parsing and serialization methods.
+ */
+export function createDiscordMemoryQuery(deps: MemoryQueryDependencies): MemoryQueryRuntime {
+  return {
+    memoryQueryForUserMessage(raw) {
+      return (
+        conciseDiscordMemoryQueryWithDb(deps.db, raw) ??
+        conciseDiscordBatchMemoryQuery(raw) ??
+        { sender: null, source: null, body: stripWakeEnvelope(raw) }
+      )
+    },
+    conciseDiscordMemoryQuery(raw) {
+      return conciseDiscordMemoryQueryWithDb(deps.db, raw)
+    },
+    conciseDiscordBatchMemoryQuery,
+    memoryQueryToString,
+    stripWakeEnvelope,
+  }
 }
 
 /**

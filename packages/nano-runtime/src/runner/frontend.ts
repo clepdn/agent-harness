@@ -1,35 +1,17 @@
 import { createHash, randomUUID } from "node:crypto"
 import type { ToolDefinition } from "@nano/harness-core"
-import { buildBootstrap } from "../bootstrap"
 import { config } from "../config"
-import { areDiscordToolsAvailable } from "../discord/availability"
-import { discordEventImageReferences } from "../discord/context-avatars"
-import { registerDiscordTargets, rewriteDiscordTargetLabels } from "../discord/targets"
-import { markDiscordItem } from "../discord/state"
-import { clearDiscordTypingScope } from "../discord/typing-lease"
-import { endConversation, logMessage, startConversation } from "../db"
-import { emit } from "../stream"
+import { BOREDOM_WAKE_MS } from "./config"
 import { fromBoredom } from "../triggers/boredom"
+import type { RuntimeExecutionServices } from "../plugins/api"
+import { registerDiscordTargets, rewriteDiscordTargetLabels } from "../discord/targets"
 import type { Message, UserMessage } from "../types"
-import { isWebSearchAvailable } from "../web-search"
 import { createBoredomTimer } from "./boredom-timer"
-import { archiveContextMessages, recordRestContextSnapshot } from "./context-store"
 import { runLoop } from "./loop"
 import { createNiriToolCatalog, reconcileImageToolDefinition, reconcileMemoryFileToolDefinitions } from "./tool-catalog"
 import type { RunnerStateInternal } from "./types"
-import {
-  archiveDiscardedSession,
-  BOREDOM_WAKE_MS,
-  clearSession,
-  loadRestSnapshot,
-  loadSession,
-  quarantineSession,
-  saveRestSnapshot,
-  saveSession,
-} from "./util"
 import { createRuntimeContext } from "./context"
 import { getCompletionTools } from "./tools"
-import { modelStateFor } from "./model-state"
 
 export type FrontendModelSwapOptions = {
   boundaryWaitMs: number
@@ -39,6 +21,8 @@ export type FrontendModelSwapOptions = {
 }
 
 export type FrontendModelSwapSnapshot = { messages: Message[]; events: UserMessage[]; id: string; eventIds: string[]; deliveredEventIds: string[] }
+type InterruptRequestResult = "interrupted" | "idle" | "not-running"
+type EnqueueOptions = { onlyIfWaiting?: boolean; priority?: boolean }
 type FrontendModelSwap = {
   preset: string
   id: string
@@ -63,56 +47,96 @@ type FrontendModelSwap = {
   onCheckpoint?: () => void
   failure?: Error
 }
-
-let frontendModelSwap: FrontendModelSwap | undefined
-let frontendModelSwapCheckpoint: (() => void) | undefined
-
-type EnqueueOptions = { onlyIfWaiting?: boolean; priority?: boolean }
-
-const state: RunnerStateInternal = {
-  runtimeKind: "frontend",
-  contextSize: 0,
-  running: false,
-  context: createRuntimeContext("frontend"),
-  pendingInputs: [],
-  tokenCount: 0,
-  toolCatalog: [],
-  toolCatalogEpoch: 0,
-  toolCatalogFingerprint: "",
-  toolInFlight: false,
-  memoryRecallCooldowns: {},
-  memoryRecallTurn: 0,
-  memoryRecallPending: false,
-  shutdownRequested: false,
-  turnInFlight: false,
-  deferredEvents: [],
-  restRequested: false,
-  restReason: "",
+export interface FrontendRunnerRuntime {
+  isFrontendRunning(): boolean
+  isFrontendWaitingForEvent(): boolean
+  getFrontendRunnerStatus(): { running: boolean; idle: boolean; tokenCount: number; contextSize: number }
+  enqueueFrontendEvent(event: UserMessage, options?: EnqueueOptions): boolean
+  activateFrontend(event: UserMessage, options?: { priority?: boolean }): boolean
+  startFrontendBoredomTimer(): void
+  wakeFrontend(event: UserMessage): Promise<void>
+  requestInterrupt(): InterruptRequestResult
+  shutdownFrontend(): Promise<void>
+  cleanup(): Promise<void>
+  beginFrontendModelSwap(preset: string, options: FrontendModelSwapOptions): Promise<{ graceful: boolean; fallbackReason?: string }>
+  resumeFrontendAfterModelSwap(): Promise<void>
+  frontendModelSwapSnapshot(): FrontendModelSwapSnapshot | undefined
+  setFrontendModelSwapCheckpoint(checkpoint?: () => void): void
+  checkpointFrontendModelSwapReplay(): Promise<void>
 }
 
-let eventResolvers: Array<(event: UserMessage | null) => void> = []
-let shutdownResolvers: Array<() => void> = []
+export function createFrontendRunnerRuntime(services: RuntimeExecutionServices): FrontendRunnerRuntime {
+  const frontendServices = services
+  let frontendModelSwap: FrontendModelSwap | undefined
+  let frontendModelSwapCheckpoint: (() => void) | undefined
+  let state!: RunnerStateInternal
+  let eventResolvers: Array<(event: UserMessage | null) => void> = []
+  let shutdownResolvers: Array<() => void> = []
+  let stoppedResolvers: Array<() => void> = []
+  let frontendColdWakePromise: Promise<void> | undefined
+  async function prepareFrontendMessages(messages: Message[]): Promise<void> {
+    const prepare = frontendServices.images?.prepareMessages
+    if (!prepare) throw new Error("nano.frontend requires nano.images prepareMessages")
+    await prepare(messages)
+  }
+  function requiredPersistence() {
+    const value = frontendServices.persistence
+    if (!value) throw new Error("nano.frontend requires nano.persistence")
+    return value
+  }
+  function loadSession(kind: "frontend" = "frontend") { return requiredPersistence().loadSession(kind) }
+  function saveSession(snapshot: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["saveSession"]>[0], kind: "frontend" = "frontend") { return requiredPersistence().saveSession(snapshot, kind) }
+  function clearSession(kind: "frontend" = "frontend") { return requiredPersistence().clearSession(kind) }
+  function loadRestSnapshot(kind: "frontend" = "frontend") { return requiredPersistence().loadRestSnapshot(kind) }
+  function saveRestSnapshot(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["saveRestSnapshot"]>) { return requiredPersistence().saveRestSnapshot(...args) }
+  function archiveDiscardedSession(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["archiveDiscardedSession"]>) { return requiredPersistence().archiveDiscardedSession(...args) }
+  function quarantineSession(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["quarantineSession"]>) { return requiredPersistence().quarantineSession(...args) }
+  function startConversation(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["startConversation"]>) { return requiredPersistence().startConversation(...args) }
+  function logMessage(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["logMessage"]>) { return requiredPersistence().logMessage(...args) }
+  function endConversation(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["endConversation"]>) { return requiredPersistence().endConversation(...args) }
+  function recordRestContextSnapshot(...args: Parameters<NonNullable<RuntimeExecutionServices["persistence"]>["recordRestContextSnapshot"]>) { return requiredPersistence().recordRestContextSnapshot(...args) }
+  function buildBootstrap(event: UserMessage, priorRest: Parameters<NonNullable<RuntimeExecutionServices["bootstrap"]>["build"]>[1] = null, options: Parameters<NonNullable<RuntimeExecutionServices["bootstrap"]>["build"]>[2] = {}) {
+    const bootstrap = frontendServices.bootstrap
+    if (!bootstrap) throw new Error("nano.frontend requires nano.bootstrap")
+    return bootstrap.build(event, priorRest, options)
+  }
+  function emit(event: Parameters<NonNullable<RuntimeExecutionServices["events"]>["emit"]>[0]): void { frontendServices.events?.emit(event) }
+  function frontendModelConfig(kind: "frontend" | "main" = "frontend") {
+    const model = frontendServices.model
+    if (!model) throw new Error("nano.frontend requires nano.model")
+    return model.current(kind)
+  }
+  function catalogFingerprint(catalog: ToolDefinition[]): string { return createHash("sha256").update(JSON.stringify(catalog)).digest("hex") }
+  function resolveStopped(): void {
+    const resolvers = stoppedResolvers
+    stoppedResolvers = []
+    for (const resolve of resolvers) resolve()
+  }
+  state = {
+    runtimeKind: "frontend", contextSize: 0, running: false, services: frontendServices,
+    context: createRuntimeContext("frontend", [], undefined, undefined, services.providerResolver, prepareFrontendMessages, services.model),
+    pendingInputs: [], tokenCount: 0, toolCatalog: [], toolCatalogEpoch: 0, toolCatalogFingerprint: "",
+    toolInFlight: false, memoryRecallCooldowns: {}, memoryRecallTurn: 0, memoryRecallPending: false,
+    shutdownRequested: false, turnInFlight: false, deferredEvents: [], restRequested: false, restReason: "",
+  }
 
-function catalogFingerprint(catalog: ToolDefinition[]): string {
-  return createHash("sha256").update(JSON.stringify(catalog)).digest("hex")
-}
-
-function buildCurrentCatalog(): ToolDefinition[] {
-  return createNiriToolCatalog({
-    clientCapabilities: [],
-    workspace: null,
-    memory: true,
-    discord: areDiscordToolsAvailable(),
-    subagents: false,
-    computer: false,
-    webSearch: isWebSearchAvailable(),
-    vision: modelStateFor("frontend").primaryVision,
-    frontend: true,
-    agentChannel: true,
+  const boredomTimer = createBoredomTimer(BOREDOM_WAKE_MS, () => {
+    if (!config.frontend.enable || state.shutdownRequested || (state.running && !isFrontendWaitingForEvent())) return
+    console.log("[frontend] boredom timer fired — activating virtual frontend")
+    activateFrontend(state.pendingInputs.shift() ?? fromBoredom())
   })
-}
-
-function refreshToolCatalog(reason: "new-session" | "post-compaction"): void {
+  function buildCurrentCatalog(): ToolDefinition[] {
+    const services = frontendServices
+    return createNiriToolCatalog({
+      contributions: services.tools?.list("frontend") ?? [],
+      clientCapabilities: [],
+      workspace: null,
+      computer: false,
+      vision: frontendModelConfig("frontend").primaryVision,
+      frontend: true,
+    })
+  }
+  function refreshToolCatalog(reason: "new-session" | "post-compaction"): void {
   const catalog = buildCurrentCatalog()
   state.toolCatalog = catalog
   state.toolCatalogFingerprint = catalogFingerprint(catalog)
@@ -127,7 +151,7 @@ function refreshToolCatalog(reason: "new-session" | "post-compaction"): void {
   }
 }
 
-function reconcileFileToolCatalog(): void {
+  function reconcileFileToolCatalog(): void {
   const current = buildCurrentCatalog()
   const image = reconcileImageToolDefinition(state.toolCatalog, current)
   const memoryFiles = reconcileMemoryFileToolDefinitions(image.catalog, current)
@@ -146,15 +170,15 @@ function reconcileFileToolCatalog(): void {
   } as Message)
 }
 
-export function isFrontendRunning(): boolean {
+  function isFrontendRunning(): boolean {
   return state.running
 }
 
-export function isFrontendWaitingForEvent(): boolean {
+  function isFrontendWaitingForEvent(): boolean {
   return eventResolvers.length > 0
 }
 
-export function getFrontendRunnerStatus(): {
+  function getFrontendRunnerStatus(): {
   running: boolean
   idle: boolean
   tokenCount: number
@@ -168,25 +192,25 @@ export function getFrontendRunnerStatus(): {
   }
 }
 
-function interruptEventWaiters(): void {
+  function interruptEventWaiters(): void {
   const resolvers = eventResolvers
   eventResolvers = []
   for (const resolve of resolvers) resolve(null)
 }
 
-function resolveShutdown(): void {
+  function resolveShutdown(): void {
   const resolvers = shutdownResolvers
   shutdownResolvers = []
   for (const resolve of resolvers) resolve()
 }
-function notifyFrontendSwapCheckpoint(): void {
+  function notifyFrontendSwapCheckpoint(): void {
   const swap = frontendModelSwap
   if (!swap) return
   if (swap.phase === "closing" && state.running) swap.messages = state.context.snapshot()
   ;(swap.onCheckpoint ?? frontendModelSwapCheckpoint)?.()
 }
 
-function holdFrontendSwapEvent(event: UserMessage, options: EnqueueOptions = {}): void {
+  function holdFrontendSwapEvent(event: UserMessage, options: EnqueueOptions = {}): void {
   const swap = frontendModelSwap
   if (!swap) return
   swap.eventIds.set(event, randomUUID())
@@ -194,7 +218,7 @@ function holdFrontendSwapEvent(event: UserMessage, options: EnqueueOptions = {})
   else swap.events.push(event)
   notifyFrontendSwapCheckpoint()
 }
-function deliverEvent(event: UserMessage, options: EnqueueOptions = {}): boolean {
+  function deliverEvent(event: UserMessage, options: EnqueueOptions = {}): boolean {
   if (state.shutdownRequested) return false
   if (options.onlyIfWaiting && eventResolvers.length === 0) return false
   if (frontendModelSwap) {
@@ -217,14 +241,14 @@ function deliverEvent(event: UserMessage, options: EnqueueOptions = {}): boolean
   return true
 }
 
-function flushDeferredEvents(): void {
+  function flushDeferredEvents(): void {
   if (state.toolInFlight || state.deferredEvents.length === 0) return
   const events = state.deferredEvents
   state.deferredEvents = []
   for (const { event, priority } of events) deliverEvent(event, { priority })
 }
 
-export function enqueueFrontendEvent(event: UserMessage, options: EnqueueOptions = {}): boolean {
+  function enqueueFrontendEvent(event: UserMessage, options: EnqueueOptions = {}): boolean {
   if (!config.frontend.enable) return false
   if (frontendModelSwap) {
     if (options.onlyIfWaiting && eventResolvers.length === 0) return false
@@ -242,25 +266,19 @@ export function enqueueFrontendEvent(event: UserMessage, options: EnqueueOptions
   return true
 }
 
-export function activateFrontend(event: UserMessage): boolean {
+  function activateFrontend(event: UserMessage, options: { priority?: boolean } = {}): boolean {
   if (!config.frontend.enable) return false
-  if (state.running) enqueueFrontendEvent(event)
-  else void wakeFrontend(event)
+  if (state.running || frontendModelSwap || frontendColdWakePromise) return enqueueFrontendEvent(event, options)
+  frontendColdWakePromise ??= wakeFrontend(event)
+    .catch((error) => { console.error("[frontend] activation failed:", error) })
+    .finally(() => { frontendColdWakePromise = undefined })
   return true
 }
 
-const boredomTimer = createBoredomTimer(BOREDOM_WAKE_MS, () => {
-  if (!config.frontend.enable || state.shutdownRequested || (state.running && !isFrontendWaitingForEvent())) return
-  console.log("[frontend] boredom timer fired — activating virtual frontend")
-  activateFrontend(state.pendingInputs.shift() ?? fromBoredom())
-})
-
-export function startFrontendBoredomTimer(): void {
+  function startFrontendBoredomTimer(): void {
   if (config.frontend.enable && !state.running && !state.shutdownRequested) boredomTimer.idle()
 }
-
-async function saveRuntimeSnapshot(): Promise<void> {
-  archiveContextMessages(state.context.items, "runtime-checkpoint", "frontend")
+  async function saveRuntimeSnapshot(): Promise<void> {
   await saveSession({
     version: 1,
     messages: state.context.snapshot(),
@@ -278,7 +296,7 @@ async function saveRuntimeSnapshot(): Promise<void> {
   }, "frontend")
   await saveRestSnapshot(state.context.items, "runtime checkpoint", "frontend")
 }
-function armFrontendSwapTimer(swap: FrontendModelSwap, delayMs: number, callback: () => void): void {
+  function armFrontendSwapTimer(swap: FrontendModelSwap, delayMs: number, callback: () => void): void {
   const timer = setTimeout(() => {
     swap.timers.delete(timer)
     if (frontendModelSwap === swap && swap.phase === "closing") callback()
@@ -286,7 +304,7 @@ function armFrontendSwapTimer(swap: FrontendModelSwap, delayMs: number, callback
   swap.timers.add(timer)
 }
 
-function failFrontendSwap(swap: FrontendModelSwap, reason: string): void {
+  function failFrontendSwap(swap: FrontendModelSwap, reason: string): void {
   if (frontendModelSwap !== swap || swap.phase !== "closing") return
   const error = new Error(`frontend model swap failed safely: ${reason}; selected settings were not applied`)
   for (const timer of swap.timers) clearTimeout(timer)
@@ -301,7 +319,7 @@ function failFrontendSwap(swap: FrontendModelSwap, reason: string): void {
   swap.rejectClose(error)
 }
 
-function startFrontendGracefulDeadline(swap: FrontendModelSwap): void {
+  function startFrontendGracefulDeadline(swap: FrontendModelSwap): void {
   for (const timer of swap.timers) clearTimeout(timer)
   swap.timers.clear()
   if (state.modelSwap) state.modelSwap.deadlineAt = Date.now() + swap.options.gracefulDeadlineMs
@@ -325,7 +343,7 @@ function startFrontendGracefulDeadline(swap: FrontendModelSwap): void {
   })
 }
 
-function beginFrontendClose(swap: FrontendModelSwap): void {
+  function beginFrontendClose(swap: FrontendModelSwap): void {
   if (!state.running) return
   state.modelSwap = {
     preset: swap.preset,
@@ -353,7 +371,7 @@ function beginFrontendClose(swap: FrontendModelSwap): void {
 }
 
 /** Persist events arriving while the selected lane waits for the parent commit. */
-export async function checkpointFrontendModelSwapReplay(): Promise<void> {
+  async function checkpointFrontendModelSwapReplay(): Promise<void> {
   const swap = frontendModelSwap
   if (!swap || swap.phase !== "resuming" || swap.replayConversation === undefined) return
   while (swap.events.length) {
@@ -367,15 +385,15 @@ export async function checkpointFrontendModelSwapReplay(): Promise<void> {
 }
 
 /** Current outgoing frontend history and events held outside its model context. */
-export function frontendModelSwapSnapshot(): FrontendModelSwapSnapshot | null {
+  function frontendModelSwapSnapshot(): FrontendModelSwapSnapshot | undefined {
   const swap = frontendModelSwap
-  if (!swap) return null
+  if (!swap) return undefined
   const events = [...swap.delivered, ...swap.events]
   return { messages: swap.messages.slice(), events, id: swap.id, eventIds: events.map(event => swap.eventIds.get(event)!), deliveredEventIds: [...swap.deliveredIds] }
 }
 
 /** Attach the parent handoff checkpoint writer while frontend state is gated. */
-export function setFrontendModelSwapCheckpoint(checkpoint?: () => void): void {
+  function setFrontendModelSwapCheckpoint(checkpoint?: () => void): void {
   frontendModelSwapCheckpoint = checkpoint
   const swap = frontendModelSwap
   if (!swap) return
@@ -394,7 +412,7 @@ export function setFrontendModelSwapCheckpoint(checkpoint?: () => void): void {
 }
 
 /** Close an inherited frontend context before the parent installs a new preset. */
-export async function beginFrontendModelSwap(
+  async function beginFrontendModelSwap(
   preset: string,
   options: FrontendModelSwapOptions,
 ): Promise<{ graceful: boolean; fallbackReason?: string }> {
@@ -441,7 +459,6 @@ export async function beginFrontendModelSwap(
           swap.activeAtStart = true
         }
         if (swap.messages.length) {
-          archiveContextMessages(swap.messages, "model-swap", "frontend")
           const archived = recordRestContextSnapshot(swap.messages, "frontend model swap while resting", "frontend")
           await saveRestSnapshot(swap.messages, "frontend model swap while resting", "frontend", archived.forest)
         }
@@ -449,9 +466,7 @@ export async function beginFrontendModelSwap(
         if (frontendModelSwap !== swap || swap.phase !== "closing") return
         swap.phase = "closed"
         notifyFrontendSwapCheckpoint()
-        swap.resolveClose(swap.messages.length
-          ? { graceful: false, fallbackReason: "frontend was already resting" }
-          : { graceful: true })
+        swap.resolveClose(swap.messages.length ? { graceful: false, fallbackReason: "frontend was already resting" } : { graceful: true })
       } catch (error) {
         failFrontendSwap(swap, `could not archive resting session: ${error instanceof Error ? error.message : String(error)}`)
       }
@@ -461,7 +476,7 @@ export async function beginFrontendModelSwap(
 }
 
 /** Resume the frontend using the globally selected preset and held events. */
-export async function resumeFrontendAfterModelSwap(): Promise<void> {
+  async function resumeFrontendAfterModelSwap(): Promise<void> {
   const swap = frontendModelSwap
   if (!swap || swap.phase === "failed") return
   if (swap.phase !== "closed") throw new Error("frontend model swap has not closed")
@@ -494,6 +509,7 @@ export async function resumeFrontendAfterModelSwap(): Promise<void> {
   void wakeFrontend(event).catch(error => {
     state.running = false
     state.modelSwap = undefined
+    resolveStopped()
     const failure = error instanceof Error ? error : new Error(String(error))
     swap.failure = failure
     swap.phase = "failed"
@@ -503,7 +519,7 @@ export async function resumeFrontendAfterModelSwap(): Promise<void> {
   if (!frontendModelSwapCheckpoint) setFrontendModelSwapCheckpoint(undefined)
 }
 
-export async function shutdownFrontend(): Promise<void> {
+  async function shutdownFrontend(): Promise<void> {
   boredomTimer.stop()
   if (!state.running || state.context.items.length === 0) return
   state.shutdownRequested = true
@@ -515,13 +531,13 @@ export async function shutdownFrontend(): Promise<void> {
   await saveRuntimeSnapshot()
 }
 
-function holdResolvedSwapEvent(event: UserMessage | null): UserMessage | null {
+  function holdResolvedSwapEvent(event: UserMessage | null): UserMessage | null {
   if (!event || !frontendModelSwap || frontendModelSwap.phase === "resuming") return event
   holdFrontendSwapEvent(event)
   return null
 }
 
-function waitForEvent(): Promise<UserMessage | null> {
+  function waitForEvent(): Promise<UserMessage | null> {
   if (state.shutdownRequested || state.restRequested) return Promise.resolve(null)
   if (state.pendingInputs.length > 0) return Promise.resolve(holdResolvedSwapEvent(state.pendingInputs.shift()!))
   const waiting = new Promise<UserMessage | null>((resolve) => eventResolvers.push(resolve))
@@ -529,7 +545,7 @@ function waitForEvent(): Promise<UserMessage | null> {
   return waiting.finally(() => boredomTimer.pause()).then(holdResolvedSwapEvent)
 }
 
-function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null> {
+  function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null> {
   if (state.shutdownRequested || state.restRequested) return Promise.resolve(null)
   if (state.pendingInputs.length > 0) return Promise.resolve(holdResolvedSwapEvent(state.pendingInputs.shift()!))
   const waiting = new Promise<UserMessage | null>((resolve) => {
@@ -552,7 +568,7 @@ function waitForEventWithTimeout(timeoutMs: number): Promise<UserMessage | null>
   boredomTimer.idle()
   return waiting.finally(() => boredomTimer.pause()).then(holdResolvedSwapEvent)
 }
-function autoSeeDiscordEvent(event: UserMessage): void {
+  function autoSeeDiscordEvent(event: UserMessage): void {
   if (event.source !== "discord") return
   const itemIds = [
     ...(event.discordTargets ?? []).map((target) => target.itemId ?? target.messageId),
@@ -561,15 +577,12 @@ function autoSeeDiscordEvent(event: UserMessage): void {
     .map((itemId) => itemId?.trim())
     .filter((itemId): itemId is string => Boolean(itemId))
   for (const itemId of new Set(itemIds)) {
-    try {
-      markDiscordItem(itemId, "seen", "auto-seen after injection into frontend context", "noted", "frontend")
-    } catch (err) {
-      console.warn(`[frontend] failed to auto-see Discord item ${itemId}: ${err instanceof Error ? err.message : String(err)}`)
-    }
+    try { frontendServices.discord?.markDiscordItem(itemId, "seen", "auto-seen after injection into frontend context", "noted", "frontend") }
+    catch (err) { console.warn(`[frontend] failed to auto-see Discord item ${itemId}: ${err instanceof Error ? err.message : String(err)}`) }
   }
 }
 
-function applyDiscordTargets(event: UserMessage): void {
+  function applyDiscordTargets(event: UserMessage): void {
   if (event.source !== "discord") return
   const incoming = event.discordTargets ?? []
   const registered = registerDiscordTargets(state.discordTargets ?? [], incoming)
@@ -578,22 +591,19 @@ function applyDiscordTargets(event: UserMessage): void {
   state.discordTargets = registered.targets
 }
 
-function injectIncomingEvent(convId: number, event: UserMessage): void {
-  clearDiscordTypingScope(state)
+  function injectIncomingEvent(convId: number, event: UserMessage): void {
+  frontendServices.discord?.stopTyping(state.discordTypingTurnId)
+  state.discordTypingTurnId = undefined
+  state.discordTypingChannelId = undefined
   applyDiscordTargets(event)
   autoSeeDiscordEvent(event)
   const incomingMessage = `[incoming — ${event.source}]\n\n${event.content}`
-  state.context.append({
-    role: "user",
-    content: incomingMessage,
-    imageReferences: discordEventImageReferences(event),
-    timestamp: Date.now(),
-  } as Message)
+  state.context.append({ role: "user", content: incomingMessage, imageReferences: frontendServices.discord?.discordEventImageReferences(event) ?? [], timestamp: Date.now() } as Message)
   logMessage(convId, "user", incomingMessage)
   emit({ type: "user", source: event.source, text: event.content, triggeredAt: event.triggeredAt, clientId: event.clientId })
   state.memoryRecallPending = true
 }
-export async function wakeFrontend(event: UserMessage): Promise<void> {
+  async function wakeFrontend(event: UserMessage): Promise<void> {
   if (!config.frontend.enable) return
   if (frontendModelSwap && frontendModelSwap.phase !== "resuming") {
     holdFrontendSwapEvent(event)
@@ -616,6 +626,8 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
   state.interruptRequested = false
   state.discardRequested = false
 
+  let convId: number
+  try {
   const saved = await loadSession("frontend")
   if (saved) {
     state.context = createRuntimeContext("frontend", saved.messages, saved.toolCatalog, {
@@ -625,7 +637,7 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
       configurationFingerprint: saved.contextConfigurationFingerprint,
       modelId: saved.contextModelId,
       effortState: saved.contextEffortState,
-    })
+    }, frontendServices.providerResolver, prepareFrontendMessages, frontendServices.model)
     state.toolCatalog = saved.toolCatalog
     state.toolCatalogEpoch = saved.toolCatalogEpoch
     state.toolCatalogFingerprint = saved.toolCatalogFingerprint
@@ -636,7 +648,7 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
     state.context.append({
       role: "user",
       content: `[frontend harness restarted — ${event.source} @ ${event.triggeredAt}]\n\n${event.content}`,
-      imageReferences: discordEventImageReferences(event),
+      imageReferences: frontendServices.discord?.discordEventImageReferences(event) ?? [],
       timestamp: Date.now(),
     } as Message)
   } else {
@@ -650,16 +662,16 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
     const bootstrap = await buildBootstrap(event, priorRest, {
       clientCapabilities: [],
       workspace: null,
-      discord: areDiscordToolsAvailable(),
+      discord: Boolean(frontendServices.discord?.available),
       frontend: true,
-      vision: modelStateFor("frontend").primaryVision,
+      vision: frontendModelConfig("frontend").primaryVision,
       agentChannel: true,
     })
     state.toolCatalogEpoch = 0
     refreshToolCatalog("new-session")
-    state.context = createRuntimeContext("frontend", bootstrap, state.toolCatalog)
+    state.context = createRuntimeContext("frontend", bootstrap, state.toolCatalog, undefined, frontendServices.providerResolver, prepareFrontendMessages, frontendServices.model)
   }
-  const convId = startConversation(`frontend:${event.source}`, event.triggeredAt)
+  convId = startConversation(`frontend:${event.source}`, event.triggeredAt)
   const swap = frontendModelSwap?.phase === "resuming" ? frontendModelSwap : undefined
   if (swap) {
     swap.replayConversation = convId
@@ -673,6 +685,17 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
     await swap.release
   }
   console.log("[frontend] virtual nano-frontend is awake")
+  } catch (error) {
+    state.running = false
+    state.modelSwap = undefined
+    state.toolInFlight = false
+    state.turnInFlight = false
+    state.activeTurnController = undefined
+    state.operationSignal = undefined
+    resolveShutdown()
+    resolveStopped()
+    throw error
+  }
   let discarded = false
   try {
     const exit = await runLoop(convId, state, {
@@ -728,13 +751,12 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
         const graceful = state.modelSwap?.completed === true && state.modelSwap.journaled === true
         const fallbackReason = graceful ? undefined : state.modelSwap?.fallbackReason ?? "outgoing frontend did not complete end_session"
         if (!graceful && closingSwap.messages.length) {
-          archiveContextMessages(closingSwap.messages, "model-swap", "frontend")
           const archived = recordRestContextSnapshot(closingSwap.messages, fallbackReason ?? "model swap", "frontend")
           await saveRestSnapshot(closingSwap.messages, fallbackReason ?? "model swap", "frontend", archived.forest)
         }
         await clearSession("frontend")
-        closingSwap.phase = "closed"
         swapResult = { graceful, ...(fallbackReason ? { fallbackReason } : {}) }
+        closingSwap.phase = "closed"
         notifyFrontendSwapCheckpoint()
       } catch (error) {
         swapError = error instanceof Error ? error : new Error(String(error))
@@ -767,6 +789,7 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
     if (!closingSwap) state.deferredEvents = []
     eventResolvers = []
     resolveShutdown()
+    resolveStopped()
     console.log("[frontend] virtual nano-frontend is resting")
 
     if (closingSwap) {
@@ -781,5 +804,56 @@ export async function wakeFrontend(event: UserMessage): Promise<void> {
     } else if (!wasShutdownRequested) {
       startFrontendBoredomTimer()
     }
+  }
+  }
+
+  function requestInterrupt(): InterruptRequestResult {
+    if (!state.running) return "not-running"
+    if (!state.turnInFlight && !state.toolInFlight) {
+      interruptEventWaiters()
+      return "idle"
+    }
+    state.interruptRequested = true
+    state.activeTurnController?.abort(new Error("interrupted by Discord /interrupt"))
+    interruptEventWaiters()
+    return "interrupted"
+  }
+
+  async function cleanup(): Promise<void> {
+    boredomTimer.stop()
+    state.pendingInputs = []
+    state.deferredEvents = []
+    if (!state.running) {
+      for (const timer of frontendModelSwap?.timers ?? []) clearTimeout(timer)
+      frontendModelSwap?.timers.clear()
+      return
+    }
+    state.shutdownRequested = true
+    state.restRequested = true
+    state.restReason = "frontend runtime cleanup"
+    state.interruptRequested = true
+    state.activeTurnController?.abort(new Error(state.restReason))
+    interruptEventWaiters()
+    await new Promise<void>(resolve => stoppedResolvers.push(resolve))
+    for (const timer of frontendModelSwap?.timers ?? []) clearTimeout(timer)
+    frontendModelSwap?.timers.clear()
+  }
+
+  return {
+    isFrontendRunning,
+    isFrontendWaitingForEvent,
+    getFrontendRunnerStatus,
+    enqueueFrontendEvent,
+    activateFrontend,
+    startFrontendBoredomTimer,
+    wakeFrontend,
+    requestInterrupt,
+    shutdownFrontend,
+    cleanup,
+    beginFrontendModelSwap,
+    resumeFrontendAfterModelSwap,
+    frontendModelSwapSnapshot,
+    setFrontendModelSwapCheckpoint,
+    checkpointFrontendModelSwapReplay,
   }
 }

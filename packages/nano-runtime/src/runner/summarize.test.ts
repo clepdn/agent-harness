@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { fallbackModel } from "./config"
+import type { Model } from "../llm"
 import { messageStringContent } from "./messages"
 import {
   buildConversationSummaryContent,
@@ -8,6 +8,19 @@ import {
   proactiveCompaction,
 } from "./summarize"
 import { makeAssistantMessage, makeToolResultMessage, makeUserMessage } from "./test-helpers"
+
+const fallbackModel: Model = {
+  id: "summary-test",
+  name: "Summary test",
+  api: "openai-completions",
+  provider: "openai",
+  baseUrl: "https://summary.invalid/v1",
+  reasoning: false,
+  input: ["text"],
+  cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+  contextWindow: 100_000,
+  maxTokens: 4096,
+}
 
 test("dedicated summarizer prompt requests a detailed operational play-by-play", () => {
   const prompt = buildConversationSummaryPrompt("grounding", "prior", true)

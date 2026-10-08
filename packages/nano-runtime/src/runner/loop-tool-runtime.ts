@@ -1,8 +1,5 @@
 import type { ToolResultMessage } from "../llm"
 import { redactSecrets } from "../config"
-import { logMessage } from "../db"
-import { emit } from "../stream"
-import { beginDiscordToolWait, endDiscordToolWait } from "../discord/typing-lease"
 import { latestAssistantContent } from "./loop-content"
 import { toolContextImageReferences } from "../tool-context-images"
 import type {
@@ -12,9 +9,13 @@ import type {
   ToolArgs,
   ToolExecutionContext,
   ToolExecutionOutcome,
-  ToolHandler,
 } from "./loop-shared"
 import type { LoopHooks, LoopState } from "./types"
+const NEVER_ABORTED = new AbortController().signal
+
+function hasToolResponse(state: LoopState, call: FunctionToolCall): boolean {
+  return state.context.items.some((message) => message.role === "toolResult" && message.toolCallId === call.id)
+}
 
 const FRONTEND_HARD_DENY = new Set([
   "shell",
@@ -36,18 +37,13 @@ type StandardToolSpec<
   name: string
   logArgKeys: LogKeys
   runArgKeys: RunKeys
-  run: (...values: ArgTuple<RunKeys>) => Promise<string>
+  run: (...values: ArgTuple<RunKeys>) => Promise<unknown> | unknown
   emptyFallback?: string
   emitArgKeys?: EmitKeys
   previewChars?: number
 }
 
-/**
- * Appends a tool-role message to conversation state and persistence logs.
- * Tool output is filtered through `redactSecrets` first so credentials that
- * leak via command output (curl -v, env, sloppy logging) never reach the
- * model, the db, or stream subscribers.
- */
+/** Appends a tool-role message to conversation state and scoped persistence. */
 export function pushToolMessage(convId: number, state: LoopState, call: FunctionToolCall, content: string): string {
   const safe = redactSecrets(content)
   const toolMsg: ToolResultMessage = {
@@ -59,17 +55,11 @@ export function pushToolMessage(convId: number, state: LoopState, call: Function
     timestamp: Date.now(),
   }
   state.context.append(toolMsg)
-  logMessage(convId, "toolResult", safe, undefined, call.id)
+  state.services?.persistence?.logMessage(convId, "toolResult", safe, undefined, call.id)
   return safe
 }
 
-function hasToolResponse(state: LoopState, call: FunctionToolCall): boolean {
-  return state.context.items.some(
-    (message) => message.role === "toolResult" && message.toolCallId === call.id,
-  )
-}
-
-/** Records a tool result and emits it to stream subscribers. */
+/** Records a tool result and emits it through the scoped event service. */
 export function recordToolResult(
   convId: number,
   state: LoopState,
@@ -79,7 +69,7 @@ export function recordToolResult(
   content: string,
 ): string {
   const result = pushToolMessage(convId, state, call, content)
-  emit({ type: "tool", name, args, result })
+  state.services?.events?.emit({ type: "tool", name, args, result } as never)
   return result
 }
 
@@ -106,7 +96,8 @@ export async function runStandardTool<
   spec: StandardToolSpec<RunKeys, LogKeys, EmitKeys>,
 ): Promise<ToolExecutionOutcome> {
   console.log(`[${spec.name}]`, ...argsByKeys(ctx.args, spec.logArgKeys))
-  const raw = await spec.run(...argsByKeys(ctx.args, spec.runArgKeys)).catch(toolError)
+  const value = await Promise.resolve(spec.run(...argsByKeys(ctx.args, spec.runArgKeys))).catch(toolError)
+  const raw = typeof value === "string" ? value : JSON.stringify(value) ?? String(value)
   const previewChars = spec.previewChars ?? 200
   const preview = previewChars === 0 ? raw : raw.slice(0, previewChars)
   console.log(`[${spec.name} result]`, preview)
@@ -115,7 +106,7 @@ export async function runStandardTool<
   recordToolResult(ctx.convId, ctx.state, ctx.call, spec.name, emitArgs, content)
   const message = ctx.state.context.items.at(-1)
   if (message?.role === "toolResult") {
-    const refs = await toolContextImageReferences(spec.name, ctx.args, content).catch(() => [])
+    const refs = await toolContextImageReferences(spec.name, ctx.args, content, ctx.state.services?.persistence?.getDb(), ctx.state.services?.persistence?.home).catch(() => [])
     if (refs.length) {
       ctx.state.context = ctx.state.context.edit(
         ctx.state.context.items.length - 1,
@@ -126,14 +117,14 @@ export async function runStandardTool<
   return {}
 }
 
-/** Executes one function tool call end-to-end. */
 export async function executeToolCall(
   convId: number,
   state: LoopState,
   hooks: LoopHooks,
-  handlers: Record<string, ToolHandler>,
-  call: FunctionToolCall,
+  legacyHandlersOrCall: Record<string, never> | FunctionToolCall,
+  maybeCall?: FunctionToolCall,
 ): Promise<ToolExecutionOutcome> {
+  const call = maybeCall ?? legacyHandlersOrCall as FunctionToolCall
   // Pi args are already a parsed object — no JSON parsing needed.
   const args: ToolArgs = call.arguments as ToolArgs
 
@@ -145,7 +136,7 @@ export async function executeToolCall(
 
   const isWaitTool = call.name === "wait" || call.name === "wait_then_continue"
   if (!isWaitTool) state.toolInFlight = true
-  beginDiscordToolWait(state.discordTypingTurnId ?? "")
+  state.services?.discord?.beginToolWait(state.discordTypingTurnId ?? "")
 
   try {
     if (state.runtimeKind === "frontend" && FRONTEND_HARD_DENY.has(call.name)) {
@@ -159,13 +150,28 @@ export async function executeToolCall(
       recordToolResult(convId, state, call, call.name, { _unavailable_tool: call.name }, errorText)
       return {}
     }
-    const handler = handlers[call.name]
-    if (!handler) {
-      const errorText = `error: unknown tool ${call.name}`
-      recordToolResult(convId, state, call, call.name, { _unknown_tool: call.name }, errorText)
+    if (state.services?.tools) {
+      const result = await state.services.tools.execute(call.name, args, {
+        signal: state.operationSignal ?? NEVER_ABORTED,
+        runtimeKind: state.runtimeKind,
+        convId,
+        state,
+        hooks,
+        call,
+        args,
+      })
+      if (result && typeof result === "object" && ("shouldRest" in result || "shouldWaitForEvent" in result || "isWait" in result)) {
+        return result as ToolExecutionOutcome
+      }
+      if (!hasToolResponse(state, call)) {
+        const content = typeof result === "string" ? result : JSON.stringify(result)
+        recordToolResult(convId, state, call, call.name, args, content ?? "")
+      }
       return {}
     }
-    return await handler({ convId, state, hooks, call, args })
+    const errorText = `error: tool service unavailable for ${call.name}`
+    recordToolResult(convId, state, call, call.name, { _unavailable_tool: call.name }, errorText)
+    return {}
   } catch (err) {
     const errorText = toolError(err)
     if (!hasToolResponse(state, call)) {
@@ -175,7 +181,7 @@ export async function executeToolCall(
     }
     return {}
   } finally {
-    endDiscordToolWait(state.discordTypingTurnId ?? "")
+    state.services?.discord?.endToolWait(state.discordTypingTurnId ?? "")
     if (!isWaitTool) {
       state.toolInFlight = false
       hooks.flushDeferredEvents()

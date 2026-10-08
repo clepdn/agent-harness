@@ -14,25 +14,18 @@ import {
   type AudioReceiveStream,
   type VoiceConnection,
 } from "@discordjs/voice"
-import type { GuildMember, VoiceBasedChannel } from "discord.js"
+import type { Client, GuildMember, VoiceBasedChannel } from "discord.js"
 import type { UserMessage } from "../types"
 import { MediaStreamTrack, RTCPeerConnection, useOPUS, type RTCDataChannel } from "werift"
-import { NANO_HOME } from "../agent-config"
-import { config } from "../config"
 import { OpusRtpPacketizer } from "./voice-rtp"
 
 const CONNECT_TIMEOUT_MS = 20_000
 const FETCH_TIMEOUT_MS = 20_000
 const MAX_OUTPUT_PACKETS = 100
-const SOUL_PATH = path.join(NANO_HOME, "soul.md")
 
 export const SUPPORTED_VOICES = ["juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove"] as const
 export type VoiceName = typeof SUPPORTED_VOICES[number]
 
-let delegationCallback: ((event: UserMessage) => void) | null = null
-const pendingDelegations = new Set<string>()
-
-export function setVoiceDelegationCallback(callback: ((event: UserMessage) => void) | null): void { delegationCallback = callback }
 
 export function parseDelegationCreated(raw: unknown): { id: string; transcript: string } | null {
   if (!raw || typeof raw !== "object") return null
@@ -78,19 +71,6 @@ export function delegationReplyMessages(delegationId: string, inputText: string)
   }))
 }
 
-export function sendVoiceReply(delegationId: string, inputText: string): { ok: boolean; error?: string; chunks?: number } {
-  if (!pendingDelegations.has(delegationId)) return { ok: false, error: "unknown or stale delegation id" }
-  if (!activeSession || activeSession.closing) return { ok: false, error: "voice session is not active" }
-  if (activeSession.events.readyState !== "open") return { ok: false, error: "voice events channel is not open" }
-  const content = String(inputText ?? "").trim()
-  if (!content) return { ok: false, error: "input_text is required" }
-  const messages = delegationReplyMessages(delegationId, content)
-  for (const message of messages) activeSession.events.send(message)
-  pendingDelegations.delete(delegationId)
-  return { ok: true, chunks: messages.length }
-}
-
-export function pendingDelegationCount(): number { return pendingDelegations.size }
 
 export type VoiceSessionStatus = {
   active: boolean
@@ -99,6 +79,34 @@ export type VoiceSessionStatus = {
   guildId?: string
   model?: string
   voice: VoiceName
+}
+
+export function isVoiceChannelEmpty(channel: { members?: { values: () => Iterable<{ user?: { bot?: boolean } }> } } | null | undefined): boolean {
+  if (!channel?.members) return false
+  return [...channel.members.values()].every((member) => member.user?.bot === true)
+}
+export type DiscordVoiceServiceOptions = {
+  enabled: boolean
+  ownerId: string
+  bridgeUrl: string
+  bridgeApiKey: string
+  voiceModel: string
+  initialVoice: VoiceName | string
+  homeDir: string
+  routeEvent?: (event: UserMessage) => void
+}
+
+export type DiscordVoiceService = {
+  readonly supportedVoices: typeof SUPPORTED_VOICES
+  setClient(client: Client | null): void
+  setDelegationCallback(callback: ((event: UserMessage) => void) | null): void
+  joinOwnerVoice(owner: GuildMember): Promise<VoiceSessionStatus>
+  leaveVoice(): Promise<boolean>
+  setVoice(name: string): Promise<VoiceName>
+  getVoiceSessionStatus(): VoiceSessionStatus
+  isVoiceChannelEmpty(channel: { members?: { values: () => Iterable<{ user?: { bot?: boolean } }> } } | null | undefined): boolean
+  stop(): Promise<void>
+  sendVoiceReply(id: string, text: string): { ok: boolean; error?: string; chunks?: number }
 }
 
 type ActiveVoiceSession = {
@@ -117,16 +125,6 @@ type ActiveVoiceSession = {
 
 type PendingStartup = {
   controller: AbortController
-}
-
-let activeSession: ActiveVoiceSession | null = null
-let pendingStartup: PendingStartup | null = null
-let transition: Promise<void> = Promise.resolve()
-
-function serialized<T>(operation: () => Promise<T>): Promise<T> {
-  const result = transition.then(operation, operation)
-  transition = result.then(() => undefined, () => undefined)
-  return result
 }
 
 export function realtimeCallsUrl(baseUrl: string): string {
@@ -171,8 +169,8 @@ export function realtimeCallRequest(
   }
 }
 
-async function voiceInstructions(): Promise<string> {
-  const soul = await fs.readFile(SOUL_PATH, "utf8").catch(() => "")
+async function voiceInstructions(homeDir: string): Promise<string> {
+  const soul = await fs.readFile(path.join(homeDir, "soul.md"), "utf8").catch(() => "")
   return [
     soul.trim(),
     "You are speaking live in a Discord voice channel with your owner.",
@@ -182,7 +180,12 @@ async function voiceInstructions(): Promise<string> {
   ].filter(Boolean).join("\n\n---\n\n")
 }
 
-async function createRealtimePeer(onOutputPacket: (packet: Buffer) => void, signal: AbortSignal): Promise<{
+async function createRealtimePeer(
+  onOutputPacket: (packet: Buffer) => void,
+  signal: AbortSignal,
+  options: DiscordVoiceServiceOptions,
+  voice: VoiceName,
+): Promise<{
   peer: RTCPeerConnection
   events: RTCDataChannel
   inputTrack: MediaStreamTrack
@@ -210,12 +213,12 @@ async function createRealtimePeer(onOutputPacket: (packet: Buffer) => void, sign
     if (!local?.sdp) throw new Error("WebRTC offer did not produce SDP")
 
     const request = realtimeCallRequest(
-      config.llm_bridge_url,
-      config.llm_bridge_api_key,
+      options.bridgeUrl,
+      options.bridgeApiKey,
       local.sdp,
-      config.discord.voice_model,
-      await voiceInstructions(),
-      config.discord.voice,
+      options.voiceModel,
+      await voiceInstructions(options.homeDir),
+      voice,
     )
     const response = await fetch(request.url, {
       ...request.init,
@@ -238,212 +241,263 @@ async function createRealtimePeer(onOutputPacket: (packet: Buffer) => void, sign
   }
 }
 
-async function closeSession(session: ActiveVoiceSession): Promise<void> {
-  if (session.closing) return
-  session.closing = true
-  if (activeSession === session) activeSession = null
-  session.stopOutput()
-  session.ownerAudio.destroy()
-  session.player.stop(true)
-  session.events.close()
-  pendingDelegations.clear()
-  session.inputTrack.stop()
-  session.connection.destroy()
-  if (!session.output.destroyed) session.output.destroy()
-  await session.peer.close().catch(() => {})
-}
+export function createDiscordVoiceService(options: DiscordVoiceServiceOptions): DiscordVoiceService {
+  let activeSession: ActiveVoiceSession | null = null
+  let pendingStartup: PendingStartup | null = null
+  let transition: Promise<void> = Promise.resolve()
+  const initialVoice = options.initialVoice.trim().toLowerCase()
+  if (!(SUPPORTED_VOICES as readonly string[]).includes(initialVoice)) throw new Error(`unsupported voice; choose one of ${SUPPORTED_VOICES.join(", ")}`)
+  let selectedVoice = initialVoice as VoiceName
+  let delegationCallback: ((event: UserMessage) => void) | null = null
+  let client: Client | null = null
+  const pendingDelegations = new Set<string>()
 
-function closeFailedSession(session: ActiveVoiceSession, reason: string): void {
-  if (session.closing) return
-  console.warn(`[discord voice] ${reason}`)
-  void closeSession(session).catch((error) => {
-    console.warn("[discord voice] teardown failed:", error instanceof Error ? error.message : String(error))
-  })
-}
+  function serialized<T>(operation: () => Promise<T>): Promise<T> {
+    const result = transition.then(operation, operation)
+    transition = result.then(() => undefined, () => undefined)
+    return result
+  }
 
-async function connectVoice(owner: GuildMember, channel: VoiceBasedChannel, signal: AbortSignal): Promise<ActiveVoiceSession> {
-  if (!config.discord.voice_enabled) throw new Error("Discord realtime voice is disabled")
-  if (!config.discord.owner_id) throw new Error("[discord].owner_id is not configured")
-  if (!config.llm_bridge_api_key) throw new Error("llm_bridge_api_key is not configured")
-  if (!channel.guild.voiceAdapterCreator) throw new Error("Discord voice adapter is unavailable")
+  function setClient(nextClient: Client | null): void {
+    client = nextClient
+  }
 
-  const connection = joinVoiceChannel({
-    channelId: channel.id,
-    guildId: channel.guild.id,
-    adapterCreator: channel.guild.voiceAdapterCreator,
-    selfDeaf: false,
-    selfMute: false,
-  })
+  function setDelegationCallback(callback: ((event: UserMessage) => void) | null): void {
+    delegationCallback = callback
+  }
 
-  let peer: RTCPeerConnection | null = null
-  let events: RTCDataChannel | null = null
-  let inputTrack: MediaStreamTrack | null = null
-  let ownerAudio: AudioReceiveStream | null = null
-  let output: PassThrough | null = null
-  let stopOutput = (): void => {}
+  async function closeSession(session: ActiveVoiceSession): Promise<void> {
+    if (session.closing) return
+    session.closing = true
+    if (activeSession === session) activeSession = null
+    session.stopOutput()
+    session.ownerAudio.destroy()
+    session.player.stop(true)
+    session.events.close()
+    pendingDelegations.clear()
+    session.inputTrack.stop()
+    session.connection.destroy()
+    if (!session.output.destroyed) session.output.destroy()
+    await session.peer.close().catch(() => {})
+  }
 
-  try {
-    await entersState(connection, VoiceConnectionStatus.Ready, AbortSignal.any([
-      signal,
-      AbortSignal.timeout(CONNECT_TIMEOUT_MS),
-    ]))
-    output = new PassThrough({ objectMode: true, highWaterMark: MAX_OUTPUT_PACKETS })
-    ;({ peer, events, inputTrack, stopOutput } = await createRealtimePeer((packet) => {
-      // Discord consumes one Opus packet every 20ms. Drop newest packets if its
-      // player falls two seconds behind rather than growing latency without bound.
-      if (!output!.destroyed && !output!.writableEnded && output!.writableLength < MAX_OUTPUT_PACKETS) {
-        output!.write(packet)
+  function closeFailedSession(session: ActiveVoiceSession, reason: string): void {
+    if (session.closing) return
+    console.warn(`[discord voice] ${reason}`)
+    void closeSession(session).catch((error) => {
+      console.warn("[discord voice] teardown failed:", error instanceof Error ? error.message : String(error))
+    })
+  }
+
+  async function connectVoice(owner: GuildMember, channel: VoiceBasedChannel, signal: AbortSignal): Promise<ActiveVoiceSession> {
+    if (!options.enabled) throw new Error("Discord realtime voice is disabled")
+    if (!options.ownerId) throw new Error("[discord].owner_id is not configured")
+    if (!options.bridgeApiKey) throw new Error("llm_bridge_api_key is not configured")
+    if (!channel.guild.voiceAdapterCreator) throw new Error("Discord voice adapter is unavailable")
+
+    const connection = joinVoiceChannel({
+      channelId: channel.id,
+      guildId: channel.guild.id,
+      adapterCreator: channel.guild.voiceAdapterCreator,
+      selfDeaf: false,
+      selfMute: false,
+    })
+
+    let peer: RTCPeerConnection | null = null
+    let events: RTCDataChannel | null = null
+    let inputTrack: MediaStreamTrack | null = null
+    let ownerAudio: AudioReceiveStream | null = null
+    let output: PassThrough | null = null
+    let stopOutput = (): void => {}
+
+    try {
+      await entersState(connection, VoiceConnectionStatus.Ready, AbortSignal.any([
+        signal,
+        AbortSignal.timeout(CONNECT_TIMEOUT_MS),
+      ]))
+      output = new PassThrough({ objectMode: true, highWaterMark: MAX_OUTPUT_PACKETS })
+      ;({ peer, events, inputTrack, stopOutput } = await createRealtimePeer((packet) => {
+        // Discord consumes one Opus packet every 20ms. Drop newest packets if its
+        // player falls two seconds behind rather than growing latency without bound.
+        if (!output!.destroyed && !output!.writableEnded && output!.writableLength < MAX_OUTPUT_PACKETS) {
+          output!.write(packet)
+        }
+      }, signal, options, selectedVoice))
+
+      const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } })
+      connection.subscribe(player)
+      player.play(createAudioResource(output, { inputType: StreamType.Opus, silencePaddingFrames: 1 }))
+
+      const packetizer = new OpusRtpPacketizer()
+      ownerAudio = connection.receiver.subscribe(owner.id, {
+        end: { behavior: EndBehaviorType.Manual },
+      })
+      ownerAudio.on("data", (packet: Buffer) => {
+        if (!inputTrack!.stopped) inputTrack!.writeRtp(packetizer.packetize(packet))
+      })
+
+      const session: ActiveVoiceSession = {
+        channel,
+        connection,
+        player,
+        peer,
+        events,
+        inputTrack,
+        ownerAudio,
+        output,
+        stopOutput,
+        closing: false,
+        stop: async (): Promise<void> => closeSession(session),
       }
-    }, signal))
 
-    const player = createAudioPlayer({ behaviors: { noSubscriber: NoSubscriberBehavior.Pause } })
-    connection.subscribe(player)
-    player.play(createAudioResource(output, { inputType: StreamType.Opus, silencePaddingFrames: 1 }))
-
-    const packetizer = new OpusRtpPacketizer()
-    ownerAudio = connection.receiver.subscribe(owner.id, {
-      end: { behavior: EndBehaviorType.Manual },
-    })
-    ownerAudio.on("data", (packet: Buffer) => {
-      if (!inputTrack!.stopped) inputTrack!.writeRtp(packetizer.packetize(packet))
-    })
-
-    const session: ActiveVoiceSession = {
-      channel,
-      connection,
-      player,
-      peer,
-      events,
-      inputTrack,
-      ownerAudio,
-      output,
-      stopOutput,
-      closing: false,
-      stop: async (): Promise<void> => closeSession(session),
-    }
-
-    output.on("error", (error) => closeFailedSession(session, `output stream error: ${error.message}`))
-    player.on("error", (error) => closeFailedSession(session, `playback error: ${error.message}`))
-    ownerAudio.on("error", (error) => closeFailedSession(session, `receive error: ${error.message}`))
-    connection.on(VoiceConnectionStatus.Disconnected, () => closeFailedSession(session, "Discord voice disconnected"))
-    connection.on(VoiceConnectionStatus.Destroyed, () => closeFailedSession(session, "Discord voice connection destroyed"))
-    peer.connectionStateChange.subscribe((state) => {
-      if (state === "failed" || state === "closed") closeFailedSession(session, `realtime peer ${state}`)
-    })
-    events.error.subscribe((error) => closeFailedSession(session, `realtime events error: ${error.message}`))
-    events.onMessage.subscribe((raw) => {
-      try {
-        const event = JSON.parse(Buffer.isBuffer(raw) ? raw.toString("utf8") : raw) as { type?: string; error?: { message?: string } }
-        const delegation = parseDelegationCreated(event)
-        if (delegation) {
-          pendingDelegations.add(delegation.id)
-          delegationCallback?.({
-            source: "voice",
-            triggeredAt: new Date().toISOString(),
-            content: `[voice delegation]
+      output.on("error", (error) => closeFailedSession(session, `output stream error: ${error.message}`))
+      player.on("error", (error) => closeFailedSession(session, `playback error: ${error.message}`))
+      ownerAudio.on("error", (error) => closeFailedSession(session, `receive error: ${error.message}`))
+      connection.on(VoiceConnectionStatus.Disconnected, () => closeFailedSession(session, "Discord voice disconnected"))
+      connection.on(VoiceConnectionStatus.Destroyed, () => closeFailedSession(session, "Discord voice connection destroyed"))
+      peer.connectionStateChange.subscribe((state) => {
+        if (state === "failed" || state === "closed") closeFailedSession(session, `realtime peer ${state}`)
+      })
+      events.error.subscribe((error) => closeFailedSession(session, `realtime events error: ${error.message}`))
+      events.onMessage.subscribe((raw) => {
+        try {
+          const event = JSON.parse(Buffer.isBuffer(raw) ? raw.toString("utf8") : raw) as { type?: string; error?: { message?: string } }
+          const delegation = parseDelegationCreated(event)
+          if (delegation) {
+            pendingDelegations.add(delegation.id)
+            const message = {
+              source: "voice",
+              triggeredAt: new Date().toISOString(),
+              content: `[voice delegation]
 delegation_id: ${delegation.id}
 transcript: ${delegation.transcript}
 
 Use the voice_reply tool with this delegation_id and an explicit spoken response. Never expose private reasoning; provide only the answer intended to be spoken.`,
-            raw: event,
-          } as UserMessage)
+              raw: event,
+            } as UserMessage
+            if (delegationCallback) delegationCallback(message)
+            else options.routeEvent?.(message)
+          }
+          if (event.type === "error") {
+            closeFailedSession(session, `realtime protocol error: ${event.error?.message ?? "unknown error"}`)
+          }
+        } catch {
+          // The media relay does not consume normal realtime events.
         }
-        if (event.type === "error") {
-          closeFailedSession(session, `realtime protocol error: ${event.error?.message ?? "unknown error"}`)
+      })
+
+      if (signal.aborted || session.closing) {
+        await closeSession(session)
+        throw signal.reason instanceof Error ? signal.reason : new Error("voice startup cancelled")
+      }
+      return session
+    } catch (error) {
+      pendingDelegations.clear()
+      stopOutput()
+      ownerAudio?.destroy()
+      output?.destroy()
+      events?.close()
+      inputTrack?.stop()
+      connection.destroy()
+      if (peer) await peer.close().catch(() => {})
+      throw error
+    }
+  }
+
+
+  async function joinOwnerVoice(owner: GuildMember): Promise<VoiceSessionStatus> {
+    pendingStartup?.controller.abort(new Error("voice startup superseded"))
+    const startup: PendingStartup = { controller: new AbortController() }
+    pendingStartup = startup
+
+    return serialized(async () => {
+      try {
+        const channel = owner.voice.channel
+        if (!channel) throw new Error("join a voice channel first")
+        if (activeSession?.channel.id === channel.id) return getVoiceSessionStatus()
+        if (startup.controller.signal.aborted) throw startup.controller.signal.reason
+        if (activeSession) await activeSession.stop()
+        const session = await connectVoice(owner, channel, startup.controller.signal)
+        if (startup.controller.signal.aborted || session.closing) {
+          await session.stop()
+          throw startup.controller.signal.reason ?? new Error("voice startup cancelled")
         }
-      } catch {
-        // The media relay does not consume normal realtime events.
+        activeSession = session
+        console.log(`[discord voice] joined guild=${channel.guild.id} channel=${channel.id} model=${options.voiceModel}`)
+        return getVoiceSessionStatus()
+      } finally {
+        if (pendingStartup === startup) pendingStartup = null
       }
     })
-
-    if (signal.aborted || session.closing) {
-      await closeSession(session)
-      throw signal.reason instanceof Error ? signal.reason : new Error("voice startup cancelled")
-    }
-    return session
-  } catch (error) {
-    pendingDelegations.clear()
-    stopOutput()
-    ownerAudio?.destroy()
-    output?.destroy()
-    events?.close()
-    inputTrack?.stop()
-    connection.destroy()
-    if (peer) await peer.close().catch(() => {})
-    throw error
   }
-}
 
-export async function joinOwnerVoice(owner: GuildMember): Promise<VoiceSessionStatus> {
-  pendingStartup?.controller.abort(new Error("voice startup superseded"))
-  const startup: PendingStartup = { controller: new AbortController() }
-  pendingStartup = startup
+  async function leaveVoice(): Promise<boolean> {
+    const cancelledStartup = pendingStartup !== null
+    pendingStartup?.controller.abort(new Error("voice startup cancelled"))
+    return serialized(async () => {
+      const session = activeSession
+      if (!session) return cancelledStartup
+      await session.stop()
+      console.log("[discord voice] left")
+      return true
+    })
+  }
 
-  return serialized(async () => {
-    try {
-      const channel = owner.voice.channel
-      if (!channel) throw new Error("join a voice channel first")
-      if (activeSession?.channel.id === channel.id) return getVoiceSessionStatus()
-      if (startup.controller.signal.aborted) throw startup.controller.signal.reason
-      if (activeSession) await activeSession.stop()
-      const session = await connectVoice(owner, channel, startup.controller.signal)
-      if (startup.controller.signal.aborted || session.closing) {
-        await session.stop()
-        throw startup.controller.signal.reason ?? new Error("voice startup cancelled")
-      }
-      activeSession = session
-      console.log(`[discord voice] joined guild=${channel.guild.id} channel=${channel.id} model=${config.discord.voice_model}`)
-      return getVoiceSessionStatus()
-    } finally {
-      if (pendingStartup === startup) pendingStartup = null
+  async function setVoice(voice: string): Promise<VoiceName> {
+    const selected = voice.trim().toLowerCase()
+    if (!(SUPPORTED_VOICES as readonly string[]).includes(selected)) throw new Error(`unsupported voice; choose one of ${SUPPORTED_VOICES.join(", ")}`)
+    selectedVoice = selected as VoiceName
+    if (activeSession && !activeSession.closing) {
+      const guild = client?.guilds.cache.get(activeSession.channel.guild.id) ?? activeSession.channel.guild
+      const owner = await guild.members.fetch(options.ownerId)
+      await leaveVoice()
+      await joinOwnerVoice(owner)
     }
-  })
-}
+    return selectedVoice
+  }
 
-export async function leaveVoice(): Promise<boolean> {
-  const cancelledStartup = pendingStartup !== null
-  pendingStartup?.controller.abort(new Error("voice startup cancelled"))
-  return serialized(async () => {
+  function getVoiceSessionStatus(): VoiceSessionStatus {
     const session = activeSession
-    if (!session) return cancelledStartup
-    await session.stop()
-    console.log("[discord voice] left")
-    return true
-  })
-}
-
-export async function setVoice(voice: string): Promise<VoiceName> {
-  const selected = voice.trim().toLowerCase()
-  if (!(SUPPORTED_VOICES as readonly string[]).includes(selected)) throw new Error(`unsupported voice; choose one of ${SUPPORTED_VOICES.join(", ")}`)
-  config.discord.voice = selected as VoiceName
-  if (activeSession && !activeSession.closing) {
-    const guild = activeSession.channel.guild
-    const owner = await guild.members.fetch(config.discord.owner_id)
-    await leaveVoice()
-    await joinOwnerVoice(owner)
+    return session && !session.closing
+      ? {
+          active: true,
+          channelId: session.channel.id,
+          channelName: session.channel.name,
+          guildId: session.channel.guild.id,
+          model: options.voiceModel,
+          voice: selectedVoice,
+        }
+      : { active: false, voice: selectedVoice }
   }
-  return selected as VoiceName
-}
 
-export function isVoiceChannelEmpty(channel: { members?: { values: () => Iterable<{ user?: { bot?: boolean } }> } } | null | undefined): boolean {
-  if (!channel?.members) return false
-  return [...channel.members.values()].every((member) => member.user?.bot === true)
-}
+  function sendVoiceReply(delegationId: string, inputText: string): { ok: boolean; error?: string; chunks?: number } {
+    if (!pendingDelegations.has(delegationId)) return { ok: false, error: "unknown or stale delegation id" }
+    if (!activeSession || activeSession.closing) return { ok: false, error: "voice session is not active" }
+    if (activeSession.events.readyState !== "open") return { ok: false, error: "voice events channel is not open" }
+    const content = String(inputText ?? "").trim()
+    if (!content) return { ok: false, error: "input_text is required" }
+    const messages = delegationReplyMessages(delegationId, content)
+    for (const message of messages) activeSession.events.send(message)
+    pendingDelegations.delete(delegationId)
+    return { ok: true, chunks: messages.length }
+  }
 
-export async function stopDiscordVoice(): Promise<void> {
-  await leaveVoice()
-}
+  async function stop(): Promise<void> {
+    setDelegationCallback(null)
+    client = null
+    await leaveVoice()
+  }
 
-export function getVoiceSessionStatus(): VoiceSessionStatus {
-  const session = activeSession
-  return session && !session.closing
-    ? {
-        active: true,
-        channelId: session.channel.id,
-        channelName: session.channel.name,
-        guildId: session.channel.guild.id,
-        model: config.discord.voice_model,
-        voice: config.discord.voice as VoiceName,
-      }
-    : { active: false, voice: config.discord.voice as VoiceName }
+  return {
+    supportedVoices: SUPPORTED_VOICES,
+    setClient,
+    setDelegationCallback,
+    joinOwnerVoice,
+    leaveVoice,
+    setVoice,
+    getVoiceSessionStatus,
+    isVoiceChannelEmpty,
+    stop,
+    sendVoiceReply,
+  }
 }

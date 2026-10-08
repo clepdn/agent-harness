@@ -1,95 +1,34 @@
-/**
- * Prometheus metrics exporter for nano/nano-runtime.
- *
- * Maintains lightweight in-memory counters and gauges, exposed via a
- * simple HTTP server in Prometheus text exposition format.
- *
- * Standard convention: serve on a dedicated port (default 9100).
- */
-
-import http from "http"
+import http from "node:http"
+import type { AddressInfo } from "node:net"
 import type { Usage } from "./llm"
-
-// ── Metric primitives ─────────────────────────────────────────────────────────
 
 interface CounterEntry {
   value: number
   labels: Record<string, string>
 }
-
 interface GaugeEntry {
   value: number
   labels: Record<string, string>
 }
 
-const counters = new Map<string, CounterEntry[]>()
-const gauges = new Map<string, GaugeEntry[]>()
 
-function labelKey(labels: Record<string, string>): string {
-  const keys = Object.keys(labels).sort()
-  if (keys.length === 0) return ""
-  return keys.map((k) => `${k}="${labels[k]}"`).join(",")
+export interface PrometheusScrapeSource {
+  render(): string
 }
 
-function findEntry<T extends { labels: Record<string, string> }>(
-  entries: T[],
-  labels: Record<string, string>,
-): T | undefined {
-  const key = labelKey(labels)
-  return entries.find((e) => labelKey(e.labels) === key)
+export interface PrometheusRegistry extends PrometheusScrapeSource {
+  readonly counters: Map<string, CounterEntry[]>
+  readonly gauges: Map<string, GaugeEntry[]>
+  readonly requestTimestamps: number[]
+  recordLlmRequest(model: string, outcome: "success" | "error", usage: Usage | null, tokensPerSecond?: number): void
+  setApiRequestsInWindow(count: number): void
+  setProviderUsageRatio(provider: string, model: string, ratio: number): void
+  setWorking(active: boolean): void
 }
 
-function incCounter(name: string, labels: Record<string, string> = {}, amount = 1): void {
-  let entries = counters.get(name)
-  if (!entries) {
-    entries = []
-    counters.set(name, entries)
-  }
-  let entry = findEntry(entries, labels)
-  if (!entry) {
-    entry = { value: 0, labels: { ...labels } }
-    entries.push(entry)
-  }
-  entry.value += amount
-}
-
-function setGauge(name: string, value: number, labels: Record<string, string> = {}): void {
-  let entries = gauges.get(name)
-  if (!entries) {
-    entries = []
-    gauges.set(name, entries)
-  }
-  let entry = findEntry(entries, labels)
-  if (!entry) {
-    entry = { value: 0, labels: { ...labels } }
-    entries.push(entry)
-  }
-  entry.value = value
-}
-
-// ── Sliding window request tracking ───────────────────────────────────────────
-
-const WINDOW_MS = 5 * 60 * 60 * 1000 // 5 hours
-const requestTimestamps: number[] = []
-
-function recordRequestTime(ts: number = Date.now()): void {
-  requestTimestamps.push(ts)
-  pruneRequestWindow(ts)
-}
-
-function pruneRequestWindow(now: number = Date.now()): number {
-  const cutoff = now - WINDOW_MS
-  while (requestTimestamps.length > 0 && requestTimestamps[0] < cutoff) {
-    requestTimestamps.shift()
-  }
-  return requestTimestamps.length
-}
-
-// ── Public API ────────────────────────────────────────────────────────────────
-
-const METRIC_HELP: Record<string, { help: string; type: string }> = {
+const METRIC_HELP: Record<string, { help: string; type: "counter" | "gauge" }> = {
   nano_llm_requests_total: { help: "Total LLM API requests", type: "counter" },
-  nano_llm_tokens_total: { help: "Total tokens used", type: "counter" },
+  nano_llm_tokens_total: { help: "Total LLM tokens by token type", type: "counter" },
   nano_llm_cost_total: { help: "Total cost in dollars", type: "counter" },
   nano_llm_tokens_per_second: { help: "Latest tokens per second", type: "gauge" },
   nano_requests_in_window_calculated: { help: "Requests in the rolling 5h window (our calculation)", type: "gauge" },
@@ -97,135 +36,173 @@ const METRIC_HELP: Record<string, { help: string; type: string }> = {
   nano_provider_usage_ratio: { help: "Fraction (0-1) of the provider's usage budget consumed, from the bridge /v1/usage endpoint", type: "gauge" },
   nano_working: { help: "1 if agent is actively in a tool loop, 0 if idle", type: "gauge" },
 }
+const WINDOW_MS = 5 * 60 * 60 * 1000
 
-/** Record an LLM API request completion with usage data. */
-export function recordLlmRequest(
-  model: string,
-  outcome: "success" | "error",
-  usage: Usage | null,
-  tokensPerSecond?: number,
-): void {
-  incCounter("nano_llm_requests_total", { model, outcome })
-  recordRequestTime()
-
-  if (usage) {
-    incCounter("nano_llm_tokens_total", { type: "input" }, usage.input)
-    incCounter("nano_llm_tokens_total", { type: "output" }, usage.output)
-    incCounter("nano_llm_tokens_total", { type: "cache_read" }, usage.cacheRead)
-    incCounter("nano_llm_tokens_total", { type: "cache_write" }, usage.cacheWrite)
-    incCounter("nano_llm_cost_total", {}, usage.cost.total)
-  }
-
-  if (tokensPerSecond !== undefined) {
-    setGauge("nano_llm_tokens_per_second", tokensPerSecond)
-  }
-
-  // Update calculated window count
-  setGauge("nano_requests_in_window_calculated", pruneRequestWindow())
+function labelKey(labels: Record<string, string>): string {
+  return Object.keys(labels).sort().map((key) => `${key}="${labels[key]}"`).join(",")
 }
 
-/** Set the API-reported requests in window (from umans /v1/usage). */
-export function setApiRequestsInWindow(count: number): void {
-  setGauge("nano_requests_in_window_api", count)
-}
-
-/**
- * Set the provider usage ratio (0-1 consumed) for a provider/model, sourced
- * from the bridge's normalized /v1/usage endpoint. Works across providers
- * (umans, codex, anthropic) since it's the provider-agnostic `percent`.
- */
-export function setProviderUsageRatio(provider: string, model: string, ratio: number): void {
-  setGauge("nano_provider_usage_ratio", ratio, { provider, model })
-}
-
-/** Set the working flag (1 = active tool loop, 0 = idle). */
-export function setPromWorking(active: boolean): void {
-  setGauge("nano_working", active ? 1 : 0)
-}
-
-// ── Exposition format ──────────────────────────────────────────────────────────
-
-function formatLabels(labels: Record<string, string>): string {
-  const keys = Object.keys(labels).sort()
-  if (keys.length === 0) return ""
-  return `{${keys.map((k) => `${k}="${labels[k]}"`).join(",")}}`
+function findEntry<T extends { labels: Record<string, string> }>(entries: T[], labels: Record<string, string>): T | undefined {
+  const key = labelKey(labels)
+  return entries.find((entry) => labelKey(entry.labels) === key)
 }
 
 function escapeLabelValue(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n")
 }
 
-function renderMetrics(): string {
-  const lines: string[] = []
-  const allNames = new Set<string>([...counters.keys(), ...gauges.keys()])
+function formatLabels(labels: Record<string, string>): string {
+  const keys = Object.keys(labels).sort()
+  if (keys.length === 0) return ""
+  return `{${keys.map((key) => `${key}="${escapeLabelValue(labels[key] ?? "")}"`).join(",")}}`
+}
 
-  for (const name of [...allNames].sort()) {
-    const meta = METRIC_HELP[name]
-    if (!meta) continue
-    lines.push(`# HELP ${name} ${meta.help}`)
-    lines.push(`# TYPE ${name} ${meta.type}`)
+function pruneRequestWindow(timestamps: number[], now = Date.now()): number {
+  const cutoff = now - WINDOW_MS
+  while (timestamps.length > 0 && timestamps[0]! < cutoff) timestamps.shift()
+  return timestamps.length
+}
 
-    const counterEntries = counters.get(name)
-    if (counterEntries) {
-      for (const entry of counterEntries) {
-        const safeLabels: Record<string, string> = {}
-        for (const [k, v] of Object.entries(entry.labels)) safeLabels[k] = escapeLabelValue(v)
-        lines.push(`${name}${formatLabels(safeLabels)} ${entry.value}`)
-      }
-    }
+export function createPrometheusRegistry(): PrometheusRegistry {
+  const counters = new Map<string, CounterEntry[]>()
+  const gauges = new Map<string, GaugeEntry[]>()
+  const requestTimestamps: number[] = []
 
-    const gaugeEntries = gauges.get(name)
-    if (gaugeEntries) {
-      for (const entry of gaugeEntries) {
-        const safeLabels: Record<string, string> = {}
-        for (const [k, v] of Object.entries(entry.labels)) safeLabels[k] = escapeLabelValue(v)
-        lines.push(`${name}${formatLabels(safeLabels)} ${entry.value}`)
-      }
-    }
+  const incCounter = (name: string, labels: Record<string, string> = {}, amount = 1): void => {
+    let entries = counters.get(name)
+    if (!entries) counters.set(name, (entries = []))
+    let entry = findEntry(entries, labels)
+    if (!entry) entries.push((entry = { value: 0, labels: { ...labels } }))
+    entry.value += amount
+  }
+  const setGauge = (name: string, value: number, labels: Record<string, string> = {}): void => {
+    let entries = gauges.get(name)
+    if (!entries) gauges.set(name, (entries = []))
+    let entry = findEntry(entries, labels)
+    if (!entry) entries.push((entry = { value: 0, labels: { ...labels } }))
+    entry.value = value
   }
 
-  return lines.join("\n") + "\n"
+  const registry: PrometheusRegistry = {
+    counters,
+    gauges,
+    requestTimestamps,
+    recordLlmRequest(model, outcome, usage, tokensPerSecond) {
+      incCounter("nano_llm_requests_total", { model, outcome })
+      requestTimestamps.push(Date.now())
+      if (usage) {
+        incCounter("nano_llm_tokens_total", { type: "input" }, usage.input)
+        incCounter("nano_llm_tokens_total", { type: "output" }, usage.output)
+        incCounter("nano_llm_tokens_total", { type: "cache_read" }, usage.cacheRead)
+        incCounter("nano_llm_tokens_total", { type: "cache_write" }, usage.cacheWrite)
+        incCounter("nano_llm_cost_total", {}, usage.cost.total)
+      }
+      if (tokensPerSecond !== undefined) setGauge("nano_llm_tokens_per_second", tokensPerSecond)
+      setGauge("nano_requests_in_window_calculated", pruneRequestWindow(requestTimestamps))
+    },
+    setApiRequestsInWindow(count) {
+      setGauge("nano_requests_in_window_api", count)
+    },
+    setProviderUsageRatio(provider, model, ratio) {
+      setGauge("nano_provider_usage_ratio", ratio, { provider, model })
+    },
+    setWorking(active) {
+      setGauge("nano_working", active ? 1 : 0)
+    },
+    render() {
+      setGauge("nano_requests_in_window_calculated", pruneRequestWindow(requestTimestamps))
+      const lines: string[] = []
+      const names = [...new Set([...counters.keys(), ...gauges.keys()])].sort()
+      for (const name of names) {
+        const metadata = METRIC_HELP[name]
+        if (!metadata) continue
+        lines.push(`# HELP ${name} ${metadata.help}`, `# TYPE ${name} ${metadata.type}`)
+        for (const entry of counters.get(name) ?? []) lines.push(`${name}${formatLabels(entry.labels)} ${entry.value}`)
+        for (const entry of gauges.get(name) ?? []) lines.push(`${name}${formatLabels(entry.labels)} ${entry.value}`)
+      }
+      return `${lines.join("\n")}\n`
+    },
+  }
+  return registry
 }
 
-// ── HTTP server ───────────────────────────────────────────────────────────────
-
-let server: http.Server | null = null
-
-export function startPrometheusServer(port: number = 9100): void {
-  if (server) return
-
-  server = http.createServer((req, res) => {
-    if (req.url === "/metrics") {
-      // Prune window on each scrape so stale entries don't inflate the count
-      setGauge("nano_requests_in_window_calculated", pruneRequestWindow())
-
-      res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" })
-      res.end(renderMetrics())
-      return
-    }
-
-    if (req.url === "/" || req.url === "/health") {
-      res.writeHead(200, { "Content-Type": "text/plain" })
-      res.end("nano prometheus exporter\n")
-      return
-    }
-
-    res.writeHead(404, { "Content-Type": "text/plain" })
-    res.end("not found\n")
-  })
-
-  server.listen(port, () => {
-    console.log(`[prometheus] exporter listening on :${port}/metrics`)
-  })
-
-  server.on("error", (err) => {
-    console.error(`[prometheus] server error:`, err)
-  })
+export interface PrometheusExporter {
+  start(): Promise<void>
+  close(): Promise<void>
+  address(): AddressInfo | string | null
 }
 
-export function stopPrometheusServer(): void {
-  if (server) {
-    server.close()
-    server = null
+export function createPrometheusExporter(registry: PrometheusScrapeSource, port = 9100, host = "127.0.0.1"): PrometheusExporter {
+  if (!Number.isInteger(port) || port < 0 || port > 65535) throw new RangeError("Prometheus port must be an integer from 0 to 65535")
+  let server: http.Server | undefined
+  let startPromise: Promise<void> | undefined
+  let closePromise: Promise<void> | undefined
+
+  const start = (): Promise<void> => {
+    if (startPromise) return startPromise
+    if (server?.listening) return Promise.resolve()
+    if (closePromise) return closePromise.then(start)
+
+    const current = http.createServer((req, res) => {
+      if (req.url === "/metrics") {
+        try {
+          res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" })
+          res.end(registry.render())
+        } catch (error) {
+          if (!res.headersSent) res.writeHead(500, { "Content-Type": "text/plain" })
+          res.end(`metrics render failed: ${error instanceof Error ? error.message : String(error)}\n`)
+        }
+        return
+      }
+      if (req.url === "/" || req.url === "/health") {
+        res.writeHead(200, { "Content-Type": "text/plain" })
+        res.end("nano prometheus exporter\n")
+        return
+      }
+      res.writeHead(404, { "Content-Type": "text/plain" })
+      res.end("not found\n")
+    })
+    server = current
+    startPromise = new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => {
+        current.off("listening", onListening)
+        if (server === current) server = undefined
+        startPromise = undefined
+        reject(error)
+      }
+      const onListening = (): void => {
+        current.off("error", onError)
+        startPromise = undefined
+        resolve()
+      }
+      current.once("error", onError)
+      current.once("listening", onListening)
+      current.listen(port, host)
+    })
+    return startPromise
+  }
+
+  const close = (): Promise<void> => {
+    if (closePromise) return closePromise
+    const waitForStart = startPromise?.catch(() => {}) ?? Promise.resolve()
+    closePromise = waitForStart.then(() => {
+      const current = server
+      server = undefined
+      if (!current || !current.listening) return
+      return new Promise<void>((resolve, reject) => {
+        current.close((error) => error ? reject(error) : resolve())
+      })
+    }).finally(() => {
+      closePromise = undefined
+    })
+    return closePromise
+  }
+
+  return {
+    start,
+    close,
+    address() {
+      return server?.address() ?? null
+    },
   }
 }

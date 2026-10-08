@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/config && npm run build --workspace @nano/protocol && npm run build --workspace @nano/chat-client && npm run build --workspace @nano/web",
-    "prestart": "npm run build --workspace @nano/harness-protocol && npm run build --workspace @nano/harness-core && npm run build --workspace @nano/harness-server && npm run build --workspace @nano/harness-client-node && npm run build --workspace @nano/config && npm run build --workspace @nano/protocol && npm run build --workspace @nano/chat-client && npm run build --workspace @nano/web",
+    "predev": "npm --prefix ../.. run build:packages && npm run build --workspace @nano/web",
+    "prestart": "npm --prefix ../.. run build:packages && npm run build --workspace @nano/web",
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "test": "node --import tsx --test 'src/**/*.test.ts'",
@@ -14,11 +14,15 @@
   "devDependencies": {
     "@types/node": "^25.5.0",
     "@types/better-sqlite3": "^7.6.13",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   },
   "dependencies": {
     "@fastify/static": "^9.1.3",
+    "@fastify/websocket": "^11.2.0",
+    "@nano/plugins": "*",
+    "@nano/runtime": "*",
     "@nano/protocol": "*",
     "@nano/config": "*",
     "better-sqlite3": "^12.8.0",

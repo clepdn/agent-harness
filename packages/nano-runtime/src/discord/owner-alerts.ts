@@ -2,31 +2,40 @@ import {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  type ButtonInteraction,
+  type InteractionReplyOptions,
+  type InteractionUpdateOptions,
   type MessageCreateOptions,
 } from "discord.js"
+import type Database from "better-sqlite3"
 import { config, redactSecrets } from "../config"
-import { getDb } from "../db"
 import type { ClassifiedApiError } from "../api-errors"
 
 const BUTTON_PREFIX = "owner-api-alert:mute:"
 const REPEAT_NOTIFICATION_MS = 6 * 60 * 60 * 1000
 const TRANSIENT_NOTIFICATION_THRESHOLD = 3
 
-type OwnerAlertSender = (payload: MessageCreateOptions) => Promise<void>
+export type OwnerAlertSender = (payload: MessageCreateOptions) => Promise<void>
 
 type AlertRow = {
   occurrence_count: number
   last_notified_at: string | null
   muted_at: string | null
 }
-
-let sender: OwnerAlertSender | null = null
-let queue = Promise.resolve()
-
-export function configureOwnerAlertSender(next: OwnerAlertSender | null): void {
-  sender = next
+export interface OwnerAlertButtonInteraction {
+  readonly customId: string
+  readonly user: { readonly id: string }
+  reply(options: InteractionReplyOptions): Promise<unknown>
+  update(options: InteractionUpdateOptions): Promise<unknown>
 }
+
+export interface DiscordOwnerAlerts {
+  setSender(next: OwnerAlertSender | null): void
+  reportApiError(db: Database.Database, error: ClassifiedApiError): Promise<void>
+  isButton(interaction: OwnerAlertButtonInteraction): boolean
+  handleButton(db: Database.Database, interaction: OwnerAlertButtonInteraction): Promise<void>
+  stop(): void
+}
+
 
 function safeSummary(text: string): string {
   return redactSecrets(text)
@@ -65,9 +74,8 @@ function shouldNotify(error: ClassifiedApiError, row: AlertRow, nowMs: number): 
   return nowMs - Date.parse(row.last_notified_at) >= REPEAT_NOTIFICATION_MS
 }
 
-async function recordAndNotify(error: ClassifiedApiError): Promise<void> {
+async function recordAndNotify(db: Database.Database, error: ClassifiedApiError, sender: OwnerAlertSender | null): Promise<void> {
   try {
-    const db = getDb()
     const now = new Date()
     const nowIso = now.toISOString()
     db.prepare(
@@ -85,7 +93,7 @@ async function recordAndNotify(error: ClassifiedApiError): Promise<void> {
        from owner_api_alerts where fingerprint = ?`,
     ).get(error.fingerprint) as AlertRow
 
-    if (!sender || !config.discord.owner_id || !shouldNotify(error, row, now.getTime())) return
+    if (!sender || !shouldNotify(error, row, now.getTime())) return
 
     await sender(alertPayload(error, row.occurrence_count))
     db.prepare(
@@ -96,45 +104,62 @@ async function recordAndNotify(error: ClassifiedApiError): Promise<void> {
   }
 }
 
-/** Records an API failure and queues a best-effort Discord notification. */
-export function reportApiError(error: ClassifiedApiError): Promise<void> {
-  const pending = queue.then(() => recordAndNotify(error))
-  queue = pending.catch(() => {})
-  return pending
-}
+export function createOwnerAlerts(options: { ownerId?: () => string } = {}): DiscordOwnerAlerts {
+  let sender: OwnerAlertSender | null = null
+  let queue = Promise.resolve()
+  let stopped = false
+  const ownerId = options.ownerId ?? (() => config.discord.owner_id)
 
-export function isOwnerAlertButton(interaction: ButtonInteraction): boolean {
-  return interaction.customId.startsWith(BUTTON_PREFIX)
-}
-
-export async function handleOwnerAlertButton(interaction: ButtonInteraction): Promise<void> {
-  if (interaction.user.id !== config.discord.owner_id) {
-    await interaction.reply({ content: "you are not authorized to mute this alert", ephemeral: true })
-    return
+  const setSender = (next: OwnerAlertSender | null): void => {
+    if (!stopped) sender = next
   }
 
-  const fingerprint = interaction.customId.slice(BUTTON_PREFIX.length)
-  if (!/^[a-f0-9]{64}$/.test(fingerprint)) {
-    await interaction.reply({ content: "invalid alert fingerprint", ephemeral: true })
-    return
+  const reportApiError = (db: Database.Database, error: ClassifiedApiError): Promise<void> => {
+    if (stopped) return Promise.resolve()
+    const pending = queue.then(() => recordAndNotify(db, error, sender))
+    queue = pending.catch(() => {})
+    return pending
   }
 
-  const now = new Date().toISOString()
-  const result = getDb().prepare(
-    `update owner_api_alerts set muted_at = ?, muted_by = ? where fingerprint = ?`,
-  ).run(now, interaction.user.id, fingerprint)
+  const isButton = (interaction: OwnerAlertButtonInteraction): boolean => interaction.customId.startsWith(BUTTON_PREFIX)
 
-  if (Number(result.changes ?? 0) === 0) {
-    await interaction.reply({ content: "this alert no longer exists", ephemeral: true })
-    return
+  const handleButton = async (db: Database.Database, interaction: OwnerAlertButtonInteraction): Promise<void> => {
+    if (interaction.user.id !== ownerId()) {
+      await interaction.reply({ content: "you are not authorized to mute this alert", ephemeral: true })
+      return
+    }
+
+    const fingerprint = interaction.customId.slice(BUTTON_PREFIX.length)
+    if (!/^[a-f0-9]{64}$/.test(fingerprint)) {
+      await interaction.reply({ content: "invalid alert fingerprint", ephemeral: true })
+      return
+    }
+
+    const now = new Date().toISOString()
+    const result = db.prepare(
+      `update owner_api_alerts set muted_at = ?, muted_by = ? where fingerprint = ?`,
+    ).run(now, interaction.user.id, fingerprint)
+
+    if (Number(result.changes ?? 0) === 0) {
+      await interaction.reply({ content: "this alert no longer exists", ephemeral: true })
+      return
+    }
+
+    const mutedButton = new ButtonBuilder()
+      .setCustomId(interaction.customId)
+      .setLabel("Muted forever")
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(true)
+    await interaction.update({
+      components: [new ActionRowBuilder<ButtonBuilder>().addComponents(mutedButton)],
+    })
   }
 
-  const mutedButton = new ButtonBuilder()
-    .setCustomId(interaction.customId)
-    .setLabel("Muted forever")
-    .setStyle(ButtonStyle.Secondary)
-    .setDisabled(true)
-  await interaction.update({
-    components: [new ActionRowBuilder<ButtonBuilder>().addComponents(mutedButton)],
-  })
+  return {
+    setSender,
+    reportApiError,
+    isButton,
+    handleButton,
+    stop: () => { stopped = true; sender = null; queue = Promise.resolve() },
+  }
 }

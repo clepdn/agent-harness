@@ -1,6 +1,6 @@
 import type { ImageContent, TextContent, ToolCall, ToolResultMessage } from "../llm"
 import type { Message } from "../types"
-import { TOOLS, isToolEnabled } from "./tools"
+import type { ToolDefinition } from "@nano/harness-core"
 import { enabledContextImages } from "../context-images"
 
 // ── Shared constants ──────────────────────────────────────────────────────────
@@ -52,14 +52,14 @@ export function findSummaryMessageIndex(messages: readonly Message[]): number {
  * Very rough tokenizer-agnostic estimate for prompt size guardrails.
  * Includes both messages and tool schema to mirror the actual completion payload.
  */
-export function estimatePromptTokens(messages: readonly Message[]): number {
+export function estimatePromptTokens(messages: readonly Message[], toolDefinitions: readonly ToolDefinition[] = []): number {
   let imageCount = 0
   const estimatedMessages = messages.map((message) => {
     if (message.role === "assistant") return message
     const { imageReferences, imageAttachments, imageNotes, imagesSuppressed, ...textMessage } = message
     return { ...textMessage, imageAttachments: enabledContextImages(message), imageNotes }
   })
-  const jsonChars = JSON.stringify({ messages: estimatedMessages, tools: TOOLS.filter((t) => isToolEnabled(t.name)) }, (_key, value) => {
+  const jsonChars = JSON.stringify({ messages: estimatedMessages, tools: toolDefinitions }, (_key, value) => {
     if (value?.type === "image" && typeof value.data === "string") {
       imageCount++
       return { ...value, data: "" }

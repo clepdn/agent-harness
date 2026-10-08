@@ -1,5 +1,5 @@
 import { randomInt } from "node:crypto"
-import { getDb } from "../db"
+import type Database from "better-sqlite3"
 
 const PLANTS = [
   "alder", "bamboo", "basil", "birch", "cactus", "cedar",
@@ -28,32 +28,14 @@ export type DiscordFriendlyIdRoute = {
   channelId: string
 }
 
-// These maps make the common generation and resolution paths constant-time.
-// SQLite's primary-key/unique constraints remain the cross-restart authority.
-const usedIds = new Set<string>()
-const routeByFriendlyId = new Map<string, DiscordFriendlyIdRoute>()
-const friendlyIdByMessageId = new Map<string, string>()
-
-function remember(route: DiscordFriendlyIdRoute): DiscordFriendlyIdRoute {
-  const priorId = friendlyIdByMessageId.get(route.messageId)
-  if (priorId && priorId !== route.friendlyId) routeByFriendlyId.delete(priorId)
-  usedIds.add(route.friendlyId)
-  routeByFriendlyId.set(route.friendlyId, route)
-  friendlyIdByMessageId.set(route.messageId, route.friendlyId)
-  return route
-}
-
-function allocateInMemory(messageId: string, channelId: string): string {
-  const cached = friendlyIdByMessageId.get(messageId)
-  if (cached) return cached
-  for (let attempt = 0; attempt < MAX_FRIENDLY_IDS; attempt += 1) {
-    const friendlyId = randomFriendlyId()
-    if (usedIds.has(friendlyId)) continue
-    remember({ friendlyId, messageId, channelId })
-    return friendlyId
+function rowToRoute(row: { friendly_id: string; message_id: string; channel_id: string }): DiscordFriendlyIdRoute {
+  return {
+    friendlyId: row.friendly_id,
+    messageId: row.message_id,
+    channelId: row.channel_id,
   }
-  throw new Error("Discord friendly id space exhausted")
 }
+
 
 function randomFriendlyId(): string {
   const plant = PLANTS[randomInt(PLANTS.length)]!
@@ -65,34 +47,17 @@ function randomFriendlyId(): string {
   return `${plant}-${OBJECTS[firstObjectIndex]}-${OBJECTS[secondObjectIndex]}`
 }
 
-function rowToRoute(row: { friendly_id: string; message_id: string; channel_id: string }): DiscordFriendlyIdRoute {
-  return {
-    friendlyId: row.friendly_id,
-    messageId: row.message_id,
-    channelId: row.channel_id,
-  }
-}
 
 /** Return the durable friendly id for a Discord message, allocating it once. */
-export function getOrCreateDiscordFriendlyId(messageId: string, channelId: string): string {
+export function getOrCreateDiscordFriendlyId(db: Database.Database, messageId: string, channelId: string): string {
   const safeMessageId = messageId.trim()
   const safeChannelId = channelId.trim()
   if (!safeMessageId || !safeChannelId) throw new Error("message_id and channel_id are required")
 
-  let db: ReturnType<typeof getDb>
-  try {
-    db = getDb()
-  } catch {
-    // Pure formatter tests and startup-adjacent callers can run before SQLite
-    // initialization. The same process-local uniqueness guarantees still apply.
-    return allocateInMemory(safeMessageId, safeChannelId)
-  }
   const existing = db.prepare(
     "select friendly_id, message_id, channel_id from discord_message_friendly_ids where message_id = ?",
   ).get(safeMessageId) as { friendly_id: string; message_id: string; channel_id: string } | undefined
-  if (existing) return remember(rowToRoute(existing)).friendlyId
-
-  const cachedId = friendlyIdByMessageId.get(safeMessageId)
+  if (existing) return existing.friendly_id
 
   const insert = db.prepare(
     `insert or ignore into discord_message_friendly_ids (friendly_id, message_id, channel_id, created_at)
@@ -100,62 +65,39 @@ export function getOrCreateDiscordFriendlyId(messageId: string, channelId: strin
   )
   const now = new Date().toISOString()
 
-  if (cachedId) {
-    const result = insert.run(cachedId, safeMessageId, safeChannelId, now)
-    if (result.changes === 1) return cachedId
-    const winner = db.prepare(
-      "select friendly_id, message_id, channel_id from discord_message_friendly_ids where message_id = ?",
-    ).get(safeMessageId) as { friendly_id: string; message_id: string; channel_id: string } | undefined
-    if (winner) return remember(rowToRoute(winner)).friendlyId
-    friendlyIdByMessageId.delete(safeMessageId)
-    routeByFriendlyId.delete(cachedId)
-  }
-
   for (let attempt = 0; attempt < MAX_FRIENDLY_IDS; attempt += 1) {
     const friendlyId = randomFriendlyId()
-    if (usedIds.has(friendlyId)) continue
-
     const result = insert.run(friendlyId, safeMessageId, safeChannelId, now)
-    if (result.changes === 1) {
-      remember({ friendlyId, messageId: safeMessageId, channelId: safeChannelId })
-      return friendlyId
-    }
+    if (result.changes === 1) return friendlyId
 
     // Another allocator may have won either uniqueness constraint.
     const winner = db.prepare(
       "select friendly_id, message_id, channel_id from discord_message_friendly_ids where message_id = ?",
     ).get(safeMessageId) as { friendly_id: string; message_id: string; channel_id: string } | undefined
-    if (winner) return remember(rowToRoute(winner)).friendlyId
-    usedIds.add(friendlyId)
+    if (winner) return winner.friendly_id
   }
 
   throw new Error("Discord friendly id space exhausted")
 }
 
 /** Resolve a model-visible friendly id to its exact Discord message and channel. */
-export function resolveDiscordFriendlyId(value: unknown): DiscordFriendlyIdRoute | null {
+export function resolveDiscordFriendlyId(db: Database.Database, value: unknown): DiscordFriendlyIdRoute | null {
   const friendlyId = String(value ?? "").trim().toLowerCase()
   if (!FRIENDLY_ID_PATTERN.test(friendlyId)) return null
 
-  const cached = routeByFriendlyId.get(friendlyId)
-  if (cached) return cached
-
-  let row: { friendly_id: string; message_id: string; channel_id: string } | undefined
-  try {
-    row = getDb().prepare(
-      "select friendly_id, message_id, channel_id from discord_message_friendly_ids where friendly_id = ?",
-    ).get(friendlyId) as { friendly_id: string; message_id: string; channel_id: string } | undefined
-  } catch {
-    return null
-  }
-  return row ? remember(rowToRoute(row)) : null
+  const row = db.prepare(
+    "select friendly_id, message_id, channel_id from discord_message_friendly_ids where friendly_id = ?",
+  ).get(friendlyId) as { friendly_id: string; message_id: string; channel_id: string } | undefined
+  return row ? rowToRoute(row) : null
 }
 
 /** Accept either a raw Discord channel snowflake or a friendly message id. */
-export function resolveDiscordChannelId(value: unknown): string {
+export function resolveDiscordChannelId(db: Database.Database, value: unknown): string {
   const raw = String(value ?? "").trim()
-  return resolveDiscordFriendlyId(raw)?.channelId ?? raw
+  return resolveDiscordFriendlyId(db, raw)?.channelId ?? raw
 }
+
+
 
 export const __friendlyIdTest = {
   plants: PLANTS,

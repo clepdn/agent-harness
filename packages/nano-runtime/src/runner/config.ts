@@ -1,16 +1,11 @@
-import { bridgeEffortCapabilities } from "../bridge-model-metadata"
-import type { Model } from "../llm"
+import type { Model, ModelEffortCapabilities } from "../llm"
 import { config } from "../config"
 import { idleCacheCompactionMs } from "../cache-policy"
 
 // ── Misc thresholds ───────────────────────────────────────────────────────────
 
-// These four are per-model preset options (like cache_lifetime_minutes). They
-// hold the initial value from the resolved primary preset; presets can override
-// them and they swap at runtime via modelState.* (see model-state.ts). Older
-// configs that still set them under [context] keep working: config.model.*
-// falls back to config.context.* during parse.
-export const CONTEXT_COMPACT_TRIGGER_TOKENS = config.model.compact_trigger_tokens
+// These values are fixed parsed configuration thresholds. Mutable per-model
+// settings are owned by the model plugin's generation-scoped state resource.
 export const RESPECT_PROMPT_CACHE = config.model.respect_prompt_cache
 export const COMPACTION_STRATEGY = config.model.compaction_strategy
 export const DEEP_ARCHIVE_ENABLED = config.model.deep_archive
@@ -24,6 +19,10 @@ export const TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT = Math.min(
   100,
   Math.max(0, config.context.tool_result_compaction_min_context_percent),
 )
+
+// Primary-model compaction threshold is parsed alongside the primary model config.
+export const CONTEXT_COMPACT_TRIGGER_TOKENS = config.model.compact_trigger_tokens
+
 
 export function meetsToolResultCompactionContextThreshold(
   contextSize: number,
@@ -77,6 +76,8 @@ export const isLikelyLocalBase = (baseUrl: string): boolean => {
 export const MODEL_PROVIDER = config.model.provider
 export const MODEL = config.model.model
 export const MODEL_BASE_URL = config.model.base_url
+export const PRIMARY_VISION = config.model.vision
+export const PRIMARY_NUDGE_ON_NO_TOOL = config.model.nudge_on_no_tool
 
 // ── Fallback model ────────────────────────────────────────────────────────────
 export const FALLBACK_PROVIDER = config.fallback.provider
@@ -90,7 +91,6 @@ export const FALLBACK_ENFORCE_CONTEXT_LIMIT = config.fallback.enforce_context_li
 // ── Summary model ─────────────────────────────────────────────────────────────
 export const SUMMARY_PROVIDER = config.summary.provider
 export const SUMMARY_MODEL = config.summary.model
-const SUMMARY_BASE_URL = config.summary.base_url
 
 // ── Tool choice ───────────────────────────────────────────────────────────────
 export const PRIMARY_TOOL_CHOICE = config.model.tool_choice
@@ -99,16 +99,6 @@ export const FALLBACK_TOOL_CHOICE = config.fallback.tool_choice
 // ── Thinking ──────────────────────────────────────────────────────────────────
 export const ENABLE_THINKING = config.model.enable_thinking
 export const THINKING_EFFORT = config.model.thinking_effort
-export const PRIMARY_VISION = config.model.vision
-export const PRIMARY_NUDGE_ON_NO_TOOL = config.model.nudge_on_no_tool
-
-// ── Extra headers ─────────────────────────────────────────────────────────────
-const fallbackHeaders: Record<string, string> = {}
-if (config.fallback.referer) fallbackHeaders["HTTP-Referer"] = config.fallback.referer
-if (config.fallback.title) fallbackHeaders["X-Title"] = config.fallback.title
-const summaryHeaders: Record<string, string> = {}
-if (config.summary.referer) summaryHeaders["HTTP-Referer"] = config.summary.referer
-if (config.summary.title) summaryHeaders["X-Title"] = config.summary.title
 
 // ── Model construction ────────────────────────────────────────────────────────
 
@@ -119,7 +109,8 @@ export function buildModel(
   headers?: Record<string, string>,
   contextWindowOverride?: number,
   explicitlyBridge = false,
-  apiKey?: string,
+  _apiKey?: string,
+  effortCapabilities?: ModelEffortCapabilities,
 ): Model | null {
   if (!modelId) return null
 
@@ -127,7 +118,6 @@ export function buildModel(
   const resolvedProvider = provider || (isLikelyLocalBase(baseUrl) ? "lm-studio" : "openai")
   const bridge = explicitlyBridge || (!!config.llm_bridge_url &&
     baseUrl.replace(/\/+$/, "") === config.llm_bridge_url.replace(/\/+$/, ""))
-  const effortCapabilities = bridgeEffortCapabilities(modelId, baseUrl, explicitlyBridge, apiKey)
   return {
     id: modelId,
     name: modelId,
@@ -145,12 +135,7 @@ export function buildModel(
   }
 }
 
-// Backwards-compat exports for code that references these directly
-// Backwards-compat exports for code that references these directly
-export const API_BASE = MODEL_BASE_URL || "(unknown)"
-export const FALLBACK_BASE = FALLBACK_BASE_URL
-export const SUMMARY_BASE = SUMMARY_BASE_URL
-
+// Model instances and credentials are owned by the model plugin generation.
 // ── Startup validation ────────────────────────────────────────────────────────
 if (!USE_FALLBACK && !MODEL) {
   throw new Error("[model].model is required unless the fallback is forced ([agent].env = \"local\").")
@@ -162,45 +147,6 @@ if (!USE_FALLBACK && !config.model.api_key) {
   throw new Error("[model].api_key is required. Place it in the secrets file.")
 }
 
-export const primaryModel: Model | null = USE_FALLBACK
-  ? null
-  : buildModel(MODEL_PROVIDER, MODEL, MODEL_BASE_URL || undefined, undefined, undefined, config.model.bridge, config.model.api_key)!
-
-export const fallbackModel: Model = (
-  buildModel(
-    FALLBACK_PROVIDER,
-    FALLBACK_MODEL,
-    FALLBACK_BASE_URL || undefined,
-    Object.keys(fallbackHeaders).length ? fallbackHeaders : undefined,
-    FALLBACK_BASE_URL ? FALLBACK_N_CTX : undefined,
-    config.fallback.bridge,
-    config.fallback.api_key
-  ) ?? {
-    id: FALLBACK_MODEL,
-    name: FALLBACK_MODEL,
-    api: "openai-completions" as const,
-    provider: "openai",
-    baseUrl: "http://localhost:1234/v1",
-    reasoning: false,
-    input: ["text" as const, "image" as const],
-    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: FALLBACK_N_CTX,
-    maxTokens: 4096,
-  }
-)
-
-export const summaryModel: Model | null =
-  SUMMARY_MODEL
-    ? buildModel(SUMMARY_PROVIDER, SUMMARY_MODEL, SUMMARY_BASE_URL || undefined, Object.keys(summaryHeaders).length ? summaryHeaders : undefined, undefined, config.summary.bridge, config.summary.api_key) ?? null
-    : null
-
-// API keys come from the secrets JSON. Empty string means "not configured" and
-// is treated as undefined so callers fall through to their no-key paths.
-export const PRIMARY_API_KEY: string | undefined = config.model.api_key || undefined
-export const FALLBACK_API_KEY: string | undefined = config.fallback.api_key || undefined
-export const SUMMARY_API_KEY: string | undefined = config.summary.api_key || undefined
-console.log(`[config] fallback=${FALLBACK_MODEL} provider=${fallbackModel.provider} @ ${fallbackModel.baseUrl}`)
-if (summaryModel) console.log(`[config] summary=${SUMMARY_MODEL} provider=${summaryModel.provider} @ ${summaryModel.baseUrl}`)
 console.log(`[config] env=${config.agent.env} use_fallback=${USE_FALLBACK}`)
 console.log(`[config] thinking=${ENABLE_THINKING}`)
 if (PRIMARY_IDLE_COMPACTION_MS > 0) console.log(`[config] idle_compaction=${PRIMARY_IDLE_COMPACTION_MS / 60_000}min`)

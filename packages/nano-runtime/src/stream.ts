@@ -1,46 +1,103 @@
 import type { StreamEvent } from "@nano/protocol"
-import { publishWorkerEvent } from "./awp/outbox"
 
 export type { StreamEvent }
 
-type Listener = (event: StreamEvent) => void
-
-const listeners = new Set<Listener>()
-const BUFFER_SIZE = 50
-const buffer: StreamEvent[] = []
-let activeConsoleText = false
-
-function endConsoleText(): void {
-  if (!activeConsoleText) return
-  process.stdout.write("\n")
-  activeConsoleText = false
+export interface RuntimeStreamService {
+  emit(event: StreamEvent): void
+  subscribe(listener: (event: StreamEvent) => void): () => void
+  subscribeLive(listener: (event: StreamEvent) => void): () => void
+  close(): void
 }
 
-export function emit(event: StreamEvent): void {
-  if (event.type === "text") {
-    if (!activeConsoleText) {
-      process.stdout.write("[nano] ")
-      activeConsoleText = true
-    }
-    process.stdout.write(event.text)
-  } else if (event.type === "thinking") {
-    if (!activeConsoleText) {
-      process.stdout.write("[thinking] ")
-      activeConsoleText = true
-    }
-    process.stdout.write(event.text)
-  } else {
-    endConsoleText()
-    if (event.type === "user") console.log(`[user/${event.source}] ${event.text}`)
+export function createStreamService(
+  publish: (event: StreamEvent) => void,
+  options: { bufferSize?: number; consoleOutput?: boolean } = {},
+): RuntimeStreamService {
+  const bufferSize = options.bufferSize ?? 50
+  if (!Number.isInteger(bufferSize) || bufferSize < 0) throw new RangeError("stream bufferSize must be a non-negative integer")
+  const buffer: StreamEvent[] = []
+  const listeners = new Set<(event: StreamEvent) => void>()
+  const consoleOutput = options.consoleOutput !== false
+  let activeConsoleText = false
+  let closed = false
+  const assertOpen = (): void => {
+    if (closed) throw new Error("Stream service is closed")
   }
-  buffer.push(event)
-  if (buffer.length > BUFFER_SIZE) buffer.shift()
-  publishWorkerEvent("stream.event", event)
-  for (const fn of listeners) fn(event)
-}
 
-export function subscribe(fn: Listener): () => void {
-  for (const event of buffer) fn(event)
-  listeners.add(fn)
-  return () => listeners.delete(fn)
+  const endConsoleText = (): void => {
+    if (!activeConsoleText) return
+    process.stdout.write("\n")
+    activeConsoleText = false
+  }
+
+  const service: RuntimeStreamService = {
+    emit(event) {
+      assertOpen()
+      if (consoleOutput) {
+        if (event.type === "text" || event.type === "thinking") {
+          const label = event.type === "text" ? "[nano] " : "[thinking] "
+          if (!activeConsoleText) {
+            process.stdout.write(label)
+            activeConsoleText = true
+          }
+          process.stdout.write(event.text)
+        } else {
+          endConsoleText()
+          if (event.type === "user") console.log(`[user/${event.source}] ${event.text}`)
+        }
+      }
+      if (bufferSize > 0) {
+        buffer.push(event)
+        if (buffer.length > bufferSize) buffer.shift()
+      }
+      try {
+        publish(event)
+      } catch (error) {
+        console.error("[stream] event publisher failed:", error)
+      }
+      for (const listener of listeners) {
+        try { listener(event) } catch (error) {
+          console.error("[stream] subscriber failed:", error)
+        }
+      }
+    },
+    subscribe(listener) {
+      assertOpen()
+      const snapshot = buffer.slice()
+      let replaying = true
+      const liveQueue: StreamEvent[] = []
+      const wrapped = (event: StreamEvent): void => {
+        if (replaying) liveQueue.push(event)
+        else listener(event)
+      }
+      listeners.add(wrapped)
+      try {
+        for (const event of snapshot) listener(event)
+      } catch (error) {
+        listeners.delete(wrapped)
+        console.error("[stream] replay subscriber failed:", error)
+        return () => {}
+      }
+      replaying = false
+      for (const event of liveQueue) {
+        try { listener(event) } catch (error) {
+          console.error("[stream] subscriber failed:", error)
+        }
+      }
+      return () => listeners.delete(wrapped)
+    },
+    subscribeLive(listener) {
+      assertOpen()
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    close() {
+      if (closed) return
+      closed = true
+      listeners.clear()
+      buffer.length = 0
+      endConsoleText()
+    },
+  }
+  return service
 }

@@ -1,3 +1,6 @@
+export { createRpcClient, RpcClientError } from "./rpc.js"
+export type { CreateRpcClientOptions, RpcClient, RpcCallOptions, RpcStreamOptions, RpcSocket, RpcSocketConstructor, RpcFetch } from "./rpc.js"
+
 import type { StreamEvent } from "@nano/protocol"
 
 export type { StreamEvent } from "@nano/protocol"

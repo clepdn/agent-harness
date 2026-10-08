@@ -1,26 +1,26 @@
 import assert from "node:assert/strict"
-import test from "node:test"
-import * as fs from "node:fs"
-import * as path from "node:path"
-import * as os from "node:os"
-import { initDb } from "../db"
-import { ingestDiscordEvent } from "./state"
+import test, { type TestContext } from "node:test"
 import { config } from "../config"
+import { createDatabase } from "../db"
+import { ingestDiscordEvent } from "./state"
 
-test("discord dm whitelist tests", () => {
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "nano-test-state-"))
-  const testDbPath = path.join(tempDir, "nano.db")
+function database(t: TestContext) {
+  const db = createDatabase(":memory:").db
+  t.after(() => db.close())
+  return db
+}
 
-  // The whitelist and bot identity are [discord] config, not environment.
-  const discord = config.discord as { dm_whitelist: string[]; bot_user_id: string; scan_channel_ids: string[] }
+test("discord dm whitelist tests", (t) => {
+  const db = database(t)
+
+  const discord = config.discord
   const originalWhitelist = discord.dm_whitelist
   const originalBotId = discord.bot_user_id
   const originalScanChannelIds = discord.scan_channel_ids
 
   try {
-    initDb(testDbPath)
-
     discord.bot_user_id = "930000000000000001"
+
 
     // 1. Whitelist not set - DM from userA should be ingested
     discord.dm_whitelist = []
@@ -37,7 +37,7 @@ test("discord dm whitelist tests", () => {
         type: 1,
       },
     }
-    const res1 = ingestDiscordEvent(dmFromUserA)
+    const res1 = ingestDiscordEvent(db, dmFromUserA)
     assert.equal(res1.stored, true, "Should store DM when whitelist is not set")
     assert.equal(res1.bucket, "dm")
 
@@ -56,7 +56,7 @@ test("discord dm whitelist tests", () => {
         type: 1,
       },
     }
-    const res2 = ingestDiscordEvent(dmFromUserA_2)
+    const res2 = ingestDiscordEvent(db, dmFromUserA_2)
     assert.equal(res2.stored, true, "Should store DM when user is whitelisted")
     assert.equal(res2.bucket, "dm")
 
@@ -74,7 +74,7 @@ test("discord dm whitelist tests", () => {
         type: 1,
       },
     }
-    const res3 = ingestDiscordEvent(dmFromUserC)
+    const res3 = ingestDiscordEvent(db, dmFromUserC)
     assert.equal(res3.stored, false, "Should not store DM when user is not whitelisted")
     assert.equal(res3.reason, "ignored DM: sender is not in [discord].dm_whitelist")
 
@@ -92,7 +92,7 @@ test("discord dm whitelist tests", () => {
         type: 1,
       },
     }
-    const res4 = ingestDiscordEvent(dmFromSelf)
+    const res4 = ingestDiscordEvent(db, dmFromSelf)
     assert.equal(res4.stored, true, "Should store self DM even if bot is not in whitelist")
     assert.equal(res4.isFromSelf, true)
 
@@ -113,7 +113,7 @@ test("discord dm whitelist tests", () => {
         guild_id: "940000000000000001",
       },
     }
-    const res5 = ingestDiscordEvent(channelMsgFromUserC)
+    const res5 = ingestDiscordEvent(db, channelMsgFromUserC)
     assert.equal(res5.stored, true, "Should store non-DM channel messages even if sender is not whitelisted")
     assert.equal(res5.configured, true, "Should classify configured channel messages for event-driven wakes")
 
@@ -121,10 +121,5 @@ test("discord dm whitelist tests", () => {
     discord.dm_whitelist = originalWhitelist
     discord.bot_user_id = originalBotId
     discord.scan_channel_ids = originalScanChannelIds
-    try {
-      fs.rmSync(tempDir, { recursive: true, force: true })
-    } catch {
-      // ignore
-    }
   }
 })

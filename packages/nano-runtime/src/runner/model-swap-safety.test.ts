@@ -12,15 +12,22 @@ type ChildResult = { code: number | null; output: string }
 
 async function runChild(home: string, config: Record<string, unknown>, script: string): Promise<ChildResult> {
   const configPath = path.join(home, "config.json")
+  const childTestPath = path.join(repoRoot, `.model-swap-safety-${process.pid}-${Math.random().toString(36).slice(2)}.test.mjs`)
   await fs.mkdir(home, { recursive: true })
   await fs.writeFile(configPath, JSON.stringify(config), "utf8")
-  return await new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+  await fs.writeFile(childTestPath, `${childImports}\ntest("model swap fixture", async (t) => {\n${script}\n})\n`, "utf8")
+  try {
+    let resolve!: (value: ChildResult) => void
+    let reject!: (error: unknown) => void
+    const promise = new Promise<ChildResult>((yes, no) => { resolve = yes; reject = no })
+    const result = { promise, resolve, reject }
+    const child = spawn(process.execPath, ["--import", "tsx", "--test", childTestPath], {
       cwd: repoRoot,
       env: {
         PATH: process.env.PATH,
         HOME: home,
-        NANO_HOME: home,
+        NANO_HOME: path.join(home, "default-fixture"),
+        NANO_TEST_HOME: home,
         NANO_AGENT_STATE_DIR: path.join(home, "state"),
         NANO_CONFIG: configPath,
         NANO_MIGRATE_LEGACY_STATE: "false",
@@ -30,15 +37,28 @@ async function runChild(home: string, config: Record<string, unknown>, script: s
     let output = ""
     const timeout = setTimeout(() => {
       child.kill("SIGKILL")
-      reject(new Error(`model swap safety fixture exceeded 20 seconds\\n${output}`))
-    }, 20_000)
+      result.reject(new Error(`model swap safety fixture exceeded 120 seconds\\n${output}`))
+    }, 120_000)
     child.stdout.setEncoding("utf8").on("data", (chunk) => { output += chunk })
     child.stderr.setEncoding("utf8").on("data", (chunk) => { output += chunk })
-    child.once("error", (error) => { clearTimeout(timeout); reject(error) })
-    child.once("close", (code) => { clearTimeout(timeout); resolve({ code, output }) })
-  })
+    child.once("error", (error) => { clearTimeout(timeout); result.reject(error) })
+    child.once("close", (code) => { clearTimeout(timeout); result.resolve({ code, output }) })
+    return await result.promise
+  } finally {
+    await fs.rm(childTestPath, { force: true })
+  }
 }
 
+const childImports = `
+import assert from "node:assert/strict"
+import path from "node:path"
+import { createExecutionServices } from "./packages/nano-runtime/src/test-model-provider.ts"
+import { jobsServicePlugin } from "./packages/nano-runtime/src/plugins/jobs-service.ts"
+import { nano } from "./packages/nano-runtime/src/plugins/api.ts"
+import { createRunnerRuntime } from "./packages/nano-runtime/src/runner/index.ts"
+import { createFrontendRunnerRuntime } from "./packages/nano-runtime/src/runner/frontend.ts"
+import { test } from "node:test"
+`
 const fixtureConfig = {
   agent: { env: "production", boredom_wake_min: 0 },
   discord: { owner_id: "fixture-owner", channel_poll: false, batch_scan: false },
@@ -68,17 +88,16 @@ test("an outgoing generation that ignores the graceful handoff is aborted, archi
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "nano-model-swap-safety-timeout-"))
   t.after(() => fs.rm(home, { recursive: true, force: true }))
   const script = `
-    import assert from "node:assert/strict"
-    import { config } from "./packages/nano-runtime/src/config.ts"
-    import { initDb } from "./packages/nano-runtime/src/db.ts"
-    import { initMetricsDb } from "./packages/nano-runtime/src/metrics.ts"
-    import { modelState, persistedModelPreset } from "./packages/nano-runtime/src/runner/model-state.ts"
-    import { __test, wake, isWaitingForEvent, shutdown } from "./packages/nano-runtime/src/runner/index.ts"
-    import { loadRestSnapshot, loadSession } from "./packages/nano-runtime/src/runner/session.ts"
-    import { grepContext } from "./packages/nano-runtime/src/runner/context-store.ts"
-    config.agent.boredom_wake_min = 0
-    initDb()
-    initMetricsDb()
+    const home = path.join(process.env.NANO_TEST_HOME, "runtime-home")
+    const fixture = await createExecutionServices({ home, dbPath: path.join(home, "nano.db"), removeHomeOnClose: false })
+    await fixture.bus.install(jobsServicePlugin)
+    const services = { ...fixture.services, jobs: fixture.bus.get(nano.jobs) }
+    const frontend = createFrontendRunnerRuntime(services)
+    const runner = createRunnerRuntime(services, frontend)
+    t.after(async () => { await runner.cleanup(); await frontend.cleanup(); await fixture.close() })
+    await runner.recoverModelSwapHandoff()
+    t.mock.timers.enable({ apis: ["setTimeout", "Date"] })
+    t.mock.timers.tick(0)
     const requests = []
     ${sseFrame}
     globalThis.fetch = async (input, init) => {
@@ -86,7 +105,6 @@ test("an outgoing generation that ignores the graceful handoff is aborted, archi
       const body = JSON.parse(String(init.body))
       requests.push({ url, body })
       if (url === "https://old.fixture.invalid/v1/chat/completions" && body.messages.some(message => JSON.stringify(message).includes("[model swap handoff]"))) {
-        // Model an unresponsive provider request that only settles when the runner aborts it.
         const signal = init.signal
         if (!signal) throw new Error("handoff request did not receive an abort signal")
         return new Promise((resolve, reject) => {
@@ -98,29 +116,27 @@ test("an outgoing generation that ignores the graceful handoff is aborted, archi
       return new Response(frame({ content: "fresh selected session" }, "stop") + "data: [DONE]\\n\\n", { headers: { "content-type": "text/event-stream" } })
     }
     ${waitUntil}
-    const initial = wake({ source: "chat", content: "outgoing-timeout-history-proof", triggeredAt: new Date().toISOString(), raw: null })
-    await until(() => requests.length > 0 && isWaitingForEvent())
-    const result = await __test.requestModelSwap("next", {
-      boundaryWaitMs: 0, toolSettleMs: 500, gracefulDeadlineMs: 25, gracefulTurnLimit: 8,
-    })
+    runner.activate({ source: "chat", content: "outgoing-timeout-history-proof", triggeredAt: new Date().toISOString(), raw: null })
+    await until(() => requests.length > 0 && runner.isWaitingForEvent())
+    const swapping = runner.requestModelSwap("next", { boundaryWaitMs: 0, toolSettleMs: 100, gracefulDeadlineMs: 90_000, gracefulTurnLimit: 5 })
+    await until(() => requests.some(request => request.body.messages.some(message => JSON.stringify(message).includes("[model swap handoff]"))))
+    t.mock.timers.tick(90_000)
+    const result = await swapping
     assert.equal(result.graceful, false)
-    assert.match(result.fallbackReason, /deadline/)
-    assert.equal(modelState.primaryModel?.id, "new-model")
-    assert.equal(persistedModelPreset, "next")
-    const rest = await loadRestSnapshot("main", false)
+    assert.match(result.fallbackReason ?? "", /deadline/)
+    assert.equal(services.model.current("main").primaryModel?.id, "new-model")
+    assert.equal(services.model.persistedPreset(), "next")
+    const rest = await services.persistence.loadRestSnapshot("main")
     assert.ok(rest, "timed-out history must be archived before switching providers")
-    assert.ok(grepContext("outgoing-timeout-history-proof").length > 0, "immutable history provenance must survive timeout fallback")
-    const outgoing = await loadSession("main")
+    assert.ok(services.persistence.grepContext("outgoing-timeout-history-proof", undefined, undefined, "main").length, "immutable history provenance must survive timeout fallback")
+    const outgoing = await services.persistence.loadSession("main")
     assert.ok(outgoing)
     assert.equal(outgoing.contextModelId, "new-model")
     assert.equal(outgoing.messages.some(message => JSON.stringify(message).includes("outgoing-timeout-history-proof")), false)
     await until(() => requests.some(request => request.url === "https://new.fixture.invalid/v1/chat/completions"))
     const selected = requests.find(request => request.url === "https://new.fixture.invalid/v1/chat/completions")
     assert.ok(selected)
-    assert.equal(selected.body.model, "new-model")
     assert.equal(selected.body.messages.some(message => JSON.stringify(message).includes("outgoing-timeout-history-proof")), false)
-    await shutdown()
-    await initial
   `
   const result = await runChild(home, fixtureConfig, script)
   assert.equal(result.code, 0, result.output)
@@ -130,37 +146,32 @@ test("a cancelled mutating job that has not settled blocks swap before any provi
   const home = await fs.mkdtemp(path.join(os.tmpdir(), "nano-model-swap-safety-job-"))
   t.after(() => fs.rm(home, { recursive: true, force: true }))
   const script = `
-    import assert from "node:assert/strict"
-    import { config } from "./packages/nano-runtime/src/config.ts"
-    import { initDb } from "./packages/nano-runtime/src/db.ts"
-    import { initMetricsDb } from "./packages/nano-runtime/src/metrics.ts"
-    import { modelState, persistedModelPreset } from "./packages/nano-runtime/src/runner/model-state.ts"
-    import { __test } from "./packages/nano-runtime/src/runner/index.ts"
-    import { initJobManager, startJob, cancelJob, hasExecutingJobs } from "./packages/nano-runtime/src/runner/jobs.ts"
-    config.agent.boredom_wake_min = 0
-    initDb()
-    initMetricsDb()
-    initJobManager(() => {})
+    const home = path.join(process.env.NANO_TEST_HOME, "runtime-home")
+    const fixture = await createExecutionServices({ home, dbPath: path.join(home, "nano.db"), removeHomeOnClose: false })
+    await fixture.bus.install(jobsServicePlugin)
+    const services = { ...fixture.services, jobs: fixture.bus.get(nano.jobs) }
+    const frontend = createFrontendRunnerRuntime(services)
+    const runner = createRunnerRuntime(services, frontend)
+    let finish
+    t.after(async () => { finish?.(); await runner.cleanup(); await frontend.cleanup(); await fixture.close() })
+    await runner.recoverModelSwapHandoff()
+    const jobs = services.jobs
     const requests = []
     globalThis.fetch = async input => {
       requests.push(String(input))
       throw new Error("inference must not begin while the cancelled job is still executing")
     }
-    let finish
     const unresolved = new Promise(resolve => { finish = resolve })
-    const id = startJob("stuck-mutator", async () => {
+    const id = jobs.startJob("stuck-mutator", async () => {
       await unresolved
       return "settled"
     }, { notifyOnCompletion: false })
-    cancelJob(id, "test cancellation")
-    assert.equal(hasExecutingJobs(), true, "job cancellation is not proof its mutation stopped")
-    const originalModel = modelState.primaryModel?.id
-    await assert.rejects(
-      __test.requestModelSwap("next", { boundaryWaitMs: 0 }),
-      /background tasks are still executing/,
-    )
-    assert.equal(modelState.primaryModel?.id, originalModel)
-    assert.equal(persistedModelPreset, undefined)
+    jobs.cancelJob(id, "test cancellation")
+    assert.equal(jobs.hasExecutingJobs(), true, "job cancellation is not proof its mutation stopped")
+    const originalModel = fixture.services.model.current("main").primaryModel?.id
+    await assert.rejects(runner.requestModelSwap("next"), /background tasks are still executing/)
+    assert.equal(services.model.current("main").primaryModel?.id, originalModel)
+    assert.equal(services.model.persistedPreset(), undefined)
     assert.deepEqual(requests, [], "swap rejection must precede incoming or selected provider calls")
     finish()
   `

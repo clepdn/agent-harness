@@ -16,17 +16,24 @@ test("searchMemory includes semantic-only vector candidates and recall accepts t
     import assert from "node:assert/strict"
     import path from "node:path"
 
-    const [{ initDb, getDb, isVecAvailable, MEMORY_EMBEDDING_DIMENSIONS }, { vectorParam }, search] =
+    const [{ createDatabase, MEMORY_EMBEDDING_DIMENSIONS }, { vectorParam }, search, { createAliasService }] =
       await Promise.all([
         import(${JSON.stringify(moduleUrl("./db.ts"))}),
         import(${JSON.stringify(moduleUrl("./memory/sync.ts"))}),
         import(${JSON.stringify(moduleUrl("./memory/search.ts"))}),
+        import(${JSON.stringify(moduleUrl("./memory/aliases.ts"))}),
       ])
 
-    initDb()
-    if (!isVecAvailable()) process.exit(0)
+    const opened = createDatabase(process.env.NANO_DB_PATH, process.env.NANO_HOME)
+    const db = opened.db
+    const runtime = search.createMemorySearch({
+      home: process.env.NANO_HOME,
+      db,
+      vecAvailable: opened.vecAvailable,
+      aliases: createAliasService({ home: process.env.NANO_HOME }),
+    })
+    if (!opened.vecAvailable) process.exit(0)
 
-    const db = getDb()
     const docPath = path.join(process.env.NANO_HOME, "memories", "journal", "2026-06-06.md")
     const documentId = Number(
       db
@@ -50,34 +57,23 @@ test("searchMemory includes semantic-only vector candidates and recall accepts t
           .run(documentId, longChunkText).lastInsertRowid
       })(),
     )
-
     const queryVector = Array.from({ length: MEMORY_EMBEDDING_DIMENSIONS }, (_, index) => (index === 0 ? 1 : 0))
     db
       .prepare("insert or replace into memory_chunk_vec(rowid, embedding) values (?, ?)")
       .run(BigInt(chunkId), vectorParam(queryVector))
 
-    const profile = await search.buildSearchProfile({
-      sender: null,
-      source: null,
-      body: "vector memory retrieval context",
-    })
-    const hits = await search.searchMemory(profile, {}, 1, 5, {
-      vector: queryVector,
-      chatterSimilarity: null,
-      recallIntentSimilarity: 1,
-    })
-
+    const profile = await runtime.buildSearchProfile({ sender: null, source: null, body: "vector memory retrieval context" })
+    const hits = await runtime.searchMemory(profile, {}, 1, 5, { vector: queryVector, chatterSimilarity: null, recallIntentSimilarity: 1 })
     assert.equal(hits[0]?.chunkId, chunkId)
     assert.ok((hits[0]?.semanticSimilarity ?? 0) > 0.99)
-    assert.equal(search.isRelevant(hits, profile), true)
-
-    const result = search.toMemorySearchResult(hits[0])
+    assert.equal(runtime.isRelevant(hits, profile), true)
+    const result = runtime.toMemorySearchResult(hits[0])
     assert.equal(result.id, \`memory:\${chunkId}\`)
     assert.equal(result.uri, "memory://journal/2026-06-06.md")
     assert.equal(result.documentHash, "0123456789012345678901234567890123456789")
     assert.ok(result.content.endsWith("semantic-tail-marker"))
     assert.equal(result.preview, result.content)
-    assert.ok(search.buildMemoryRecallMessage(hits).includes("semantic-tail-marker"))
+    assert.ok(runtime.buildMemoryRecallMessage(hits).includes("semantic-tail-marker"))
   `
 
   const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {

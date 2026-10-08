@@ -4,7 +4,7 @@
  * @module discord/db
  */
 
-import { getDb } from "../db"
+import type Database from "better-sqlite3"
 import {
   asString,
   configuredChannelIdSet,
@@ -20,8 +20,7 @@ import {
  *
  * @param record - Channel data to upsert.
  */
-export function upsertDiscordChannel(record: DiscordChannelRecord): void {
-  const db = getDb()
+export function upsertDiscordChannel(db: Database.Database, record: DiscordChannelRecord): void {
   const now = new Date().toISOString()
 
   db.prepare(
@@ -59,8 +58,7 @@ export function upsertDiscordChannel(record: DiscordChannelRecord): void {
  *
  * @param record - Message data to upsert.
  */
-export function upsertDiscordMessage(record: DiscordMessageRecord): void {
-  const db = getDb()
+export function upsertDiscordMessage(db: Database.Database, record: DiscordMessageRecord): void {
   const now = new Date().toISOString()
   if (db.prepare("select 1 from discord_memory_prunes where message_id = ?").get(record.messageId)) return
 
@@ -107,25 +105,23 @@ export function upsertDiscordMessage(record: DiscordMessageRecord): void {
 }
 
 /** Marks messages as submitted to a runner, regardless of delivery path. */
-export function markDiscordMessagesDispatched(messageIds: readonly string[]): void {
+export function markDiscordMessagesDispatched(db: Database.Database, messageIds: readonly string[]): void {
   const uniqueIds = [...new Set(messageIds.map((id) => id.trim()).filter(Boolean))]
   if (uniqueIds.length === 0) return
   const now = new Date().toISOString()
-  const update = getDb().prepare(
+  const update = db.prepare(
     "update discord_messages set dispatched_at = coalesce(dispatched_at, ?) where message_id = ?",
   )
-  getDb().transaction((ids: readonly string[]) => {
+  db.transaction((ids: readonly string[]) => {
     for (const id of ids) update.run(now, id)
   })(uniqueIds)
 }
 
 /** Returns whether a message has already been submitted through any delivery path. */
-export function isDiscordMessageDispatched(messageId: string | undefined): boolean {
+export function isDiscordMessageDispatched(db: Database.Database, messageId: string | undefined): boolean {
   const id = messageId?.trim()
   if (!id) return false
-  const row = getDb()
-    .prepare("select dispatched_at from discord_messages where message_id = ?")
-    .get(id) as { dispatched_at?: string | null } | undefined
+  const row = db.prepare<unknown[], { dispatched_at?: string | null }>("select dispatched_at from discord_messages where message_id = ?").get(id)
   return Boolean(row?.dispatched_at)
 }
 
@@ -135,8 +131,7 @@ export function isDiscordMessageDispatched(messageId: string | undefined): boole
  * @param messageId - Discord message id (also used as item id).
  * @param bucket - Inbox bucket (`"dm"` or `"mention"`).
  */
-export function upsertInboxItem(messageId: string, bucket: "dm" | "mention"): void {
-  const db = getDb()
+export function upsertInboxItem(db: Database.Database, messageId: string, bucket: "dm" | "mention"): void {
   const now = new Date().toISOString()
   if (db.prepare("select 1 from discord_memory_prunes where message_id = ?").get(messageId)) return
 
@@ -159,11 +154,8 @@ export function upsertInboxItem(messageId: string, bucket: "dm" | "mention"): vo
  * @param key - Meta key.
  * @returns Stored value or `null`.
  */
-export function getDiscordMeta(key: string): string | null {
-  const db = getDb()
-  const row = db
-    .prepare(`select value from discord_meta where key = ?`)
-    .get(key) as { value?: string } | undefined
+export function getDiscordMeta(db: Database.Database, key: string): string | null {
+  const row = db.prepare<unknown[], { value?: string }>(`select value from discord_meta where key = ?`).get(key)
   return row?.value ?? null
 }
 
@@ -173,8 +165,7 @@ export function getDiscordMeta(key: string): string | null {
  * @param key - Meta key.
  * @param value - Value to store.
  */
-export function setDiscordMeta(key: string, value: string): void {
-  const db = getDb()
+export function setDiscordMeta(db: Database.Database, key: string, value: string): void {
   const now = new Date().toISOString()
   db.prepare(
     `insert into discord_meta (key, value, updated_at)
@@ -192,11 +183,10 @@ export function setDiscordMeta(key: string, value: string): void {
  *
  * @param channelIds - Optional override channel ids.
  */
-export function ensureConfiguredChannelsMaterialized(channelIds?: string[] | string | null): void {
+export function ensureConfiguredChannelsMaterialized(db: Database.Database, channelIds?: string[] | string | null): void {
   const ids = parseChannelIds(channelIds)
   if (ids.length === 0) return
 
-  const db = getDb()
   const now = new Date().toISOString()
   const stmt = db.prepare(
     `insert into discord_channels (
@@ -222,10 +212,9 @@ export function ensureConfiguredChannelsMaterialized(channelIds?: string[] | str
  *   cooldown channels outside their active window, so they survive until then).
  * @returns Number of demoted rows.
  */
-export function autoDemoteStalePendingItems(staleMinutes: number, excludeChannelIds?: string[]): number {
+export function autoDemoteStalePendingItems(db: Database.Database, staleMinutes: number, excludeChannelIds?: string[]): number {
   if (staleMinutes <= 0) return 0
 
-  const db = getDb()
   const nowIso = new Date().toISOString()
   const cutoffIso = new Date(Date.now() - staleMinutes * 60_000).toISOString()
   const note = `auto-demoted after ${staleMinutes}m pending timeout`
@@ -260,8 +249,7 @@ export function autoDemoteStalePendingItems(staleMinutes: number, excludeChannel
  *
  * @returns Total number of repaired rows.
  */
-export function repairDiscordMessageChannelFlags(): number {
-  const db = getDb()
+export function repairDiscordMessageChannelFlags(db: Database.Database): number {
   const now = new Date().toISOString()
 
   const dmMessageResult = db.prepare(
@@ -440,7 +428,7 @@ export function extractEmbeddedReferencedMessage(rawJson: string): DiscordReplyC
  * @param rows - Messages with raw_json to scan for references.
  * @returns Map from message id to the reply target context.
  */
-export function buildReplyTargetContextMap(rows: Array<{ message_id: string; raw_json: string }>): Map<string, DiscordReplyContext> {
+export function buildReplyTargetContextMap(db: Database.Database, rows: Array<{ message_id: string; raw_json: string }>): Map<string, DiscordReplyContext> {
   const refsByMessage = new Map<string, { refId: string; embedded: DiscordReplyContext | null }>()
   for (const row of rows) {
     const refId = extractReferencedMessageId(row.raw_json)
@@ -450,15 +438,10 @@ export function buildReplyTargetContextMap(rows: Array<{ message_id: string; raw
   if (refsByMessage.size === 0) return new Map()
 
   const refIds = Array.from(new Set([...refsByMessage.values()].map((ref) => ref.refId)))
-  const db = getDb()
   const placeholders = refIds.map(() => "?").join(", ")
-  const targetRows = db
-    .prepare(
-      `select message_id, author_id, author_username, content
-       from discord_messages
-       where message_id in (${placeholders})`,
-    )
-    .all(...refIds) as DiscordReplyContext[]
+  const targetRows = db.prepare<unknown[], DiscordReplyContext>(`select message_id, author_id, author_username, content
+   from discord_messages
+   where message_id in (${placeholders})`).all(...refIds)
 
   const contextById = new Map<string, DiscordReplyContext>()
   for (const row of targetRows) {
@@ -487,11 +470,8 @@ export function buildReplyTargetContextMap(rows: Array<{ message_id: string; raw
  * @param messageId - Discord message id.
  * @returns `true` when the message is already stored.
  */
-export function messageExists(messageId: string): boolean {
-  const db = getDb()
-  const row = db
-    .prepare(`select 1 as present from discord_messages where message_id = ?`)
-    .get(messageId) as { present?: number } | undefined
+export function messageExists(db: Database.Database, messageId: string): boolean {
+  const row = db.prepare<unknown[], { present?: number }>(`select 1 as present from discord_messages where message_id = ?`).get(messageId)
   return Boolean(row)
 }
 
@@ -501,11 +481,8 @@ export function messageExists(messageId: string): boolean {
  * @param itemId - Inbox item id.
  * @returns Associated message id, or `null`.
  */
-export function getItemMessageId(itemId: string): string | null {
-  const db = getDb()
-  const row = db
-    .prepare(`select message_id from discord_items where item_id = ?`)
-    .get(itemId) as { message_id?: string } | undefined
+export function getItemMessageId(db: Database.Database, itemId: string): string | null {
+  const row = db.prepare<unknown[], { message_id?: string }>(`select message_id from discord_items where item_id = ?`).get(itemId)
   return row?.message_id?.trim() || null
 }
 
@@ -515,62 +492,16 @@ export function getItemMessageId(itemId: string): string | null {
  * @param itemId - Inbox item id.
  * @returns Channel id, or `null`.
  */
-export function getItemChannelId(itemId: string): string | null {
-  const db = getDb()
-  const row = db
-    .prepare(
-      `select m.channel_id
-       from discord_items i
-       join discord_messages m on m.message_id = i.message_id
-       where i.item_id = ?`,
-    )
-    .get(itemId) as { channel_id?: string } | undefined
+export function getItemChannelId(db: Database.Database, itemId: string): string | null {
+  const row = db.prepare<unknown[], { channel_id?: string }>(`select m.channel_id
+   from discord_items i
+   join discord_messages m on m.message_id = i.message_id
+   where i.item_id = ?`).get(itemId)
   return row?.channel_id?.trim() || null
 }
 
 // ── reads: inbox listing ───────────────────────────────────────────────
-
-/**
- * Queries inbox items joined with their messages, filtered by status.
- *
- * @param statusList - Statuses to include.
- * @param limit - Maximum rows.
- * @returns Raw inbox rows.
- */
-export function queryInboxItems(statusList: InboxStatus[], limit: number): unknown[] {
-  const db = getDb()
-  const placeholders = statusList.map(() => "?").join(", ")
-  return db
-    .prepare(
-      `select
-        i.item_id,
-        i.message_id,
-        i.bucket,
-        i.status,
-        i.action_taken,
-        i.decision_note,
-        i.first_seen_at,
-        i.last_seen_at,
-        m.channel_id,
-        m.guild_id,
-        m.author_id,
-        m.author_username,
-        m.content,
-        m.created_at,
-        m.is_dm,
-        m.mentions_bot
-       from discord_items i
-       join discord_messages m on m.message_id = i.message_id
-       where i.status in (${placeholders})
-       order by i.last_seen_at desc
-       limit ?`,
-    )
-    .all(...statusList, limit)
-}
-
-// ── reads: backread ────────────────────────────────────────────────────
-
-export type BackreadRow = {
+export type DiscordMessageRow = {
   message_id: string
   channel_id: string
   guild_id: string | null
@@ -581,6 +512,62 @@ export type BackreadRow = {
   is_dm: number
   mentions_bot: number
   is_from_bot: number
+}
+
+export type DiscordInboxRow = {
+  item_id: string
+  message_id: string
+  bucket: string
+  status: InboxStatus
+  action_taken: InboxAction
+  decision_note: string | null
+  first_seen_at: string
+  last_seen_at: string
+  channel_id: string
+  guild_id: string | null
+  author_id: string | null
+  author_username: string | null
+  content: string
+  created_at: string
+  is_dm: number
+  mentions_bot: number
+}
+
+/**
+ * Queries inbox items joined with their messages, filtered by status.
+ *
+ * @param statusList - Statuses to include.
+ * @param limit - Maximum rows.
+ * @returns Raw inbox rows.
+ */
+export function queryInboxItems(db: Database.Database, statusList: InboxStatus[], limit: number): DiscordInboxRow[] {
+  const placeholders = statusList.map(() => "?").join(", ")
+  return db.prepare<unknown[], DiscordInboxRow>(`select
+    i.item_id,
+    i.message_id,
+    i.bucket,
+    i.status,
+    i.action_taken,
+    i.decision_note,
+    i.first_seen_at,
+    i.last_seen_at,
+    m.channel_id,
+    m.guild_id,
+    m.author_id,
+    m.author_username,
+    m.content,
+    m.created_at,
+    m.is_dm,
+    m.mentions_bot
+   from discord_items i
+   join discord_messages m on m.message_id = i.message_id
+   where i.status in (${placeholders})
+   order by i.last_seen_at desc
+   limit ?`).all(...statusList, limit)
+}
+
+// ── reads: backread ────────────────────────────────────────────────────
+export type BackreadRow = DiscordMessageRow & {
   raw_json: string
 }
 
@@ -592,29 +579,24 @@ export type BackreadRow = {
  * @param limit - Maximum rows.
  * @returns Message rows.
  */
-export function queryChannelMessages(channelId: string, before: string, limit: number): BackreadRow[] {
-  const db = getDb()
-  return db
-    .prepare(
-      `select
-        message_id,
-        channel_id,
-        guild_id,
-        author_id,
-        author_username,
-        content,
-        created_at,
-        is_dm,
-        mentions_bot,
-        is_from_bot,
-        raw_json
-       from discord_messages
-       where channel_id = ?
-         and (? = '' or cast(message_id as integer) < cast(? as integer))
-       order by cast(message_id as integer) desc
-       limit ?`,
-    )
-    .all(channelId, before, before, limit) as BackreadRow[]
+export function queryChannelMessages(db: Database.Database, channelId: string, before: string, limit: number): BackreadRow[] {
+  return db.prepare<unknown[], BackreadRow>(`select
+    message_id,
+    channel_id,
+    guild_id,
+    author_id,
+    author_username,
+    content,
+    created_at,
+    is_dm,
+    mentions_bot,
+    is_from_bot,
+    raw_json
+   from discord_messages
+   where channel_id = ?
+     and (? = '' or cast(message_id as integer) < cast(? as integer))
+   order by cast(message_id as integer) desc
+   limit ?`).all(channelId, before, before, limit)
 }
 
 // ── writes: mark ───────────────────────────────────────────────────────
@@ -627,8 +609,7 @@ export function queryChannelMessages(channelId: string, before: string, limit: n
  * @param action - Action taken.
  * @param note - Decision note (or `null`).
  */
-export function updateInboxItem(itemId: string, status: InboxStatus, action: InboxAction, note: string | null): void {
-  const db = getDb()
+export function updateInboxItem(db: Database.Database, itemId: string, status: InboxStatus, action: InboxAction, note: string | null): void {
   const now = new Date().toISOString()
   db.prepare(
     `update discord_items
@@ -639,40 +620,50 @@ export function updateInboxItem(itemId: string, status: InboxStatus, action: Inb
 
 // ── reads: channels ────────────────────────────────────────────────────
 
+export type DiscordChannelRow = {
+  channel_id: string
+  configured: number
+  guild_id: string | null
+  guild_name: string | null
+  channel_name: string | null
+  channel_type: number | null
+  is_dm: number
+  topic: string | null
+  note: string | null
+  last_note_at: string | null
+  last_seen_at: string
+}
+
+
 /**
  * Lists configured and active DM channels.
  *
  * @param configuredIds - Resolved configured channel ids.
  * @returns Channel rows.
  */
-export function queryChannels(configuredIds: string[]): unknown[] {
-  const db = getDb()
+export function queryChannels(db: Database.Database, configuredIds: string[]): DiscordChannelRow[] {
   const configuredPlaceholders = configuredIds.map(() => "?").join(", ")
   const configuredClause = configuredIds.length > 0 ? `channel_id in (${configuredPlaceholders})` : "0"
 
-  return db
-    .prepare(
-      `select
-        channel_id,
-        configured,
-        guild_id,
-        guild_name,
-        channel_name,
-        channel_type,
-        is_dm,
-        topic,
-        note,
-        last_note_at,
-        last_seen_at
-       from discord_channels
-       where ${configuredClause}
-          or exists (
-            select 1 from discord_messages m
-            where m.channel_id = discord_channels.channel_id
-          )
-       order by last_seen_at desc, configured desc, coalesce(guild_name, ''), coalesce(channel_name, channel_id)`,
-    )
-    .all(...configuredIds)
+  return db.prepare<unknown[], DiscordChannelRow>(`select
+    channel_id,
+    configured,
+    guild_id,
+    guild_name,
+    channel_name,
+    channel_type,
+    is_dm,
+    topic,
+    note,
+    last_note_at,
+    last_seen_at
+   from discord_channels
+   where ${configuredClause}
+      or exists (
+        select 1 from discord_messages m
+        where m.channel_id = discord_channels.channel_id
+      )
+   order by last_seen_at desc, configured desc, coalesce(guild_name, ''), coalesce(channel_name, channel_id)`).all(...configuredIds)
 }
 
 // ── writes: channel note ───────────────────────────────────────────────
@@ -683,8 +674,7 @@ export function queryChannels(configuredIds: string[]): unknown[] {
  * @param channelId - Channel id.
  * @param note - Note text or `null` to clear.
  */
-export function updateChannelNote(channelId: string, note: string | null): void {
-  const db = getDb()
+export function updateChannelNote(db: Database.Database, channelId: string, note: string | null): void {
   const now = new Date().toISOString()
   db.prepare(
     `update discord_channels
@@ -699,15 +689,11 @@ export function updateChannelNote(channelId: string, note: string | null): void 
  * @param channelId - Channel id.
  * @returns Channel row.
  */
-export function getChannelRow(channelId: string): Record<string, unknown> | undefined {
-  const db = getDb()
-  return db
-    .prepare(
-      `select channel_id, configured, guild_id, guild_name, channel_name, note, last_note_at
-       from discord_channels
-       where channel_id = ?`,
-    )
-    .get(channelId) as Record<string, unknown> | undefined
+export function getChannelRow(db: Database.Database, channelId: string): DiscordChannelRow | undefined {
+  return db.prepare<unknown[], DiscordChannelRow>(`select channel_id, configured, guild_id, guild_name, channel_name, note, last_note_at,
+          is_dm, topic, channel_type, last_seen_at
+   from discord_channels
+   where channel_id = ?`).get(channelId)
 }
 
 // ── reads: batch digest ────────────────────────────────────────────────
@@ -750,43 +736,38 @@ export type BatchPendingRow = {
  * @param opts - Query parameters.
  * @returns Message rows (may be one more than `limit` for truncation detection).
  */
-export function queryBatchMessages(opts: {
+export function queryBatchMessages(db: Database.Database, opts: {
   botUserId: string
   from: string
   configuredIds: string[]
   channelScopeClause: string
   limit: number
 }): BatchMessageRow[] {
-  const db = getDb()
-  return db
-    .prepare(
-      `select
-         i.item_id,
-         m.message_id,
-         m.channel_id,
-         m.guild_id,
-         m.author_username,
-         m.content,
-         m.created_at,
-         m.first_seen_at,
-         m.is_dm,
-         m.raw_json,
-         c.guild_name,
-         c.channel_name,
-         p.pronouns
-       from discord_messages m
-       left join discord_channels c on c.channel_id = m.channel_id
-       left join discord_items i on i.message_id = m.message_id
-       left join discord_user_pronouns p on p.user_id = m.author_id
-       where (? = '' or coalesce(m.author_id, '') != ?)
-         and m.first_seen_at > ?
-         and m.dispatched_at is null
-         and (i.message_id is null or i.status = 'pending')
-         ${opts.channelScopeClause}
-       order by m.first_seen_at asc
-       limit ?`,
-    )
-    .all(opts.botUserId, opts.botUserId, opts.from, ...opts.configuredIds, opts.limit) as BatchMessageRow[]
+  return db.prepare<unknown[], BatchMessageRow>(`select
+     i.item_id,
+     m.message_id,
+     m.channel_id,
+     m.guild_id,
+     m.author_username,
+     m.content,
+     m.created_at,
+     m.first_seen_at,
+     m.is_dm,
+     m.raw_json,
+     c.guild_name,
+     c.channel_name,
+     p.pronouns
+   from discord_messages m
+   left join discord_channels c on c.channel_id = m.channel_id
+   left join discord_items i on i.message_id = m.message_id
+   left join discord_user_pronouns p on p.user_id = m.author_id
+   where (? = '' or coalesce(m.author_id, '') != ?)
+     and m.first_seen_at > ?
+     and m.dispatched_at is null
+     and (i.message_id is null or i.status = 'pending')
+     ${opts.channelScopeClause}
+   order by m.first_seen_at asc
+   limit ?`).all(opts.botUserId, opts.botUserId, opts.from, ...opts.configuredIds, opts.limit)
 }
 
 /**
@@ -795,24 +776,19 @@ export function queryBatchMessages(opts: {
  * @param opts - Query parameters.
  * @returns Pending count.
  */
-export function countPendingInbox(opts: {
+export function countPendingInbox(db: Database.Database, opts: {
   botUserId: string
   configuredIds: string[]
   channelScopeClause: string
 }): number {
-  const db = getDb()
-  const row = db
-    .prepare(
-      `select count(*) as count
-       from discord_items i
-       join discord_messages m on m.message_id = i.message_id
-       left join discord_channels c on c.channel_id = m.channel_id
-       where i.status = 'pending'
-       and (? = '' or coalesce(m.author_id, '') != ?)
-       and m.dispatched_at is null
-       ${opts.channelScopeClause}`,
-    )
-    .get(opts.botUserId, opts.botUserId, ...opts.configuredIds) as { count?: number } | undefined
+  const row = db.prepare<unknown[], { count?: number }>(`select count(*) as count
+   from discord_items i
+   join discord_messages m on m.message_id = i.message_id
+   left join discord_channels c on c.channel_id = m.channel_id
+   where i.status = 'pending'
+   and (? = '' or coalesce(m.author_id, '') != ?)
+   and m.dispatched_at is null
+   ${opts.channelScopeClause}`).get(opts.botUserId, opts.botUserId, ...opts.configuredIds)
   return row?.count ?? 0
 }
 
@@ -822,41 +798,36 @@ export function countPendingInbox(opts: {
  * @param opts - Query parameters.
  * @returns Pending item rows.
  */
-export function queryBatchPendingPreview(opts: {
+export function queryBatchPendingPreview(db: Database.Database, opts: {
   botUserId: string
   configuredIds: string[]
   channelScopeClause: string
   limit: number
 }): BatchPendingRow[] {
-  const db = getDb()
-  return db
-    .prepare(
-      `select
-         i.item_id,
-         i.bucket,
-         m.channel_id,
-         m.guild_id,
-         m.author_username,
-         m.content,
-         m.created_at,
-         m.is_dm,
-         m.message_id,
-         m.raw_json,
-         c.guild_name,
-         c.channel_name,
-         p.pronouns
-       from discord_items i
-       join discord_messages m on m.message_id = i.message_id
-       left join discord_channels c on c.channel_id = m.channel_id
-       left join discord_user_pronouns p on p.user_id = m.author_id
-       where i.status = 'pending'
-         and (? = '' or coalesce(m.author_id, '') != ?)
-         and m.dispatched_at is null
-         ${opts.channelScopeClause}
-       order by i.last_seen_at desc
-       limit ?`,
-    )
-    .all(opts.botUserId, opts.botUserId, ...opts.configuredIds, opts.limit) as BatchPendingRow[]
+  return db.prepare<unknown[], BatchPendingRow>(`select
+     i.item_id,
+     i.bucket,
+     m.channel_id,
+     m.guild_id,
+     m.author_username,
+     m.content,
+     m.created_at,
+     m.is_dm,
+     m.message_id,
+     m.raw_json,
+     c.guild_name,
+     c.channel_name,
+     p.pronouns
+   from discord_items i
+   join discord_messages m on m.message_id = i.message_id
+   left join discord_channels c on c.channel_id = m.channel_id
+   left join discord_user_pronouns p on p.user_id = m.author_id
+   where i.status = 'pending'
+     and (? = '' or coalesce(m.author_id, '') != ?)
+     and m.dispatched_at is null
+     ${opts.channelScopeClause}
+   order by i.last_seen_at desc
+   limit ?`).all(opts.botUserId, opts.botUserId, ...opts.configuredIds, opts.limit)
 }
 
 // ── reads: reference resolution ────────────────────────────────────────
@@ -867,8 +838,7 @@ export function queryBatchPendingPreview(opts: {
  * @param messageId - Discord message id.
  * @returns `true` when found.
  */
-export function messageExistsById(messageId: string): boolean {
-  const db = getDb()
+export function messageExistsById(db: Database.Database, messageId: string): boolean {
   return Boolean(db.prepare(`select 1 from discord_messages where message_id = ?`).get(messageId))
 }
 
@@ -879,30 +849,20 @@ export function messageExistsById(messageId: string): boolean {
  * @param contentPattern - SQL LIKE pattern.
  * @returns Message id or `null`.
  */
-export function findMessageByContent(channelId: string, contentPattern: string): string | null {
-  const db = getDb()
-  const row = db
-    .prepare(
-      `select message_id from discord_messages
-       where channel_id = ? and content like ? and is_from_bot = 0
-       order by cast(message_id as integer) desc limit 1`,
-    )
-    .get(channelId, contentPattern) as { message_id?: string } | undefined
+export function findMessageByContent(db: Database.Database, channelId: string, contentPattern: string): string | null {
+  const row = db.prepare<unknown[], { message_id?: string }>(`select message_id from discord_messages
+   where channel_id = ? and content like ? and is_from_bot = 0
+   order by cast(message_id as integer) desc limit 1`).get(channelId, contentPattern)
   return row?.message_id ?? null
 }
 
 /** Finds the newest non-bot message whose content starts with the given text. */
-export function findMessageByContentPrefix(channelId: string, prefix: string): string | null {
-  const db = getDb()
-  const row = db
-    .prepare(
-      `select message_id from discord_messages
-       where channel_id = ?
-         and substr(trim(content), 1, length(?)) = ? collate nocase
-         and is_from_bot = 0
-       order by cast(message_id as integer) desc limit 1`,
-    )
-    .get(channelId, prefix.trim(), prefix.trim()) as { message_id?: string } | undefined
+export function findMessageByContentPrefix(db: Database.Database, channelId: string, prefix: string): string | null {
+  const row = db.prepare<unknown[], { message_id?: string }>(`select message_id from discord_messages
+   where channel_id = ?
+     and substr(trim(content), 1, length(?)) = ? collate nocase
+     and is_from_bot = 0
+   order by cast(message_id as integer) desc limit 1`).get(channelId, prefix.trim(), prefix.trim())
   return row?.message_id ?? null
 }
 
@@ -913,15 +873,10 @@ export function findMessageByContentPrefix(channelId: string, prefix: string): s
  * @param usernamePattern - SQL LIKE pattern.
  * @returns Message id or `null`.
  */
-export function findMessageByUsername(channelId: string, usernamePattern: string): string | null {
-  const db = getDb()
-  const row = db
-    .prepare(
-      `select message_id from discord_messages
-       where channel_id = ? and author_username like ? and is_from_bot = 0
-       order by cast(message_id as integer) desc limit 1`,
-    )
-    .get(channelId, usernamePattern) as { message_id?: string } | undefined
+export function findMessageByUsername(db: Database.Database, channelId: string, usernamePattern: string): string | null {
+  const row = db.prepare<unknown[], { message_id?: string }>(`select message_id from discord_messages
+   where channel_id = ? and author_username like ? and is_from_bot = 0
+   order by cast(message_id as integer) desc limit 1`).get(channelId, usernamePattern)
   return row?.message_id ?? null
 }
 
@@ -931,42 +886,34 @@ export function findMessageByUsername(channelId: string, usernamePattern: string
  * @param messageId - Discord message id.
  * @returns Message row or `undefined`.
  */
-export function getMessageForReference(messageId: string): {
-  message_id?: string
-  channel_id?: string
-  author_id?: string | null
-  created_at?: string
-} | undefined {
-  const db = getDb()
-  return db
-    .prepare(
-      `select message_id, channel_id, author_id, created_at
-       from discord_messages
-       where message_id = ?`,
-    )
-    .get(messageId) as { message_id?: string; channel_id?: string; author_id?: string | null; created_at?: string } | undefined
+export type DiscordReferenceMessageRow = {
+  message_id: string
+  channel_id: string
+  author_id: string | null
+  created_at: string
+}
+
+export function getMessageForReference(db: Database.Database, messageId: string): DiscordReferenceMessageRow | undefined {
+  return db.prepare<unknown[], DiscordReferenceMessageRow>(`select message_id, channel_id, author_id, created_at
+   from discord_messages
+   where message_id = ?`).get(messageId)
 }
 
 /**
  * Counts messages in a channel after a given message from different authors.
  *
- * @param channelId - Channel id.
+ * @param channelId - Discord channel id.
  * @param afterMessageId - Message id threshold.
  * @param excludeAuthorId - Author id to exclude.
  * @returns Count of intervening messages.
  */
-export function countInterveningMessages(channelId: string, afterMessageId: string, excludeAuthorId: string): number {
-  const db = getDb()
-  const row = db
-    .prepare(
-      `select count(*) as count
-       from discord_messages
-       where channel_id = ?
-         and cast(message_id as integer) > cast(? as integer)
-         and is_from_bot = 0
-         and coalesce(author_id, '') != coalesce(?, '')`,
-    )
-    .get(channelId, afterMessageId, excludeAuthorId) as { count?: number } | undefined
+export function countInterveningMessages(db: Database.Database, channelId: string, afterMessageId: string, excludeAuthorId: string): number {
+  const row = db.prepare<unknown[], { count?: number }>(`select count(*) as count
+   from discord_messages
+   where channel_id = ?
+     and cast(message_id as integer) > cast(? as integer)
+     and is_from_bot = 0
+     and coalesce(author_id, '') != coalesce(?, '')`).get(channelId, afterMessageId, excludeAuthorId)
   return row?.count ?? 0
 }
 
@@ -976,20 +923,15 @@ export function countInterveningMessages(channelId: string, afterMessageId: stri
  * @param channelId - Channel id.
  * @returns Item id or `null`.
  */
-export function findPendingDmItemId(channelId: string): string | null {
-  const db = getDb()
-  const row = db
-    .prepare(
-      `select i.item_id
-       from discord_items i
-       join discord_messages m on m.message_id = i.message_id
-       where i.status = 'pending'
-         and m.channel_id = ?
-         and m.is_dm = 1
-         and m.is_from_bot = 0
-       order by cast(m.message_id as integer) desc
-       limit 1`,
-    )
-    .get(channelId) as { item_id?: string } | undefined
+export function findPendingDmItemId(db: Database.Database, channelId: string): string | null {
+  const row = db.prepare<unknown[], { item_id?: string }>(`select i.item_id
+   from discord_items i
+   join discord_messages m on m.message_id = i.message_id
+   where i.status = 'pending'
+     and m.channel_id = ?
+     and m.is_dm = 1
+     and m.is_from_bot = 0
+   order by cast(m.message_id as integer) desc
+   limit 1`).get(channelId)
   return row?.item_id?.trim() || null
 }

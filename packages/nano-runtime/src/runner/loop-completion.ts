@@ -1,14 +1,8 @@
 import { ContextChangedError } from "../llm"
 import type { AssistantMessage, AssistantMessageEvent, TextContent, ThinkingContent, Usage, OpenAICompletionsOptions } from "../llm"
 import type { ToolDefinition } from "@nano/harness-core"
-import { logMessage } from "../db"
-import { setContextSize } from "../discord/status-updater"
-import { buildCompletionMessages, rememberRecalledMemoryChunks } from "../memory"
-import { recordMetric, summarizePromptResponse } from "../metrics"
-import { recordLlmRequest } from "../prometheus"
-import { emit } from "../stream"
-import { notifyDiscordModelActivity } from "../discord/typing-lease"
-import { modelStateFor } from "./model-state"
+import { summarizePromptResponse } from "../metrics"
+import { executionModel } from "./execution-model"
 import type { LoopState } from "./types"
 import {
   errorSummary,
@@ -18,23 +12,20 @@ import {
   isContentFilterError,
   isImageParseError,
   isPromptTooLargeError,
-  loadAgentSummaryContext,
   retryDelayMs,
   sanitizeMessages,
   scrubImagesFromConversation,
   shouldFallback,
-  summarizeConversationViaLLM,
 } from "./util"
 import { getCompletionTools } from "./tools"
 import type { CompletionTurnResult } from "./loop-shared"
 import type { Model } from "../llm"
 import { classifyApiError } from "../api-errors"
-import { reportApiError } from "../discord/owner-alerts"
 
 const configuredThinkingEfforts = new WeakMap<LoopState, string | undefined>()
 /** The currently active model pair (fallback when degraded, else primary). */
-export function activeModelProvider(state?: Pick<LoopState, "runtimeKind">): { model: Model | null; apiKey: string | undefined } {
-  const modelState = modelStateFor(state?.runtimeKind)
+export function activeModelProvider(state: Pick<LoopState, "runtimeKind" | "services">): { model: Model | null; apiKey: string | undefined } {
+  const modelState = executionModel(state)
   return {
     model: modelState.useFallback ? modelState.fallbackModel : modelState.primaryModel,
     apiKey: modelState.useFallback ? modelState.fallbackApiKey : modelState.primaryApiKey,
@@ -59,10 +50,10 @@ export function activeModelProvider(state?: Pick<LoopState, "runtimeKind">): { m
 export type SummaryProviderPreference = "default" | "active" | "configured"
 
 export function configuredSummaryProvider(
-  preference: SummaryProviderPreference = "default",
-  state?: Pick<LoopState, "runtimeKind">,
+  preference: SummaryProviderPreference,
+  state: Pick<LoopState, "runtimeKind" | "services">,
 ): { model: Model | null; apiKey: string | undefined } {
-  const modelState = modelStateFor(state?.runtimeKind)
+  const modelState = executionModel(state)
   if (preference === "active") return activeModelProvider(state)
   // An explicit /compact force=true means exactly the configured small model:
   // do not substitute the active model and do not suppress the intentional
@@ -78,7 +69,7 @@ export function configuredSummaryProvider(
 /**
  * Persists an assistant message after Context.complete appended it atomically.
  */
-export function addAssistantMessage(convId: number, msg: AssistantMessage): void {
+export function addAssistantMessage(convId: number, msg: AssistantMessage, state: LoopState): void {
   const textContent = msg.content
     .filter((p): p is TextContent => p.type === "text")
     .map((p) => p.text)
@@ -86,7 +77,7 @@ export function addAssistantMessage(convId: number, msg: AssistantMessage): void
   const toolCalls = msg.content
     .filter((p) => p.type === "toolCall")
     .map((p) => p)
-  logMessage(convId, msg.role, textContent, toolCalls.length > 0 ? toolCalls : undefined)
+  state.services?.persistence?.logMessage?.(convId, msg.role, textContent, toolCalls.length > 0 ? toolCalls : undefined)
 }
 
 function recordPromptResponse(
@@ -95,7 +86,7 @@ function recordPromptResponse(
   state: LoopState,
   result: CompletionTurnResult,
 ): void {
-  recordMetric({
+  state.services?.metrics?.recordMetric({
     type: "prompt_response",
     model,
     toolChoice,
@@ -116,7 +107,7 @@ export function applyUsage(
   const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite
   if (promptTokens > 0) {
     state.contextSize = promptTokens
-    setContextSize(state.contextSize)
+    state.services?.discord?.setContextSize?.(state.contextSize)
   }
   const rate = typeof timing.tokensPerSecond === "number" ? ` ${timing.tokensPerSecond.toFixed(1)} tok/s` : ""
   console.log(
@@ -125,7 +116,7 @@ export function applyUsage(
     (usage.cacheWrite ? ` cache_write=${usage.cacheWrite}` : "") +
     rate,
   )
-  emit({
+  state.services?.events?.emit({
     type: "usage",
     promptTokens: usage.input,
     completionTokens: usage.output,
@@ -135,19 +126,19 @@ export function applyUsage(
     elapsedMs: timing.elapsedMs,
     tokensPerSecond: timing.tokensPerSecond,
   })
-  recordMetric({ type: "usage", usage })
+  state.services?.metrics?.recordMetric({ type: "usage", usage })
 }
 
 /**
  * Emits model reasoning/thinking when present in the assistant message.
  */
-export function emitThinking(msg: AssistantMessage): void {
+export function emitThinking(msg: AssistantMessage, state: LoopState): void {
   const thinking = msg.content
     .filter((c): c is ThinkingContent => c.type === "thinking")
     .map((c) => c.thinking)
     .join("")
     .trim()
-  if (thinking) emit({ type: "thinking", text: thinking })
+  if (thinking) state.services?.events?.emit({ type: "thinking", text: thinking })
 }
 
 function sleep(ms: number): Promise<void> {
@@ -188,13 +179,17 @@ async function createStreamedCompletion(
   tools?: ToolDefinition[],
   signal?: AbortSignal,
 ): Promise<CompletionTurnResult> {
-  const modelState = modelStateFor(state.runtimeKind)
+  const modelState = executionModel(state)
   const handoff = state.modelSwap !== undefined
   const startedAt = Date.now()
   const resolvedToolChoice = handoff
     ? toolChoice
     : modelState.enableThinking && toolChoice === "required" ? "auto" : toolChoice
-  const completionTools = getCompletionTools(tools, state.runtimeKind)
+  const completionTools = getCompletionTools(tools ?? state.toolCatalog, {
+    runtimeKind: state.runtimeKind,
+    vision: handoff ? state.context.includeContextImages : modelState.primaryVision,
+    imageRoot: state.services?.client?.workspace()?.imageRoot,
+  })
   const modelChanged = JSON.stringify(state.context.model) !== JSON.stringify(model)
   const toolsChanged = JSON.stringify(state.context.tools ?? []) !== JSON.stringify(completionTools)
   const configuredThinkingLevel = handoff ? state.context.thinkingLevel : modelState.enableThinking ? modelState.thinkingEffort : undefined
@@ -233,18 +228,18 @@ async function createStreamedCompletion(
     ...(signal ? { signal } : {}),
     onEvent: (event: AssistantMessageEvent) => {
       if (event.type === "text_delta") {
-        notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
-        emit({ type: "text", text: event.delta })
+        state.services?.discord?.notifyModelActivity?.(state.discordTypingTurnId ?? "")
+        state.services?.events?.emit({ type: "text", text: event.delta })
         emittedText = true
       } else if (event.type === "thinking_start") {
-        notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
+        state.services?.discord?.notifyModelActivity?.(state.discordTypingTurnId ?? "")
         bufferedThinking = ""
       } else if (event.type === "thinking_delta") {
-        notifyDiscordModelActivity(state.discordTypingTurnId ?? "")
+        state.services?.discord?.notifyModelActivity?.(state.discordTypingTurnId ?? "")
         if (handoff || modelState.enableThinking) bufferedThinking += event.delta
       } else if (event.type === "thinking_end") {
         if ((handoff || modelState.enableThinking) && bufferedThinking) {
-          emit({ type: "thinking", text: bufferedThinking })
+          state.services?.events?.emit({ type: "thinking", text: bufferedThinking })
           emittedThinking = true
         }
       }
@@ -258,7 +253,7 @@ async function createStreamedCompletion(
   const elapsedMs = Math.max(0, Date.now() - startedAt)
   const tokensPerSecond = usage.output && elapsedMs > 0 ? usage.output / (elapsedMs / 1000) : undefined
 
-  recordLlmRequest(model.id, "success", usage, tokensPerSecond)
+  state.services?.metrics?.recordLlmRequest?.(model.id, "success", usage, tokensPerSecond)
 
   recordPromptResponse(model.id, typeof toolChoice === "string" ? toolChoice : undefined, state, { message: finalMessage, usage, emittedText, emittedThinking, bufferedThinking, elapsedMs, tokensPerSecond })
 
@@ -266,12 +261,12 @@ async function createStreamedCompletion(
 }
 
 async function createFallbackCompletion(state: LoopState, tools?: ToolDefinition[], signal?: AbortSignal): Promise<CompletionTurnResult> {
-  const modelState = modelStateFor(state.runtimeKind)
+  const modelState = executionModel(state)
   return createStreamedCompletion(modelState.fallbackModel, modelState.fallbackApiKey, modelState.fallbackToolChoice, state, tools, signal)
 }
 
 async function createPrimaryCompletion(state: LoopState, tools?: ToolDefinition[], signal?: AbortSignal): Promise<CompletionTurnResult> {
-  const modelState = modelStateFor(state.runtimeKind)
+  const modelState = executionModel(state)
   return createStreamedCompletion(modelState.primaryModel!, modelState.primaryApiKey, modelState.primaryToolChoice, state, tools, signal)
 }
 
@@ -282,27 +277,27 @@ async function createHandoffCompletion(state: LoopState, tools?: ToolDefinition[
 
 function logPromptSizeDebug(state: LoopState, errMsg: string, label: string): void {
   const messageCount = state.context.items.length
-  const estimate = estimatePromptTokens(state.context.items)
+  const estimate = estimatePromptTokens(state.context.items, state.toolCatalog)
   const charLength = JSON.stringify(state.context.items).length
   console.warn(
     `[api] ${label}: ${errMsg} - messages=${messageCount} est_tokens=${estimate} chars=${charLength} observedPromptTokens=${state.contextSize}`,
   )
 }
 
-function noteApiError(errorMessage: string, role: "primary" | "fallback", model: Model) {
+function noteApiError(state: LoopState, errorMessage: string, role: "primary" | "fallback", model: Model) {
   const classified = classifyApiError(errorMessage, {
     role,
     model: model.id,
     provider: model.provider,
     baseUrl: model.baseUrl,
   })
-  void reportApiError(classified)
+  void state.services?.discord?.reportApiError?.(classified)
   return classified
 }
 
 async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Promise<boolean> {
-  const modelState = modelStateFor(state.runtimeKind)
-  const beforeEstimate = estimatePromptTokens(state.context.items)
+  const modelState = executionModel(state)
+  const beforeEstimate = estimatePromptTokens(state.context.items, state.toolCatalog)
   const summaryProvider = configuredSummaryProvider("default", state)
   if (!summaryProvider.model) {
     console.warn(`[context] recovery: no summary model available; cannot llm-summarize`)
@@ -310,13 +305,16 @@ async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Pro
   }
 
   console.warn(`[context] recovery: attempting llm summarization via ${summaryProvider.model.id} (attempt=${attempt + 1})`)
-  const agentContext = await loadAgentSummaryContext(state.runtimeKind)
-  const summarized = await summarizeConversationViaLLM(
+  const management = state.services?.contextManagement
+  if (!management) return false
+  const agentContext = await management.loadAgentSummaryContext(state.runtimeKind)
+  const summarized = await management.summarizeConversation(
     state.context.items,
     summaryProvider.model,
     summaryProvider.apiKey,
     {
       agentContext,
+      runtimeKind: state.runtimeKind,
       primaryHandoff: summaryProvider.model === modelState.summaryModel,
     },
   )
@@ -325,7 +323,7 @@ async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Pro
     return false
   }
 
-  const afterEstimate = estimatePromptTokens(summarized)
+  const afterEstimate = estimatePromptTokens(summarized, state.toolCatalog)
   if (afterEstimate >= beforeEstimate) {
     console.warn(`[context] recovery: llm summary not smaller (${beforeEstimate} -> ${afterEstimate}); keeping original`)
     return false
@@ -342,7 +340,7 @@ async function recoverFromPromptTooLarge(state: LoopState, attempt: number): Pro
     : undefined) : undefined
 
   console.warn(`[context] recovery: llm-summarized conversation (${beforeEstimate} -> ${afterEstimate} tokens)`)
-  recordMetric({ type: "compaction", before: beforeEstimate, after: afterEstimate, method: "force-llm", summary })
+  state.services?.metrics?.recordMetric({ type: "compaction", before: beforeEstimate, after: afterEstimate, method: "force-llm", summary })
   return true
 }
 
@@ -355,7 +353,7 @@ export async function fetchCompletion(
   _baseState: LoopState = state,
   signal?: AbortSignal,
 ): Promise<CompletionTurnResult> {
-  const modelState = modelStateFor(state.runtimeKind)
+  const modelState = executionModel(state)
   let promptTooLargeAttempts = 0
   let imagesScrubbed = false
   let recallPrepared = false
@@ -386,12 +384,16 @@ export async function fetchCompletion(
     }
 
     if (state.memoryRecallPending && !recallPrepared) {
-      const recalled = await buildCompletionMessages(state.context.snapshot(), state.memoryRecallCooldowns, state.memoryRecallTurn)
+      const recalled = await state.services?.memory?.recall(state.context.snapshot(), state.memoryRecallCooldowns, state.memoryRecallTurn, { runtimeKind: state.runtimeKind ?? "main", signal })
+      if (!recalled) {
+        recallPrepared = true
+      } else {
       recalledChunkIds = recalled.recalledChunkIds
       if (recalled.messages.length > state.context.items.length) {
         state.context.append(recalled.messages.slice(state.context.items.length))
       }
       recallPrepared = true
+      }
     }
 
     if (modelState.useFallback && !state.modelSwap) {
@@ -402,7 +404,7 @@ export async function fetchCompletion(
 
       try {
         const completion = await createFallbackCompletion(state, tools, signal)
-        state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
+        state.memoryRecallCooldowns = state.services?.memory?.remember(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn) ?? state.memoryRecallCooldowns
         state.memoryRecallPending = false
         return completion
       } catch (fallbackErr) {
@@ -412,7 +414,7 @@ export async function fetchCompletion(
           continue
         }
         const errMsg = errorSummary(fallbackErr)
-        const failure = noteApiError(errMsg, "fallback", modelState.fallbackModel)
+        const failure = noteApiError(state, errMsg, "fallback", modelState.fallbackModel)
         if (isPromptTooLargeError(errMsg) && promptTooLargeAttempts < 2) {
           logPromptSizeDebug(state, errMsg, `fallback rejected prompt (attempt ${promptTooLargeAttempts + 1}/2)`)
           const recovered = await recoverFromPromptTooLarge(state, promptTooLargeAttempts)
@@ -422,7 +424,7 @@ export async function fetchCompletion(
         if (recoverByScrubbingImages(errMsg, "fallback")) continue
         if (failure.terminal) {
           console.error(`[api] terminal fallback error: ${errMsg} model=${modelState.fallbackModel.id} api=${modelState.fallbackModel.baseUrl}`)
-          recordLlmRequest(modelState.fallbackModel.id, "error", null)
+          state.services?.metrics?.recordLlmRequest?.(modelState.fallbackModel.id, "error", null)
           throw fallbackErr
         }
         if (shouldFallback(errMsg)) {
@@ -431,7 +433,7 @@ export async function fetchCompletion(
           continue
         }
         console.error(`[api] fallback error: ${errMsg} model=${modelState.fallbackModel.id} api=${modelState.fallbackModel.baseUrl}`)
-        recordLlmRequest(modelState.fallbackModel.id, "error", null)
+        state.services?.metrics?.recordLlmRequest?.(modelState.fallbackModel.id, "error", null)
         throw fallbackErr
       }
     }
@@ -440,7 +442,7 @@ export async function fetchCompletion(
       const completion = state.modelSwap
         ? await createHandoffCompletion(state, tools, signal)
         : await createPrimaryCompletion(state, tools, signal)
-      state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
+      state.memoryRecallCooldowns = state.services?.memory?.remember(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn) ?? state.memoryRecallCooldowns
       state.memoryRecallPending = false
       return completion
     } catch (primaryErr) {
@@ -451,7 +453,7 @@ export async function fetchCompletion(
       }
       const errMsg = errorSummary(primaryErr)
       if (state.modelSwap) throw primaryErr
-      const primaryFailure = noteApiError(errMsg, "primary", modelState.primaryModel!)
+      const primaryFailure = noteApiError(state, errMsg, "primary", modelState.primaryModel!)
       if (isPromptTooLargeError(errMsg) && promptTooLargeAttempts < 2) {
         logPromptSizeDebug(state, errMsg, `primary rejected prompt (attempt ${promptTooLargeAttempts + 1}/2)`)
         const recovered = await recoverFromPromptTooLarge(state, promptTooLargeAttempts)
@@ -466,7 +468,7 @@ export async function fetchCompletion(
         const primaryId = modelState.primaryModel?.id ?? "(unknown)"
         const primaryBase = modelState.primaryModel?.baseUrl ?? "(unknown)"
         console.error(`[api] primary error: ${errMsg} model=${primaryId} api=${primaryBase}`)
-        recordLlmRequest(primaryId, "error", null)
+        state.services?.metrics?.recordLlmRequest?.(primaryId, "error", null)
         throw primaryErr
       }
 
@@ -485,7 +487,7 @@ export async function fetchCompletion(
       console.warn(`[api] primary down (${errMsg}) - switching to fallback`)
       try {
         const completion = await createFallbackCompletion(state, tools, signal)
-        state.memoryRecallCooldowns = rememberRecalledMemoryChunks(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn)
+        state.memoryRecallCooldowns = state.services?.memory?.remember(state.memoryRecallCooldowns, recalledChunkIds, state.memoryRecallTurn) ?? state.memoryRecallCooldowns
         state.memoryRecallPending = false
         return completion
       } catch (fallbackErr) {
@@ -495,7 +497,7 @@ export async function fetchCompletion(
           continue
         }
         const fallbackErrMsg = errorSummary(fallbackErr)
-        const fallbackFailure = noteApiError(fallbackErrMsg, "fallback", modelState.fallbackModel)
+        const fallbackFailure = noteApiError(state, fallbackErrMsg, "fallback", modelState.fallbackModel)
         if (isPromptTooLargeError(fallbackErrMsg) && promptTooLargeAttempts < 2) {
           logPromptSizeDebug(state, fallbackErrMsg, `fallback rejected prompt during failover (attempt ${promptTooLargeAttempts + 1}/2)`)
           const recovered = await recoverFromPromptTooLarge(state, promptTooLargeAttempts)
@@ -505,7 +507,7 @@ export async function fetchCompletion(
         if (recoverByScrubbingImages(fallbackErrMsg, "fallback-failover")) continue
         if (primaryFailure.terminal || fallbackFailure.terminal) {
           console.error(`[api] failover stopped after terminal error: primary=${errMsg} fallback=${fallbackErrMsg}`)
-          recordLlmRequest(modelState.fallbackModel.id, "error", null)
+          state.services?.metrics?.recordLlmRequest?.(modelState.fallbackModel.id, "error", null)
           throw primaryFailure.terminal ? primaryErr : fallbackErr
         }
         console.warn(`[api] fallback failed (${fallbackErrMsg}) after primary failure (${errMsg}); retrying primary after backoff`)

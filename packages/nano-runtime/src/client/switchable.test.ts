@@ -106,3 +106,37 @@ test("connect to an unreachable executor throws and keeps the fallback", async (
   assert.equal(sw.info().remote, false)
   await sw.stop()
 })
+
+test("cancelled handshake leaves the previously mounted executor untouched", async () => {
+  let finishHealth: (() => void) | undefined
+  const server = http.createServer((req, res) => {
+    if (req.url !== "/health") return
+    finishHealth = () => {
+      res.writeHead(200, { "content-type": "application/json" })
+      res.end(JSON.stringify({ capabilities: ["shell"], workspace: { id: "staged", root: "/staged" } }))
+    }
+  })
+  let resolveListening!: () => void
+  const listening = new Promise<void>((resolve) => { resolveListening = resolve })
+  server.listen(0, "127.0.0.1", resolveListening)
+  await listening
+  const endpoint = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+  const sw = new SwitchableToolClient("test", fakeFallback())
+  const attached = await fakeExecutor("/previous")
+  await sw.start()
+  await sw.connect({ endpoint: attached.url })
+  const signal = new AbortController()
+  const connecting = sw.connect({ endpoint }, signal.signal)
+  while (!finishHealth) await new Promise((resolve) => setImmediate(resolve))
+  signal.abort(new Error("cancelled"))
+  finishHealth()
+  await assert.rejects(connecting, /cancelled/)
+  assert.equal(sw.info().remote, true)
+  assert.equal(sw.getWorkspace()?.root, "/previous")
+  await sw.stop()
+  let resolveClosed!: () => void
+  const closed = new Promise<void>((resolve) => { resolveClosed = resolve })
+  server.close(resolveClosed)
+  await closed
+  await attached.close()
+})

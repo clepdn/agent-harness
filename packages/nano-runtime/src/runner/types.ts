@@ -1,6 +1,7 @@
 import type { DiscordMessageTarget, UserMessage, RunnerState } from "../types"
 import type { Context } from "../llm"
 import type { ClientToolExecutor, ToolDefinition } from "@nano/harness-core"
+import type { RuntimeExecutionServices } from "../plugins/api"
 
 export type CompactionResult = "none" | "rewritten" | "suppressed"
 export type RuntimeKind = "main" | "frontend"
@@ -19,6 +20,8 @@ export type ImageDetail = "auto" | "low" | "high"
 export interface LoopState {
   /** Which virtual agent owns this independent conversation loop. */
   runtimeKind?: RuntimeKind
+  /** Application-owned services; never persisted in a conversation snapshot. */
+  services?: RuntimeExecutionServices
   context: Context
   pendingInputs: UserMessage[]
   tokenCount: number
@@ -102,6 +105,7 @@ export interface LoopHooks {
 
 export interface RunnerStateInternal extends RunnerState {
   runtimeKind: RuntimeKind
+  services?: RuntimeExecutionServices
   toolCatalog: ToolDefinition[]
   toolCatalogEpoch: number
   toolCatalogFingerprint: string

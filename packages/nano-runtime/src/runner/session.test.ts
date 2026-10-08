@@ -1,4 +1,4 @@
-import { SessionSnapshot } from "./session"
+import type { SessionSnapshot } from "./session"
 import assert from "node:assert/strict"
 import { createRequire } from "node:module"
 import os from "node:os"
@@ -52,15 +52,17 @@ test("runner persistence uses NANO_HOME when cwd is read-only", async (t) => {
   const metricsUrl = new URL("../metrics.ts", import.meta.url).href
   await runChild(
     `
-      import { saveSession, saveRestSnapshot } from ${JSON.stringify(sessionUrl)}
-      import { initMetricsDb } from ${JSON.stringify(metricsUrl)}
+      import { createSessionStore } from ${JSON.stringify(sessionUrl)}
+      import { createMetricsStore } from ${JSON.stringify(metricsUrl)}
+      const store = createSessionStore(process.env.NANO_HOME)
       const messages = [{ role: "user", content: "hello", timestamp: 1 }]
       const toolCatalog = []
       const toolCatalogFingerprint = (await import("node:crypto")).createHash("sha256").update(JSON.stringify(toolCatalog)).digest("hex")
       const discordTargets = [{ position: 1, channelId: "hidden-channel", messageId: "hidden-message", itemId: "hidden-message", content: "hello" }]
-      await saveSession({ version: 1, messages, toolCatalog, toolCatalogEpoch: 1, toolCatalogFingerprint, discordTargets, contextId: "ctx-current", parentContextId: "ctx-parent", contextForkReason: "compaction", contextConfigurationFingerprint: "config-hash", contextModelId: "test-model", contextEffortState: { initialEffort: "medium", updates: [{ beforeMessageIndex: 1, effort: "high" }] } })
-      await saveRestSnapshot(messages, "checkpoint")
-      initMetricsDb()
+      await store.saveSession({ version: 1, messages, toolCatalog, toolCatalogEpoch: 1, toolCatalogFingerprint, discordTargets, contextId: "ctx-current", parentContextId: "ctx-parent", contextForkReason: "compaction", contextConfigurationFingerprint: "config-hash", contextModelId: "test-model", contextEffortState: { initialEffort: "medium", updates: [{ beforeMessageIndex: 1, effort: "high" }] } })
+      await store.saveRestSnapshot(messages, "checkpoint")
+      const metrics = createMetricsStore({ home: process.env.NANO_HOME })
+      metrics.close()
     `,
     readOnlyCwd,
     { ...process.env, NANO_CONFIG: testConfig, NANO_HOME: home, HOME: home },
@@ -96,16 +98,18 @@ test("frontend and main runners persist independent sessions and rest snapshots"
   await runChild(
     `
       import { createHash } from "node:crypto"
-      import { loadSession, saveSession, saveRestSnapshot } from ${JSON.stringify(sessionUrl)}
+      import { createSessionStore } from ${JSON.stringify(sessionUrl)}
+      const mainStore = createSessionStore(process.env.NANO_HOME)
+      const frontendStore = createSessionStore(process.env.NANO_HOME)
       const catalog = [{ type: "function", function: { name: "wait", description: "wait", parameters: { type: "object" } } }]
       const fingerprint = createHash("sha256").update(JSON.stringify(catalog)).digest("hex")
       const snapshot = (content) => ({ version: 1, messages: [{ role: "user", content, timestamp: 1 }], toolCatalog: catalog, toolCatalogEpoch: 1, toolCatalogFingerprint: fingerprint })
-      await saveSession(snapshot("main lane"))
-      await saveSession(snapshot("frontend lane"), "frontend")
-      await saveRestSnapshot(snapshot("main rest").messages, "main")
-      await saveRestSnapshot(snapshot("frontend rest").messages, "frontend", "frontend")
-      const main = await loadSession()
-      const frontend = await loadSession("frontend")
+      await mainStore.saveSession(snapshot("main lane"))
+      await frontendStore.saveSession(snapshot("frontend lane"), "frontend")
+      await mainStore.saveRestSnapshot(snapshot("main rest").messages, "main")
+      await frontendStore.saveRestSnapshot(snapshot("frontend rest").messages, "frontend", "frontend")
+      const main = await mainStore.loadSession()
+      const frontend = await frontendStore.loadSession("frontend")
       console.log(JSON.stringify({ main: main.messages[0].content, frontend: frontend.messages[0].content }))
     `,
     root,
@@ -130,7 +134,7 @@ test("invalid nested session state is quarantined and restored from the last-kno
       import fs from "node:fs/promises"
       import path from "node:path"
       import { createHash } from "node:crypto"
-      import { loadSession, saveSession } from ${JSON.stringify(sessionUrl)}
+      import { createSessionStore } from ${JSON.stringify(sessionUrl)}
       const toolCatalog = []
       const toolCatalogFingerprint = createHash("sha256").update(JSON.stringify(toolCatalog)).digest("hex")
       const snapshot = (content) => ({
@@ -140,13 +144,14 @@ test("invalid nested session state is quarantined and restored from the last-kno
         toolCatalogEpoch: 1,
         toolCatalogFingerprint,
       })
-      await saveSession(snapshot("last good"))
-      await saveSession(snapshot("newer"))
+      const store = createSessionStore(process.env.NANO_HOME)
+      await store.saveSession(snapshot("last good"))
+      await store.saveSession(snapshot("newer"))
       await fs.writeFile(path.join(process.env.NANO_HOME, "session.json"), JSON.stringify({
         ...snapshot("invalid timeline"),
         contextEffortState: { initialEffort: "medium", updates: [{ beforeMessageIndex: 2, effort: "high" }] },
       }))
-      const loaded = await loadSession()
+      const loaded = await store.loadSession()
       await fs.writeFile(path.join(process.env.NANO_HOME, "loaded-result.json"), JSON.stringify(loaded))
     `,
     root,
@@ -172,13 +177,14 @@ test("fatal-loop recovery quarantines both resumable checkpoints", async (t) => 
   await runChild(
     `
       import { createHash } from "node:crypto"
-      import { quarantineSession, saveSession } from ${JSON.stringify(sessionUrl)}
+      import { createSessionStore } from ${JSON.stringify(sessionUrl)}
+      const store = createSessionStore(process.env.NANO_HOME)
       const toolCatalog = []
       const toolCatalogFingerprint = createHash("sha256").update(JSON.stringify(toolCatalog)).digest("hex")
       const snapshot = (content) => ({ version: 1, messages: [{ role: "user", content, timestamp: 1 }], toolCatalog, toolCatalogEpoch: 1, toolCatalogFingerprint })
-      await saveSession(snapshot("first"))
-      await saveSession(snapshot("second"))
-      await quarantineSession()
+      await store.saveSession(snapshot("first"))
+      await store.saveSession(snapshot("second"))
+      await store.quarantineSession()
     `,
     root,
     { ...process.env, NANO_CONFIG: testConfig, NANO_HOME: home, HOME: home },
@@ -197,14 +203,14 @@ test("discard archives the current session as model-readable JSON and clears res
   t.after(async () => fs.rm(root, { recursive: true, force: true }))
 
   const sessionUrl = new URL("./session.ts", import.meta.url).href
-  const memoryUrl = new URL("../agent-state-tools.ts", import.meta.url).href
+  const fixtureUrl = new URL("../test-model-provider.ts", import.meta.url).href
   await runChild(
     `
       import fs from "node:fs/promises"
       import path from "node:path"
       import { createHash } from "node:crypto"
-      import { archiveDiscardedSession, saveSession } from ${JSON.stringify(sessionUrl)}
-      import { readMemory } from ${JSON.stringify(memoryUrl)}
+      import { createSessionStore } from ${JSON.stringify(sessionUrl)}
+      import { createExecutionServices } from ${JSON.stringify(fixtureUrl)}
       const toolCatalog = []
       const snapshot = {
         version: 1,
@@ -213,10 +219,16 @@ test("discard archives the current session as model-readable JSON and clears res
         toolCatalogEpoch: 1,
         toolCatalogFingerprint: createHash("sha256").update(JSON.stringify(toolCatalog)).digest("hex"),
       }
-      await saveSession(snapshot)
-      const archive = await archiveDiscardedSession(snapshot)
-      const modelRead = await readMemory(archive)
-      await fs.writeFile(path.join(process.env.NANO_HOME, "discard-result.json"), JSON.stringify({ archive, modelRead }))
+      const fixture = await createExecutionServices({ home: process.env.NANO_HOME })
+      try {
+        const store = createSessionStore(process.env.NANO_HOME)
+        await store.saveSession(snapshot)
+        const archive = await store.archiveDiscardedSession(snapshot)
+        const modelRead = await fixture.services.memory.readMemory(archive)
+        await fs.writeFile(path.join(process.env.NANO_HOME, "discard-result.json"), JSON.stringify({ archive, modelRead }))
+      } finally {
+        await fixture.close()
+      }
     `,
     root,
     { ...process.env, NANO_CONFIG: testConfig, NANO_HOME: home, HOME: home },

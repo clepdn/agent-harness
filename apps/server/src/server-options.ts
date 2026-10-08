@@ -1,10 +1,8 @@
 import fs from "node:fs"
 import { deepMerge, isConfigObject, parseConfig, type ConfigObject } from "@nano/config"
 
-export type ControlServerOptions = {
-  host: string
-  port: number
-}
+export type ControlServerOptions = { host: string; port: number }
+export type ControlApplicationOptions = ControlServerOptions & { config: ConfigObject; plugins: ConfigObject }
 
 function flag(argv: string[], name: string): string | undefined {
   const index = argv.indexOf(name)
@@ -27,29 +25,29 @@ function configPaths(argv: string[], env: NodeJS.ProcessEnv): string[] {
 }
 
 function loadConfig(paths: string[]): ConfigObject {
-  return paths.reduce<ConfigObject>((config, path) => {
+  return paths.reduce<ConfigObject>((config, configPath) => {
     try {
-      return deepMerge(config, parseConfig(fs.readFileSync(path, "utf8")))
+      return deepMerge(config, parseConfig(fs.readFileSync(configPath, "utf8")))
     } catch (error) {
-      throw new Error(`failed to load config ${path}: ${error instanceof Error ? error.message : String(error)}`)
+      throw new Error(`failed to load config ${configPath}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }, {})
 }
 
-/** Resolve control-plane network settings. CLI flags override the server config. */
-export function controlServerOptions(
-  argv: string[],
-  env: NodeJS.ProcessEnv = process.env,
-): ControlServerOptions {
+/** Resolve network settings and selected plugin config from one merged public config. */
+export function controlApplicationOptions(argv: string[], env: NodeJS.ProcessEnv = process.env): ControlApplicationOptions {
   const config = loadConfig(configPaths(argv, env))
   const server = isConfigObject(config.server) ? config.server : {}
   const configuredHost = typeof server.listen === "string" ? server.listen.trim() : ""
   const host = flag(argv, "--host")?.trim() || configuredHost || "127.0.0.1"
   const rawPort = flag(argv, "--port") ?? server.port ?? 3000
   const port = typeof rawPort === "number" ? rawPort : Number.parseInt(String(rawPort), 10)
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error(`invalid control port: ${rawPort}`)
+  const plugins = isConfigObject(config.plugins) ? config.plugins : {}
+  return { host, port, config, plugins }
+}
 
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new Error(`invalid control port: ${rawPort}`)
-  }
+export function controlServerOptions(argv: string[], env: NodeJS.ProcessEnv = process.env): ControlServerOptions {
+  const { host, port } = controlApplicationOptions(argv, env)
   return { host, port }
 }

@@ -1,10 +1,13 @@
 import assert from "node:assert/strict"
-import test from "node:test"
-import * as fs from "node:fs"
-import * as path from "node:path"
-import * as os from "node:os"
-import { initDb, getDb } from "../db"
+import test, { type TestContext } from "node:test"
+import { createDatabase } from "../db"
 import { formatPronounSets, getCachedPronouns, maybeFetchAndCachePronouns } from "./pronouns"
+
+function database(t: TestContext) {
+  const db = createDatabase(":memory:").db
+  t.after(() => db.close())
+  return db
+}
 
 test("pronouns formatting tests", () => {
   // Test single sets
@@ -24,62 +27,59 @@ test("pronouns formatting tests", () => {
   assert.equal(formatPronounSets(["any", "ask"]), "any/ask me")
 })
 
-test("pronouns database caching tests", async () => {
-  // Create a temp directory for the test DB
-  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "nano-test-"))
-  const originalHome = process.env.NANO_HOME
-  process.env.NANO_HOME = tempDir
+
+test("pronouns database caching tests", async (t) => {
+  const db = database(t)
+  db.prepare("insert into discord_user_pronouns (user_id, pronouns, updated_at) values (?, ?, ?)")
+    .run("user1", "she/they", new Date().toISOString())
+
+  assert.equal(getCachedPronouns(db, "user1"), "she/they")
+  assert.equal(getCachedPronouns(db, "user-nonexistent"), null)
+
+  const originalFetch = globalThis.fetch
+  let fetchCalled = false
+  globalThis.fetch = async (url: string | URL | Request): Promise<Response> => {
+    fetchCalled = true
+    assert.match(String(url), /ids=user2/)
+    return new Response(JSON.stringify({
+      user2: {
+        sets: {
+          en: ["he", "they"],
+        },
+      },
+    }), { status: 200, headers: { "content-type": "application/json" } })
+  }
 
   try {
-    initDb()
-
-    const db = getDb()
-
-    // Clean up any potential leftover test users to prevent constraint violations
-    db.prepare("delete from discord_user_pronouns where user_id in (?, ?)").run("user1", "user2")
-
-    // Seed some data directly
-    db.prepare(
-      "insert into discord_user_pronouns (user_id, pronouns, updated_at) values (?, ?, ?)"
-    ).run("user1", "she/they", new Date().toISOString())
-
-    // Get cached pronouns
-    assert.equal(getCachedPronouns("user1"), "she/they")
-    assert.equal(getCachedPronouns("user-nonexistent"), null)
-
-    // Mock fetch for maybeFetchAndCachePronouns
-    const originalFetch = globalThis.fetch
-    let fetchCalled = false
-    globalThis.fetch = async (url: string | URL | Request) => {
-      fetchCalled = true
-      assert.match(String(url), /ids=user2/)
-      return {
-        ok: true,
-        json: async () => ({
-          user2: {
-            sets: {
-              en: ["he", "they"]
-            }
-          }
-        })
-      } as any
-    }
-
-    try {
-      await maybeFetchAndCachePronouns("user2")
-      assert.equal(fetchCalled, true)
-      assert.equal(getCachedPronouns("user2"), "he/they")
-    } finally {
-      globalThis.fetch = originalFetch
-    }
-
+    await maybeFetchAndCachePronouns(db, "user2")
+    assert.equal(fetchCalled, true)
+    assert.equal(getCachedPronouns(db, "user2"), "he/they")
   } finally {
-    // Clean up temp dir
-    process.env.NANO_HOME = originalHome
-    try {
-      fs.rmSync(tempDir, { recursive: true, force: true })
-    } catch {
-      // ignore
-    }
+    globalThis.fetch = originalFetch
+  }
+})
+
+test("cancelled pronoun enrichment cannot overwrite the cache after a late response", async (t) => {
+  const db = database(t)
+  db.prepare("insert into discord_user_pronouns (user_id, pronouns, updated_at) values (?, ?, ?)")
+    .run("late-user", "they/them", "2000-01-01T00:00:00.000Z")
+  const originalFetch = globalThis.fetch
+  let release!: (response: Response) => void
+  let started!: () => void
+  const fetching = new Promise<void>((resolve) => { started = resolve })
+  globalThis.fetch = async () => {
+    started()
+    return new Promise<Response>((resolve) => { release = resolve })
+  }
+  const controller = new AbortController()
+  try {
+    const pending = maybeFetchAndCachePronouns(db, "late-user", controller.signal)
+    await fetching
+    controller.abort()
+    release(new Response(JSON.stringify({ "late-user": { sets: { en: ["she"] } } }), { status: 200 }))
+    await pending
+    assert.equal(getCachedPronouns(db, "late-user"), "they/them")
+  } finally {
+    globalThis.fetch = originalFetch
   }
 })

@@ -7,20 +7,26 @@ test("boredom makes real model requests at startup, during waits, and after rest
   const home = await mkdtemp("/tmp/nano-boredom-")
   process.env.NANO_HOME = home
   process.env.NANO_AGENT_STATE_DIR = `${home}/state`
+  // The runner module captures parsed quiet-interval configuration at load time.
   const { config } = await import("../config")
   config.agent.boredom_wake_min = 0.001 // 60ms, advanced with the fake clock
-  const { initDb } = await import("../db")
-  const { initMetricsDb } = await import("../metrics")
-  initDb()
-  initMetricsDb()
-  const { modelState } = await import("./model-state")
-  modelState.useFallback = true
-  modelState.fallbackApiKey = "test"
-  modelState.fallbackModel = { ...modelState.fallbackModel, baseUrl: "https://model.invalid/v1" }
-  modelState.primaryNudgeOnNoTool = false
-  modelState.compactionStrategy = "off"
-  modelState.idleCompactionMs = 0
-  const runner = await import("./index")
+  const { createExecutionServices } = await import("../test-model-provider")
+  const { jobsServicePlugin } = await import("../plugins/jobs-service")
+  const { nano } = await import("../plugins/api")
+  const fixture = await createExecutionServices({ home, dbPath: `${home}/nano.db`, removeHomeOnClose: false })
+  await fixture.bus.install(jobsServicePlugin)
+  const services = { ...fixture.services, jobs: fixture.bus.get(nano.jobs) }
+  const { createFrontendRunnerRuntime } = await import("./frontend")
+  const frontend = createFrontendRunnerRuntime(services)
+  const { createRunnerRuntime } = await import("./index")
+  const runner = createRunnerRuntime(services, frontend)
+  const model = services.model.current("main")
+  model.useFallback = true
+  model.fallbackApiKey = "test"
+  model.fallbackModel = { ...model.fallbackModel, baseUrl: "https://model.invalid/v1" }
+  model.primaryNudgeOnNoTool = false
+  model.compactionStrategy = "off"
+  model.idleCompactionMs = 0
   const requests: any[] = []
   let nextTool: "wait" | "wait_then_continue" | undefined
   let releaseRequest: (() => void) | undefined
@@ -52,7 +58,9 @@ test("boredom makes real model requests at startup, during waits, and after rest
       runner.requestRest("test cleanup")
       await until(() => !runner.isRunning())
     }
-    await runner.shutdown()
+    await runner.cleanup()
+    await frontend.cleanup()
+    await fixture.close()
     await rm(home, { recursive: true, force: true })
   })
   t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 1_000_000 })

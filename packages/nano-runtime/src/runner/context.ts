@@ -1,6 +1,8 @@
 import type { ToolDefinition } from "@nano/harness-core"
+import type { RuntimeExecutionServices } from "../plugins/api"
 import { Context, type ContextEffortState, type ContextForkReason, type Message } from "../llm"
-import { modelStateFor } from "./model-state"
+import type { ModelProviderResolver } from "../model-api"
+import type { PrepareModelMessages } from "../llm"
 import { getCompletionTools } from "./tools"
 import type { RuntimeKind } from "./types"
 
@@ -13,14 +15,17 @@ type RestoredLineage = {
   effortState?: ContextEffortState
 }
 
-/** Build a Context from the settings that are active for one runtime lane. */
 export function createRuntimeContext(
   runtimeKind: RuntimeKind,
   items: readonly Message[] = [],
-  toolCatalog?: ToolDefinition[],
-  lineage?: RestoredLineage,
+  toolCatalog: ToolDefinition[] = [],
+  lineage: RestoredLineage | undefined = undefined,
+  providerResolver: ModelProviderResolver,
+  prepareMessages: PrepareModelMessages,
+  modelService: RuntimeExecutionServices["model"],
 ): Context {
-  const state = modelStateFor(runtimeKind)
+  if (!modelService) throw new Error("runtime context requires nano.model")
+  const state = modelService.current(runtimeKind)
   const usingFallback = state.useFallback || !state.primaryModel
   const model = usingFallback ? state.fallbackModel : state.primaryModel!
   const sameModel = !lineage?.modelId || lineage.modelId === model.id
@@ -41,6 +46,8 @@ export function createRuntimeContext(
   } : {}
   const options = {
     model,
+    providerResolver,
+    prepareMessages,
     apiKey: usingFallback ? state.fallbackApiKey : state.primaryApiKey,
     tools: getCompletionTools(toolCatalog, runtimeKind),
     toolChoice: usingFallback ? state.fallbackToolChoice : state.primaryToolChoice,

@@ -1,6 +1,7 @@
 export type TuiArgs = {
   control: string
   agent?: string
+  gatewayTokenFile?: string
   workspace: string
   advertise?: string
   listenHost: string
@@ -9,16 +10,17 @@ export type TuiArgs = {
   hashline: boolean
   help: boolean
 }
-
 function flag(name: string): string | undefined {
   const i = process.argv.indexOf(name)
-  return i >= 0 ? process.argv[i + 1] : undefined
+  if (i >= 0) return process.argv[i + 1]
+  return process.argv.find((arg) => arg.startsWith(`${name}=`))?.slice(name.length + 1)
 }
 
 export function parseArgs(): TuiArgs {
   return {
     control: (flag("--control") ?? process.env.NANO_CONTROL_URL ?? "http://127.0.0.1:3001").replace(/\/+$/, ""),
     agent: flag("--agent") ?? process.env.NANO_AGENT_ID,
+    gatewayTokenFile: flag("--gateway-token-file"),
     workspace: flag("--workspace") ?? process.cwd(),
     advertise: flag("--advertise") ?? process.env.NANO_ADVERTISE_URL,
     listenHost: flag("--listen-host") ?? "127.0.0.1",
@@ -43,6 +45,7 @@ Usage: nano-tui [options]
                         to accept calls from a remote worker)
   --tool-port <n>       executor port (default 0 = ephemeral)
   --capabilities <csv>  restrict tool capabilities (default: all)
+  --gateway-token-file <path>  gateway token file (memory-only; env NANO_RPC_TOKEN fallback)
   --hashline            enable hashline file editing
   -h, --help            show this help
 

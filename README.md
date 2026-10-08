@@ -27,6 +27,21 @@ configured, open `http://<control-host>:<services.nano.controlPort>/ui/`
 For a source checkout, `npm start` builds the UI before starting the server;
 you can also build it explicitly with `npm run build:web`.
 
+
+## Plugin extensions
+
+The implemented extension surface is documented in [the plugin architecture guide](docs/plugin-architecture.md). Third-party code is trusted in-process and must be statically imported into the application composition; JSON plugin selections enable/configure installed IDs but do not load executable modules.
+
+Runtime extensions use the public workspace imports:
+
+```ts
+import type { Plugin } from "@nano/plugins"
+import { nano, registerTool } from "@nano/runtime/plugins"
+import { defineOperation, defineValidator } from "@nano/protocol"
+import { registerOperation } from "@nano/protocol/rpc"
+```
+
+Declare service dependencies and provide services through `scope.provide`; use keyed slots through `registerTool`, `registerCommand`, `registerModelProvider`, `registerOperation`, or `registerStream`. A plugin owns its registrations, callbacks, timers, and cleanup. Required dependents unload before a provider and remain pending until the service returns. Do not monkey-patch built-in catalogs or import internal source paths. Browser UI plugins use the local typed API in `apps/web/src/ui-plugins.tsx`; they contribute panels, views, event renderers, and actions through named slots and are isolated by the web error boundaries.
 ## Run a client
 
 ```sh
@@ -168,8 +183,9 @@ runtime setting names, and becomes the worker's environment. It is for the
 settings that are genuinely environment-shaped; anything the runtime reads from
 JSON belongs in `config`. Names the server manages — `PORT`, `HOME`,
 `NANO_CONFIG`, `NANO_SECRETS`, and the `NANO_*` prefixes — are rejected.
-
-> **TODO:** Promote the remaining active settings into first-party configuration sections for tools, context management, Discord batching/cooldowns, state, and bridges. Remove the settings that have no runtime reader.
+The remaining environment-shaped settings are retained for compatibility; new
+runtime behavior should use its typed JSON configuration section instead of adding
+another environment variable.
 
 #### Tools and model calls
 

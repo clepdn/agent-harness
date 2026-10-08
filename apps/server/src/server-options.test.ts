@@ -3,7 +3,8 @@ import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
-import { controlServerOptions } from "./server-options"
+import { isConfigObject } from "@nano/config"
+import { controlApplicationOptions, controlServerOptions } from "./server-options"
 
 function configFile(t: test.TestContext, contents: string): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "nano-server-config-"))
@@ -34,4 +35,16 @@ test("later config files override earlier files", (t) => {
   const first = configFile(t, JSON.stringify({ "server": { "listen": "127.0.0.1", "port": 4100 } }))
   const second = configFile(t, JSON.stringify({ "server": { "listen": "::" } }))
   assert.deepEqual(controlServerOptions(["-c", first, "-c", second], {}), { host: "::", port: 4100 })
+})
+
+test("control application options preserve selected plugin configuration for composition", (t) => {
+  const file = configFile(t, JSON.stringify({
+    server: { listen: "127.0.0.1", port: 4100 },
+    plugins: { "nano.rpc-gateway": { enabled: true, config: { auth: { mode: "token" } } } },
+  }))
+  const options = controlApplicationOptions(["--config", file], {})
+  const selection = options.plugins["nano.rpc-gateway"]
+  assert.ok(isConfigObject(selection))
+  assert.equal(selection.enabled, true)
+  assert.deepEqual(selection.config, { auth: { mode: "token" } })
 })

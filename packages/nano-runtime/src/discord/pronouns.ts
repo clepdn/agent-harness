@@ -1,4 +1,4 @@
-import { getDb } from "../db"
+import type Database from "better-sqlite3"
 
 export function formatPronounSets(sets: string[]): string {
   if (sets.length === 0) return ""
@@ -31,9 +31,8 @@ export function formatPronounSets(sets: string[]): string {
   }).join("/")
 }
 
-export function getCachedPronouns(userId: string): string | null {
+export function getCachedPronouns(db: Database.Database, userId: string): string | null {
   try {
-    const db = getDb()
     const row = db.prepare("select pronouns from discord_user_pronouns where user_id = ?").get(userId) as { pronouns?: string } | undefined
     return row?.pronouns || null
   } catch (err) {
@@ -41,10 +40,9 @@ export function getCachedPronouns(userId: string): string | null {
   }
 }
 
-export async function maybeFetchAndCachePronouns(userId: string): Promise<void> {
-  if (!userId) return
+export async function maybeFetchAndCachePronouns(db: Database.Database, userId: string, signal?: AbortSignal): Promise<void> {
+  if (!userId || signal?.aborted) return
 
-  const db = getDb()
   const now = new Date()
 
   // Check if we already have pronouns and they are fresh (less than 24 hours old)
@@ -68,7 +66,8 @@ export async function maybeFetchAndCachePronouns(userId: string): Promise<void> 
     const res = await fetch(url, {
       headers: {
         "User-Agent": "Niri/1.0.0 (https://github.com/nano-org/nano)"
-      }
+      },
+      signal,
     })
 
     let pronouns = ""
@@ -79,6 +78,7 @@ export async function maybeFetchAndCachePronouns(userId: string): Promise<void> 
         pronouns = formatPronounSets(userPr.sets.en)
       }
     }
+    signal?.throwIfAborted()
 
     db.prepare(
       `insert into discord_user_pronouns (user_id, pronouns, updated_at)
@@ -88,6 +88,6 @@ export async function maybeFetchAndCachePronouns(userId: string): Promise<void> 
          updated_at = excluded.updated_at`
     ).run(userId, pronouns, now.toISOString())
   } catch (err) {
-    console.error(`[pronouns] failed to fetch/cache pronouns for user ${userId}:`, err)
+    if (!signal?.aborted) console.error(`[pronouns] failed to fetch/cache pronouns for user ${userId}:`, err)
   }
 }

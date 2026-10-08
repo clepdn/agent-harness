@@ -1,11 +1,12 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { complete, stream, type Model } from "./llm"
-import { codexServiceTier, getCodexFastMode, setCodexFastMode } from "./codex-fast-mode"
+import { codexServiceTier } from "./codex-fast-mode"
+import { executionServices, providerResolver } from "./test-model-provider"
 
 test("fast mode reaches streaming and non-streaming requests and excludes other models", async (t) => {
-  const previous = getCodexFastMode()
-  t.after(() => setCodexFastMode(previous))
+  const previous = executionServices.model.getFastMode()
+  t.after(() => executionServices.model.setFastMode(previous))
   const bodies: any[] = []
   t.mock.method(globalThis, "fetch", async (_url: unknown, init: RequestInit) => {
     const body = JSON.parse(String(init.body))
@@ -22,22 +23,22 @@ test("fast mode reaches streaming and non-streaming requests and excludes other 
   }
   const context = { messages: [{ role: "user" as const, content: "hello", timestamp: 0 }] }
   for (const enabled of [false, true, false]) {
-    setCodexFastMode(enabled)
+    executionServices.model.setFastMode(enabled)
     for (const streaming of [false, true]) {
       const result = streaming
-        ? await stream(model, context, { apiKey: "test" }).result()
-        : await complete(model, context, { apiKey: "test" })
+        ? await stream(model, context, { apiKey: "test", providerResolver }).result()
+        : await complete(model, context, { apiKey: "test", providerResolver })
       assert.equal(result.stopReason, "stop")
       assert.equal(bodies.at(-1).service_tier, enabled ? "priority" : "default")
     }
   }
-  setCodexFastMode(true)
+  executionServices.model.setFastMode(true)
   for (const id of ["claude-sonnet-4", "gemini-pro", "openai/gpt-5", "local-model"]) {
-    await complete({ ...model, id }, context, { apiKey: "test" })
+    await complete({ ...model, id }, context, { apiKey: "test", providerResolver })
     assert.equal(Object.hasOwn(bodies.at(-1), "service_tier"), false)
   }
   for (const id of ["Codex", "codex-mini-latest", "o3-mini", "o4-mini"]) {
-    assert.equal(codexServiceTier({ ...model, id }), "priority")
+    assert.equal(codexServiceTier({ ...model, id }, true), "priority")
   }
-  assert.equal(codexServiceTier({ id: "custom", provider: "openai-codex" }), "priority")
+  assert.equal(codexServiceTier({ id: "custom", provider: "openai-codex" }, true), "priority")
 })

@@ -1,21 +1,25 @@
-import { publishWorkerEvent } from "../awp/outbox"
-
 export type RunnerPresence = "awake" | "resting"
+export type RunnerPresenceListener = (presence: RunnerPresence) => void
 
-type Listener = (presence: RunnerPresence) => void
-
-const listeners = new Set<Listener>()
-let currentPresence: RunnerPresence = "resting"
-
-export function setRunnerPresence(presence: RunnerPresence): void {
-  if (presence === currentPresence) return
-  currentPresence = presence
-  publishWorkerEvent("runner.status", { presence })
-  for (const listener of listeners) listener(presence)
+export interface RunnerPresenceTracker {
+  set(presence: RunnerPresence): void
+  subscribe(listener: RunnerPresenceListener): () => void
 }
 
-export function subscribeRunnerPresence(listener: Listener): () => void {
-  listener(currentPresence)
-  listeners.add(listener)
-  return () => listeners.delete(listener)
+export function createPresenceTracker(publish: (presence: RunnerPresence) => void): RunnerPresenceTracker {
+  const listeners = new Set<RunnerPresenceListener>()
+  let current: RunnerPresence = "resting"
+  return {
+    set(presence) {
+      if (presence === current) return
+      current = presence
+      publish(presence)
+      for (const listener of listeners) listener(presence)
+    },
+    subscribe(listener) {
+      listener(current)
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+  }
 }

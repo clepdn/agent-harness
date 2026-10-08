@@ -40,10 +40,11 @@ test("corrupt aliases are quarantined before a new atomic map is written", async
   const aliasesUrl = new URL("./aliases.ts", import.meta.url).href
   await runChild(
     `
-      import { listAliases, setAlias } from ${JSON.stringify(aliasesUrl)}
-      const initial = await listAliases()
+      import { createAliasService } from ${JSON.stringify(aliasesUrl)}
+      const aliases = createAliasService({ home: process.env.NANO_HOME })
+      const initial = await aliases.listAliases()
       if (Object.keys(initial).length !== 0) throw new Error("corrupt aliases did not fail closed")
-      await setAlias("@someone", "@canonical")
+      await aliases.setAlias("@someone", "@canonical")
     `,
     root,
     { ...process.env, NANO_CONFIG: testConfig, NANO_HOME: home, HOME: home },

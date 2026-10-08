@@ -1,22 +1,31 @@
 import fs from "fs/promises"
 import path from "path"
+import type Database from "better-sqlite3"
 import type { UserMessage, Message } from "./types"
-import { NANO_HOME } from "./agent-config"
+import type { ContextImageReference } from "./context-images"
 import { config } from "./config"
 import { markdownImageReferences } from "./context-images"
-import { botAvatarReference, discordEventImageReferences } from "./discord/context-avatars"
-import { readFrontendSoul } from "./frontend-soul"
+import { botAvatarReference } from "./discord/context-avatars"
+import { createFrontendSoulStore, type FrontendSoulStore } from "./frontend-soul"
 import type { ToolCapability, WorkspaceDescriptor } from "@nano/harness-protocol"
 
-const HOME_DIR = NANO_HOME
-const SOUL_FILE = path.join(HOME_DIR, "soul.md")
-const MISPLACED_SOUL_FILE = path.join(HOME_DIR, "memories", "soul.md")
+export interface BootstrapHome {
+  readonly home: string
+  readonly db?: Database.Database
+  readonly frontendSoul: FrontendSoulStore
+  readonly eventImageReferences?: (event: UserMessage) => ContextImageReference[]
+}
 
-type PriorRestContext = {
+export interface PriorRestContext {
   restedAt: string
   note?: string
   forest: string
 }
+
+export function createBootstrapHome(home: string, db?: Database.Database): BootstrapHome {
+  return { home, ...(db ? { db } : {}), frontendSoul: createFrontendSoulStore(home) }
+}
+
 
 export type BootstrapCapabilities = {
   clientCapabilities?: Iterable<ToolCapability>
@@ -34,23 +43,21 @@ async function readFile(filePath: string): Promise<string | null> {
     return null
   }
 }
-
 function looksLikeSoulTemplate(content: string | null): boolean {
   if (!content) return false
-  return (
-    content.includes("> Copy this to soul.md and rewrite it to define your agent's identity.") ||
-    content.includes("I am [name]. [Short description of who you are and what you do.]")
-  )
+  return content.includes("> Copy this to soul.md and rewrite it to define your agent's identity.") || content.includes("I am [name]. [Short description of who you are and what you do.]")
 }
 
-export async function ensureSoulFilePlacement(): Promise<void> {
-  const [primarySoul, misplacedSoul] = await Promise.all([readFile(SOUL_FILE), readFile(MISPLACED_SOUL_FILE)])
+export async function ensureSoulFilePlacement(home: BootstrapHome): Promise<void> {
+  const soulFile = path.join(home.home, "soul.md")
+  const misplacedSoulFile = path.join(home.home, "memories", "soul.md")
+  const [primarySoul, misplacedSoul] = await Promise.all([readFile(soulFile), readFile(misplacedSoulFile)])
   if (!misplacedSoul) return
 
   if (!primarySoul || looksLikeSoulTemplate(primarySoul)) {
-    await fs.mkdir(path.dirname(SOUL_FILE), { recursive: true })
-    await fs.writeFile(SOUL_FILE, misplacedSoul, "utf-8")
-    await fs.unlink(MISPLACED_SOUL_FILE).catch(() => {})
+    await fs.mkdir(path.dirname(soulFile), { recursive: true })
+    await fs.writeFile(soulFile, misplacedSoul, "utf-8")
+    await fs.unlink(misplacedSoulFile).catch(() => {})
     console.warn("[bootstrap] migrated soul.md from memories/ to home/")
     return
   }
@@ -60,7 +67,7 @@ export async function ensureSoulFilePlacement(): Promise<void> {
   }
 }
 
-function buildEnvironmentSection(options: BootstrapCapabilities = {}): string {
+function buildEnvironmentSection(options: BootstrapCapabilities = {}, home: string): string {
   const capabilities = new Set(options.clientCapabilities ?? [])
   const workspace = options.workspace
   const hashline = workspace?.hashline === true
@@ -102,7 +109,7 @@ function buildEnvironmentSection(options: BootstrapCapabilities = {}): string {
 
 ${clientDescription}
 
-Your durable soul, memories, session, and Discord state live on the server under ${HOME_DIR}. They are not automatically mounted into a client workspace.
+Your durable soul, memories, session, and Discord state live on the server under ${home}. They are not automatically mounted into a client workspace.
 
 **Use \`memory_search\` often and liberally.** Before responding to someone, \
 search their name. Before a topic comes up, search keywords around it. Your \
@@ -196,8 +203,7 @@ If you call end_session without journaling first, the next version of you wakes 
 with amnesia. The journaling IS your memory. There is no backup. Do not skip it.`
 }
 
-function buildFirstRunSystem(options: BootstrapCapabilities): string {
-  const home = HOME_DIR
+function buildFirstRunSystem(options: BootstrapCapabilities, home: string): string {
   return `\
 You are starting fresh — no soul.md has been written yet.
 
@@ -211,15 +217,9 @@ ${options.workspace?.hashline === true
   ? 'Call `read_file` on `memory://soul.md`, then call `edit_file` with `path: "memory://soul.md"` and structured `edits` anchored to that read.'
   : 'Call `edit_file` with `path: "memory://soul.md"`, an exact existing fragment as `old_text`, and your chosen identity as `new_text`.'} Use \`edit_file\` with \`memory://core.md\` for long-term facts. These tools write narrow server-owned state; client shell and file tools remain on the attached client.
 
-${buildEnvironmentSection(options)}`
+${buildEnvironmentSection(options, home)}`
 }
 
-const SKILLS_DIR = path.join(HOME_DIR, "memories", "skills")
-
-/**
- * Extracts the `description:` field from a skill file's YAML frontmatter.
- * Returns null if the file has no frontmatter or no description.
- */
 function parseSkillDescription(content: string): string | null {
   const match = content.match(/^---\s*\n([\s\S]*?)\n---/)
   if (!match) return null
@@ -228,83 +228,56 @@ function parseSkillDescription(content: string): string | null {
   return descLine.replace(/^\s*description\s*:\s*/, "").trim() || null
 }
 
-/**
- * Scans memories/skills/ and builds a compact index of available skills
- * (name + description) for injection into the system prompt. This ensures
- * the agent always knows what skills exist, even when a skill's full doc
- * isn't surfaced by memory recall. Use the `skill` tool to load one.
- */
-async function buildSkillsIndex(): Promise<string> {
+async function buildSkillsIndex(home: string): Promise<string> {
+  const skillsDirectory = path.join(home, "memories", "skills")
   let entries: string[]
   try {
-    entries = await fs.readdir(SKILLS_DIR)
+    entries = await fs.readdir(skillsDirectory)
   } catch {
     return ""
   }
   const skills: { name: string; description: string }[] = []
   for (const entry of entries.sort()) {
     if (!entry.endsWith(".md")) continue
-    const name = entry.replace(/\.md$/, "")
-    const content = await readFile(path.join(SKILLS_DIR, entry))
+    const content = await readFile(path.join(skillsDirectory, entry))
     if (!content) continue
-    const description = parseSkillDescription(content) ?? "(no description — add frontmatter)"
-    skills.push({ name, description })
+    skills.push({ name: entry.replace(/\.md$/, ""), description: parseSkillDescription(content) ?? "(no description — add frontmatter)" })
   }
   if (skills.length === 0) return ""
-  const lines = skills.map((s) => `- \`${s.name}\`: ${s.description}`).join("\n")
-  return `## Skills
-
-You have detailed skill docs for specific capabilities. Before reaching for a tool or improvising a workflow, check whether a relevant skill exists below — if so, load it with the \`skill\` tool (\`skill\` with \`name\`) to pull the full doc into context. The index shows what exists; the doc has the how.
-
-${lines}
-
----
-
-`
+  const lines = skills.map((skill) => `- \`${skill.name}\`: ${skill.description}`).join("\n")
+  return `## Skills\n\nYou have detailed skill docs for specific capabilities. Before reaching for a tool or improvising a workflow, check whether a relevant skill exists below — if so, load it with the \`skill\` tool (\`skill\` with \`name\`) to pull the full doc into context. The index shows what exists; the doc has the how.\n\n${lines}\n\n---\n\n`
 }
-
 export async function buildBootstrap(
   event: UserMessage,
-  priorRest?: PriorRestContext | null,
+  priorRest: PriorRestContext | null = null,
   options: BootstrapCapabilities = {},
+  home: BootstrapHome,
 ): Promise<Message[]> {
-  await ensureSoulFilePlacement()
-
-  const soul = options.frontend ? await readFrontendSoul() : await readFile(SOUL_FILE)
-  const coreMemories = await readFile(path.join(HOME_DIR, "memories", "core.md"))
-  const skillsIndex = options.frontend ? "" : await buildSkillsIndex()
-
+  await ensureSoulFilePlacement(home)
+  const soulFile = path.join(home.home, "soul.md")
+  const coreFile = path.join(home.home, "memories", "core.md")
+  const soul = options.frontend ? await home.frontendSoul.readFrontendSoul() : await readFile(soulFile)
+  const coreMemories = await readFile(coreFile)
+  const skillsIndex = options.frontend ? "" : await buildSkillsIndex(home.home)
   const system = soul
     ? `\
 ${soul}
 
 ---
 
-${coreMemories ? `## Core Memories\n\n${coreMemories}\n\n---\n\n` : ""}\
-${skillsIndex}\
-${buildEnvironmentSection(options)}`.trim()
-    : buildFirstRunSystem(options).trim()
-
-  if (!soul) {
-    console.warn("[bootstrap] soul.md not found — using first-run bootstrap")
-  }
-
+${coreMemories ? `## Core Memories\n\n${coreMemories}\n\n---\n\n` : ""}${skillsIndex}${buildEnvironmentSection(options, home.home)}`.trim()
+    : buildFirstRunSystem(options, home.home).trim()
+  if (!soul) console.warn("[bootstrap] soul.md not found — using first-run bootstrap")
   const wakeMessage = formatUserMessage(event, priorRest)
-  const priorSummary = priorRest?.forest.startsWith("[context summary v1]")
-    ? [{ role: "user" as const, content: priorRest.forest }]
-    : []
-
+  const priorSummary = priorRest?.forest.startsWith("[context summary v1]") ? [{ role: "user" as const, content: priorRest.forest }] : []
   return [
-    {
-      role: "user", content: system, timestamp: Date.now(),
-      imageReferences: [
-        ...botAvatarReference(),
-        ...(soul ? markdownImageReferences(soul, SOUL_FILE) : []),
-        ...(soul && coreMemories ? markdownImageReferences(coreMemories, path.join(HOME_DIR, "memories", "core.md")) : []),
-      ],
-    } as Message,
-    ...priorSummary.map(m => ({ ...m, timestamp: Date.now() }) as Message),
-    { role: "user", content: wakeMessage, timestamp: Date.now(), imageReferences: discordEventImageReferences(event) } as Message,
+    { role: "user", content: system, timestamp: Date.now(), imageReferences: [
+      ...botAvatarReference(),
+      ...(soul ? markdownImageReferences(soul, soulFile, soul, home.home) : []),
+      ...(soul && coreMemories ? markdownImageReferences(coreMemories, coreFile, coreMemories, home.home) : []),
+    ] } as Message,
+    ...priorSummary.map((message) => ({ ...message, timestamp: Date.now() }) as Message),
+    { role: "user", content: wakeMessage, timestamp: Date.now(), imageReferences: home.eventImageReferences?.(event) ?? [] } as Message,
   ]
 }
 

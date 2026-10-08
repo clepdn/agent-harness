@@ -42,7 +42,7 @@ export interface Plugin<C = unknown> {
   /** Services this plugin may publish. Required for dependency scheduling. */
   readonly provides?: readonly ServiceToken<unknown>[];
   readonly validate?: (raw: unknown) => C;
-  readonly apply: (scope: PluginScope, config: C) => void | Cleanup | Promise<void | Cleanup>;
+  apply(scope: PluginScope, config: C): void | Cleanup | Promise<void | Cleanup>;
 }
 
 export interface PluginScope {
@@ -54,6 +54,7 @@ export interface PluginScope {
   optional<T>(token: ServiceToken<T>): T | undefined;
   register<T>(slot: SlotToken<T>, key: string, value: T): () => void;
   list<T>(slot: SlotToken<T>): readonly SlotContribution<T>[];
+  watch<T>(slot: SlotToken<T>, callback: (contributions: readonly SlotContribution<T>[]) => void | Promise<void>): () => void;
   on<T>(event: EventToken<T>, callback: (payload: T) => void | Promise<void>): () => void;
   emit<T>(event: EventToken<T>, payload: T): Promise<void>;
   own(cleanup: Cleanup): () => void;
@@ -130,6 +131,7 @@ interface StagedResource extends OwnedResource {
 
 interface ServiceRecord {
   readonly owner: string;
+  readonly generation: number;
   readonly value: unknown;
 }
 
@@ -141,6 +143,13 @@ interface SlotRecord {
 interface ListenerRecord {
   readonly owner: string;
   readonly callback: (payload: unknown) => void | Promise<void>;
+}
+
+interface SlotObserverRecord {
+  readonly slot: SlotToken<unknown>;
+  readonly isActive: () => boolean;
+  readonly callback: (contributions: readonly SlotContribution<unknown>[]) => void | Promise<void>;
+  readonly onError: (error: unknown) => void;
 }
 
 interface PluginEntry {
@@ -195,6 +204,11 @@ export class PluginBus {
   private readonly config: unknown;
   private readonly disposeTimeoutMs: number;
   private readonly initializeTimeoutMs: number;
+  private readonly slotObservers = new Map<SlotToken<unknown>, Set<SlotObserverRecord>>();
+  private readonly pendingSlotNotifications = new Set<SlotToken<unknown>>();
+  private readonly pendingInitialObservers = new Set<SlotObserverRecord>();
+  private notificationScheduled = false;
+  private boundaryDepth = 0;
   private nextOrder = 0;
   private closed = false;
   private closing = false;
@@ -352,6 +366,7 @@ export class PluginBus {
     for (const records of this.slots.values()) slotCount += records.size;
     let listenerCount = 0;
     for (const records of this.listeners.values()) listenerCount += records.size;
+    for (const records of this.slotObservers.values()) listenerCount += records.size;
     let timers = 0;
     for (const entry of this.entries.values()) {
       for (const resource of entry.resources) if (resource.active && resource instanceof TimerResource) timers++;
@@ -365,11 +380,26 @@ export class PluginBus {
       byStatus,
     };
   }
+
   private abortEntryAndDependents(id: string): void {
     for (const entry of this.entries.values()) {
       if (entry.status !== 'LOADING') continue;
       if (entry.plugin.id === id || [...entry.bindings.values()].includes(id)) entry.controller?.abort();
     }
+  }
+
+  private serialize<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.queue.then(async () => {
+      this.boundaryDepth++;
+      try {
+        return await operation();
+      } finally {
+        this.boundaryDepth--;
+        this.scheduleSlotNotifications();
+      }
+    });
+    this.queue = result.then(() => undefined, () => undefined);
+    return result;
   }
 
   private abortDependentsOfService(token: ServiceToken<unknown>, providerId = this.services.get(token)?.owner): void {
@@ -381,11 +411,67 @@ export class PluginBus {
     }
   }
 
-  private serialize<T>(operation: () => Promise<T>): Promise<T> {
-    const result = this.queue.then(operation);
-    this.queue = result.then(() => undefined, () => undefined);
-    return result;
+  private markSlotChanged(slot: SlotToken<unknown>): void {
+    this.pendingSlotNotifications.add(slot);
+    this.scheduleSlotNotifications();
   }
+
+  private scheduleSlotNotifications(): void {
+    if (this.boundaryDepth || this.notificationScheduled ||
+        (!this.pendingSlotNotifications.size && !this.pendingInitialObservers.size)) return;
+    this.notificationScheduled = true;
+    queueMicrotask(() => {
+      this.notificationScheduled = false;
+      if (this.boundaryDepth) {
+        this.scheduleSlotNotifications();
+        return;
+      }
+      this.flushSlotNotifications();
+    });
+  }
+
+  private flushSlotNotifications(): void {
+    const initial = [...this.pendingInitialObservers];
+    this.pendingInitialObservers.clear();
+    const changedSlots = [...this.pendingSlotNotifications];
+    this.pendingSlotNotifications.clear();
+    const initialSet = new Set(initial);
+    const snapshots = new Map<SlotToken<unknown>, readonly SlotContribution<unknown>[]>();
+    const snapshotFor = (slot: SlotToken<unknown>): readonly SlotContribution<unknown>[] => {
+      let snapshot = snapshots.get(slot);
+      if (!snapshot) {
+        snapshot = this.list(slot);
+        snapshots.set(slot, snapshot);
+      }
+      return snapshot;
+    };
+
+    for (const observer of initial) {
+      if (observer.isActive()) this.invokeSlotObserver(observer, snapshotFor(observer.slot));
+    }
+    for (const slot of changedSlots) {
+      const snapshot = snapshotFor(slot);
+      const observers = this.slotObservers.get(slot);
+      if (!observers) continue;
+      for (const observer of [...observers]) {
+        if (!initialSet.has(observer) && observer.isActive()) this.invokeSlotObserver(observer, snapshot);
+      }
+    }
+    if (this.pendingSlotNotifications.size || this.pendingInitialObservers.size) this.scheduleSlotNotifications();
+  }
+
+  private invokeSlotObserver(
+    observer: SlotObserverRecord,
+    snapshot: readonly SlotContribution<unknown>[],
+  ): void {
+    try {
+      const result = observer.callback(snapshot);
+      if (result && typeof result.then === 'function') void Promise.resolve(result).catch(observer.onError);
+    } catch (error) {
+      observer.onError(error);
+    }
+  }
+
 
   private assertOpen(): void {
     if (this.closed || this.closing) throw new Error('Plugin bus is closed');
@@ -504,19 +590,21 @@ export class PluginBus {
       const bindings = new Map<ServiceToken<unknown>, string | undefined>();
       for (const token of [...(entry.plugin.requires ?? []), ...(entry.plugin.optional ?? [])]) {
         const provider = selected.get(token);
-        const available = provider && eligible.has(provider) ? provider : undefined;
+        const service = this.services.get(token);
+        const available = provider && eligible.has(provider) && !provider.withdrawnServices.has(token) &&
+          (provider.status !== 'ACTIVE' || (service?.owner === provider.plugin.id && service.generation === provider.generation))
+          ? provider : undefined;
         bindings.set(token, available?.plugin.id);
         if (available) visit(available);
       }
       order.push({ entry, bindings });
     };
     for (const entry of enabled.sort((a, b) => a.order - b.order)) visit(entry);
-
     for (const entry of enabled) {
       if (entry.status === 'ACTIVE' || entry.status === 'FAILED') continue;
       const missing = (entry.plugin.requires ?? []).filter(token => {
         const provider = selected.get(token);
-        return !provider || !eligible.has(provider);
+        return !provider || !eligible.has(provider) || provider.withdrawnServices.has(token);
       }).map(token => token.name);
       entry.missingDeps = missing;
       if (missing.length) {
@@ -607,6 +695,7 @@ export class PluginBus {
 
     const resources: StagedResource[] = [];
     const stagedServices = new Map<ServiceToken<unknown>, StagedResource>();
+    const stagedSlots = new Map<SlotToken<unknown>, number>();
     const declarations = new Set(uniqueTokens(entry.plugin.provides ?? []));
     const required = new Set(entry.plugin.requires ?? []);
     const optional = new Set(entry.plugin.optional ?? []);
@@ -676,7 +765,10 @@ export class PluginBus {
         const resource = createResource(
           () => {
             if (this.services.has(serviceToken)) throw new DuplicateServiceError(serviceToken);
-            this.services.set(serviceToken, { owner: entry.plugin.id, value });
+            this.services.set(serviceToken, { owner: entry.plugin.id, generation, value });
+            if (entry.status === 'ACTIVE') {
+              void this.serialize(() => this.reconcile()).catch(error => this.recordError(entry, generation, 'callback', error));
+            }
           },
           () => {
             if (this.services.get(serviceToken)?.owner === entry.plugin.id) this.services.delete(serviceToken);
@@ -717,8 +809,10 @@ export class PluginBus {
       },
       optional: <T>(token: ServiceToken<T>): T | undefined => {
         if (controller.signal.aborted) throw new Error(`Plugin "${entry.plugin.id}" scope is cancelled`);
-        if (!optional.has(token as ServiceToken<unknown>)) throw new Error(`Plugin "${entry.plugin.id}" did not declare optional service "${token.name}"`);
-        return this.services.get(token as ServiceToken<unknown>)?.value as T | undefined;
+        const serviceToken = token as ServiceToken<unknown>;
+        if (!optional.has(serviceToken)) throw new Error(`Plugin "${entry.plugin.id}" did not declare optional service "${token.name}"`);
+        if (bindings.has(serviceToken) && bindings.get(serviceToken) === undefined) return undefined;
+        return this.services.get(serviceToken)?.value as T | undefined;
       },
       register: <T>(slot: SlotToken<T>, key: string, value: T): (() => void) => {
         ensureOpen();
@@ -730,15 +824,53 @@ export class PluginBus {
             if (records.has(key)) throw new DuplicateSlotKeyError(slotToken, key);
             records.set(key, { owner: entry.plugin.id, value });
             this.slots.set(slotToken, records);
+            stagedSlots.set(slotToken, (stagedSlots.get(slotToken) ?? 0) + 1);
+            if (entry.status === 'ACTIVE') this.markSlotChanged(slotToken);
           },
           () => {
             const records = this.slots.get(slotToken);
             if (records?.get(key)?.owner === entry.plugin.id) {
               records.delete(key);
               if (!records.size) this.slots.delete(slotToken);
+              const remaining = (stagedSlots.get(slotToken) ?? 1) - 1;
+              if (remaining) stagedSlots.set(slotToken, remaining);
+              else stagedSlots.delete(slotToken);
+              if (entry.status === 'ACTIVE' || entry.status === 'UNLOADING') this.markSlotChanged(slotToken);
             }
           },
           noop,
+        );
+        publishResource(resource);
+        return () => disposeResource(resource);
+      },
+      watch: <T>(slot: SlotToken<T>, callback: (contributions: readonly SlotContribution<T>[]) => void | Promise<void>): (() => void) => {
+        ensureOpen();
+        if (typeof callback !== 'function') throw new TypeError('Slot watcher callback must be a function');
+        const slotToken = slot as SlotToken<unknown>;
+        let observationActive = true;
+        const observer: SlotObserverRecord = {
+          slot: slotToken,
+          isActive: () => observationActive && entry.enabled && callbackActive(),
+          callback: callback as (contributions: readonly SlotContribution<unknown>[]) => void | Promise<void>,
+          onError: error => {
+            if (observationActive && entry.enabled && callbackActive()) this.recordError(entry, generation, 'callback', error);
+          },
+        };
+        const resource = createResource(
+          () => {
+            const observers = this.slotObservers.get(slotToken) ?? new Set<SlotObserverRecord>();
+            observers.add(observer);
+            this.slotObservers.set(slotToken, observers);
+            this.pendingInitialObservers.add(observer);
+            this.scheduleSlotNotifications();
+          },
+          () => {
+            observationActive = false;
+            const observers = this.slotObservers.get(slotToken);
+            observers?.delete(observer);
+            if (!observers?.size) this.slotObservers.delete(slotToken);
+            this.pendingInitialObservers.delete(observer);
+          }
         );
         publishResource(resource);
         return () => disposeResource(resource);
@@ -889,6 +1021,7 @@ export class PluginBus {
       entry.phase = undefined;
       entry.error = undefined;
       entry.missingDeps = [];
+      for (const slot of stagedSlots.keys()) this.markSlotChanged(slot);
     } catch (error) {
       controller.abort();
       entry.status = 'FAILED';

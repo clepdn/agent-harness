@@ -2,14 +2,11 @@ import Database from "better-sqlite3"
 import fs from "fs"
 import path from "path"
 import * as sqliteVec from "sqlite-vec"
-import { publishWorkerEvent } from "./awp/outbox"
-import { NANO_HOME as HOME_DIR } from "./agent-config"
+import { NANO_HOME } from "./agent-config"
+import type { WorkerEvent, WorkerEventType } from "./awp/types"
 
-const DB_PATH = path.join(HOME_DIR, "nano.db")
 export const MEMORY_EMBEDDING_DIMENSIONS = 3072
 
-let db: Database.Database
-let vecAvailable = false
 
 function ensureWritableDirOrThrow(dirPath: string, purpose: string): void {
   try {
@@ -44,11 +41,14 @@ function ensureWritableDirOrThrow(dirPath: string, purpose: string): void {
   }
 }
 
-export function initDb(dbPathOverride?: string): void {
+export function createDatabase(dbPathOverride?: string, home?: string): { db: Database.Database; vecAvailable: boolean } {
+  let db: Database.Database
+  let vecAvailable = false
+
   // Resolve at call time (not import time) so tests can point at a temp db.
   // The old code froze HOME at import, so a test setting process.env afterward
   // was silently ignored and wrote into the real database.
-  const dbPath = dbPathOverride?.trim() || process.env.NANO_DB_PATH?.trim() || DB_PATH
+  const dbPath = dbPathOverride?.trim() || process.env.NANO_DB_PATH?.trim() || path.join(home ?? NANO_HOME, "nano.db")
   const inMemory = dbPath === ":memory:"
   if (!inMemory) {
     ensureWritableDirOrThrow(path.dirname(dbPath), "nano.db")
@@ -369,67 +369,48 @@ export function initDb(dbPathOverride?: string): void {
   }
 
   console.log("[db] ready")
+  return { db, vecAvailable }
 }
 
-export function startConversation(source: string, startedAt: string): number {
-  const stmt = db.prepare("insert into conversations (startedAt, source) values (?, ?)")
-  const result = stmt.run(startedAt, source)
-  const conversationId = result.lastInsertRowid as number
-  publishWorkerEvent("conversation.started", {
-    conversationId,
-    source,
-    startedAt,
-  })
+export function startConversationIn(
+  database: Database.Database,
+  source: string,
+  startedAt: string,
+  publish: (type: WorkerEventType, payload: unknown) => WorkerEvent,
+): number {
+  const result = database.prepare("insert into conversations (startedAt, source) values (?, ?)").run(startedAt, source)
+  const conversationId = Number(result.lastInsertRowid)
+  publish("conversation.started", { conversationId, source, startedAt })
   return conversationId
 }
 
-export function logMessage(
+export function logMessageIn(
+  database: Database.Database,
   convId: number,
   role: string,
   content: string,
-  toolCalls?: unknown,
-  toolCallId?: string,
+  toolCalls: unknown,
+  toolCallId: string | undefined,
+  publish: (type: WorkerEventType, payload: unknown) => WorkerEvent,
 ): void {
   const createdAt = new Date().toISOString()
-  const stmt = db.prepare(
+  database.prepare(
     "insert into messages (convId, role, content, toolCalls, toolCallId, createdAt) values (?, ?, ?, ?, ?, ?)",
-  )
-  stmt.run(
-    convId,
-    role,
-    content,
-    toolCalls ? JSON.stringify(toolCalls) : null,
-    toolCallId ?? null,
-    createdAt,
-  )
-  publishWorkerEvent("conversation.message", {
-    conversationId: convId,
-    role,
-    content,
+  ).run(convId, role, content, toolCalls ? JSON.stringify(toolCalls) : null, toolCallId ?? null, createdAt)
+  publish("conversation.message", {
+    conversationId: convId, role, content,
     ...(toolCalls ? { toolCalls } : {}),
     ...(toolCallId ? { toolCallId } : {}),
     createdAt,
   })
 }
 
-export function endConversation(id: number, tokens: number): void {
-  db.prepare("update conversations set tokens = ? where id = ?").run(tokens, id)
-  publishWorkerEvent("conversation.ended", {
-    conversationId: id,
-    tokens,
-    endedAt: new Date().toISOString(),
-  })
-}
-
-export function isDbInitialized(): boolean {
-  return db !== undefined
-}
-
-export function getDb(): Database.Database {
-  if (!db) throw new Error("Database not initialized")
-  return db
-}
-
-export function isVecAvailable(): boolean {
-  return vecAvailable
+export function endConversationIn(
+  database: Database.Database,
+  id: number,
+  tokens: number,
+  publish: (type: WorkerEventType, payload: unknown) => WorkerEvent,
+): void {
+  database.prepare("update conversations set tokens = ? where id = ?").run(tokens, id)
+  publish("conversation.ended", { conversationId: id, tokens, endedAt: new Date().toISOString() })
 }

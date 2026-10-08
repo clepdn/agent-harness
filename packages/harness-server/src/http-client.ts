@@ -16,7 +16,6 @@ export type HttpToolClientOptions = {
   capabilities?: Iterable<ToolCapability>
   workspace?: WorkspaceDescriptor | null
   fetchImpl?: typeof fetch
-  /** Shared bearer token sent as `Authorization: Bearer <token>` on every request. */
   authToken?: string
 }
 
@@ -117,11 +116,15 @@ export class HttpToolClient implements ClientToolExecutor {
     this.workspace = options.workspace ? { ...options.workspace } : null
   }
 
-  async start(): Promise<void> {
+  async start(signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("client connection aborted")
+    const timeout = AbortSignal.timeout(2_000)
+    const requestSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
     try {
-      const response = await this.fetchImpl(`${this.endpoint}/health`, { headers: this.authHeaders, signal: AbortSignal.timeout(2_000) })
+      const response = await this.fetchImpl(`${this.endpoint}/health`, { headers: this.authHeaders, signal: requestSignal })
       if (!response.ok) return
       const body = await response.json() as { capabilities?: unknown; workspace?: unknown }
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("client connection aborted")
       if (Array.isArray(body.capabilities)) {
         const capabilities = body.capabilities.filter((item): item is ToolCapability =>
           typeof item === "string" && (CLIENT_TOOL_NAMES as readonly string[]).includes(item),
@@ -130,12 +133,11 @@ export class HttpToolClient implements ClientToolExecutor {
       }
       if (body.workspace && typeof body.workspace === "object") {
         const workspace = body.workspace as Partial<WorkspaceDescriptor>
-        if (typeof workspace.id === "string" && typeof workspace.root === "string") {
-          this.workspace = workspace as WorkspaceDescriptor
-        }
+        if (typeof workspace.id === "string" && typeof workspace.root === "string") this.workspace = workspace as WorkspaceDescriptor
       }
       this.markConnected()
-    } catch {
+    } catch (error) {
+      if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error("client connection aborted")
       this.connected = false
     }
   }

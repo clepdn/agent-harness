@@ -50,12 +50,11 @@ extensionless decrypted secret with JSON contents. Credentials are read from
 files rather than the process environment, so tool subprocesses do not inherit
 them. Do not commit secrets.
 
-**Migration:** Coral now accepts JSON only. Existing TOML runtime files, agent
-files, and secrets must be migrated before deploying this version. Updating the
-module regenerates nonsecret settings from Nix as JSON, but does not convert
-external files or encrypted secrets. The optional development shim now reads
-`~/.harness.json`, with a nested `shim` object containing `enable`, `harness_path`,
-and optional `config_path` fields.
+The runtime and control plane read JSON configuration. Existing TOML files,
+agent files, or secret files must be converted to JSON before deployment. The
+NixOS module emits JSON directly and does not convert external files or encrypted
+secrets. The optional development shim reads `~/.harness.json`, with a nested
+`shim` object containing `enable`, `harness_path`, and optional `config_path`.
 
 ---
 
@@ -65,6 +64,48 @@ and optional `config_path` fields.
 |---|---|---|
 | `port` | `3000` | HTTP port the server listens on. |
 | `listen` | `"127.0.0.1"` | Address the HTTP server and web UI bind to. Use `"0.0.0.0"` for all IPv4 interfaces. |
+
+## `plugins`
+
+`plugins` is a JSON object keyed by public plugin id. Each selected entry accepts
+only `enabled` (boolean, default `true`) and `config` (a value passed to the
+installed plugin's validator). Invalid ids, selection shapes, or fields are
+rejected by runtime configuration validation. The setting selects statically
+installed plugins; it does not import code named by JSON. See the [implemented
+plugin API and inventory](plugin-architecture.md).
+
+For worker applications, omitted selections keep each built-in enabled. Unknown
+plugin ids are allowed by config validation, but only have an effect when that id
+is part of the application composition. For example, the worker supports:
+
+```json
+{
+  "plugins": {
+    "nano.discord": { "enabled": false },
+    "nano.web-search": { "enabled": true, "config": { "apiKey": "..." } },
+    "nano.rpc-auth": {
+      "config": { "mode": "token", "token": "...", "permissions": ["worker.read", "conversation.read"], "allowedOrigins": ["https://console.example"] }
+    }
+  }
+}
+```
+
+`nano.rpc-auth` is shared by the worker and control application and accepts
+`mode: "local-open"` or `"token"`. Token mode requires a non-empty `token`;
+`permissions` and `allowedOrigins`, when specified, must be arrays of non-empty
+strings. In token mode each RPC descriptor's permission must be listed or the
+wildcard `"*"` granted. Local-open mode is intended for local callers and does
+not use the permissions list as an access-control list. Requests with an Origin
+must match an allowed origin, except the loopback local-open case. Missing RPC
+auth selection keeps the explicit local-open compatibility default.
+
+Worker plugin selection follows dependency declarations. Disabling a plugin
+withdraws its service and registrations, closes owned resources, and unloads
+required consumers first; consumers remain pending until a required service
+returns. Durable stores are not deleted. A capability is not independently
+disableable when a required application service depends on it. In the control
+application, required built-ins (RPC auth, persistence, discovery, supervisor,
+operations, and HTTP) cannot be disabled; `control.static-ui` is optional.
 
 ## `agent`
 

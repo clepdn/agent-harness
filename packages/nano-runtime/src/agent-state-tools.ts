@@ -3,14 +3,9 @@ import { constants, type Dirent, type Stats } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { applyHashlineEdits, computeLineHash, resolveEditAnchors, type HashlineToolEdit } from "@nano/harness-client-node"
-import { NANO_HOME } from "./agent-config"
-import { readClientFile } from "./client"
-import { isDbInitialized } from "./db"
-import { syncMemoryIndex } from "./memory"
-import { FRONTEND_SOUL_VIEW_PATH, readFrontendSoul, writeFrontendSoul } from "./frontend-soul"
-import { isTrackedStatePath, recordStateRevision } from "./state-history"
+import { isTrackedStatePath } from "./state-history"
+
 const MAX_STATE_WRITE_BYTES = 256_000
-const MEMORY_ROOT = path.join(NANO_HOME, "memories")
 
 export type MemoryAccessOptions = {
   excludeSkills?: boolean
@@ -21,6 +16,35 @@ export type MemoryAccessOptions = {
   /** Include hashline anchors when displaying memory file contents. */
   hashline?: boolean
 }
+
+export interface AgentStateDependencies {
+  readonly home: string
+  readonly readClientFile: (path: string, maxBytes?: number, timeoutMs?: number) => Promise<{ path: string; name: string; mime: string; data: Buffer }>
+  readonly persistence: { readonly recordStateRevision: (filePath: string, source: string) => Promise<void> }
+  readonly bootstrap: {
+    readonly readFrontendSoul: () => Promise<string>
+    readonly writeFrontendSoul: (expectedSoul: string, content: string) => Promise<{ patchPath: string; conflicted: boolean }>
+  }
+  readonly syncMemoryIndex: () => Promise<void>
+}
+
+export interface AgentStateService {
+  memoryFs(fileName: unknown, rawOperation: unknown, rawTarget?: unknown, options?: MemoryAccessOptions): Promise<string>
+  readMemory(relativePath: unknown, startLine?: unknown, endLine?: unknown, options?: MemoryAccessOptions): Promise<string>
+  listMemory(options?: MemoryAccessOptions): Promise<string>
+  grepMemory(query: unknown, caseInsensitive?: unknown, options?: MemoryAccessOptions): Promise<string>
+  editMemoryResource(uri: unknown, oldText: unknown, newText: unknown, expectedHash?: unknown, options?: MemoryAccessOptions): Promise<string>
+  editMemoryResourceHashline(uri: unknown, edits: unknown, expectedHash?: unknown, options?: MemoryAccessOptions): Promise<string>
+  writeMemory(relativePath: unknown, content: unknown, mode: unknown, target?: unknown, expectedHash?: unknown): Promise<string>
+  writeSoul(content: unknown, mode: unknown, target?: unknown): Promise<string>
+  loadSkill(name: unknown): Promise<string>
+}
+
+export function createAgentStateService(dependencies: AgentStateDependencies): AgentStateService {
+  const { home } = dependencies
+  const MEMORY_ROOT = path.join(home, "memories")
+  const SKILLS_ROOT = path.join(MEMORY_ROOT, "skills")
+  const frontendSoulViewPath = path.join(home, ".nano", "frontend-soul", "soul.md")
 
 function isSkillMemoryPath(filePath: string): boolean {
   const relative = path.relative(MEMORY_ROOT, filePath)
@@ -92,7 +116,7 @@ function memoryReadTarget(input: unknown): { filePath: string; displayPath: stri
 
   const normalized = resource.replace(/\\/g, "/").replace(/\/+$/, "")
   if (isUri && normalized === "soul.md") {
-    return { filePath: path.join(NANO_HOME, "soul.md"), displayPath, root: NANO_HOME }
+    return { filePath: path.join(home, "soul.md"), displayPath, root: home }
   }
   if (!isUri && !normalized) throw new Error("path is required")
   if (normalized && path.posix.isAbsolute(normalized)) {
@@ -181,7 +205,7 @@ async function prepareMemoryFile(filePath: string): Promise<void> {
 }
 
 async function syncMemoryAfterWrite(): Promise<void> {
-  if (isDbInitialized()) await syncMemoryIndex()
+  await dependencies.syncMemoryIndex()
 }
 
 type MemoryFsOperation = "create" | "delete" | "move" | "copy" | "ls"
@@ -265,7 +289,7 @@ async function requireMissingMemoryFsTarget(filePath: string): Promise<void> {
 }
 
 /** Create, delete, move, copy, or list a server-owned memory filesystem resource. */
-export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarget?: unknown, options?: MemoryAccessOptions): Promise<string> {
+async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarget?: unknown, options?: MemoryAccessOptions): Promise<string> {
   const operation = parseMemoryFsOperation(rawOperation)
   const sourceIsLocal = typeof fileName === "string" && fileName.trim().startsWith("local://")
   const targetProvided = rawTarget !== undefined
@@ -291,13 +315,13 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
     assertMemoryAccess(target.filePath, options)
     await prepareMemoryFile(target.filePath)
     await requireMissingMemoryFsTarget(target.filePath)
-    await recordStateRevision(target.filePath, "external")
+    await dependencies.persistence.recordStateRevision(target.filePath, "external")
     if (typeof fileName === "string" && fileName.trim().endsWith("/")) {
       await fs.mkdir(target.filePath, { mode: 0o700 })
     } else {
       await fs.writeFile(target.filePath, Buffer.alloc(0), { flag: "wx", mode: 0o600 })
     }
-    await recordStateRevision(target.filePath, "memory_fs:create")
+    await dependencies.persistence.recordStateRevision(target.filePath, "memory_fs:create")
     await syncMemoryAfterWrite()
     return `created ${typeof fileName === "string" && fileName.trim().endsWith("/") ? "directory" : "file"} ${target.uri}`
   }
@@ -308,13 +332,13 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
     const target = memoryFsPath(fileName)
     assertMemoryAccess(target.filePath, options)
     const stat = await existingMemoryFsTarget(target.filePath)
-    await recordStateRevision(target.filePath, "external")
+    await dependencies.persistence.recordStateRevision(target.filePath, "external")
     if (stat.isDirectory()) {
       await fs.rmdir(target.filePath)
     } else {
       await fs.unlink(target.filePath)
     }
-    await recordStateRevision(target.filePath, "memory_fs:delete")
+    await dependencies.persistence.recordStateRevision(target.filePath, "memory_fs:delete")
     await syncMemoryAfterWrite()
     return `deleted ${target.uri}`
   }
@@ -330,11 +354,11 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
     assertMemoryAccess(destination.filePath, options)
     await prepareMemoryFile(destination.filePath)
     await requireMissingMemoryFsTarget(destination.filePath)
-    await recordStateRevision(source.filePath, "external")
-    await recordStateRevision(destination.filePath, "external")
+    await dependencies.persistence.recordStateRevision(source.filePath, "external")
+    await dependencies.persistence.recordStateRevision(destination.filePath, "external")
     await fs.rename(source.filePath, destination.filePath)
-    await recordStateRevision(source.filePath, "memory_fs:move")
-    await recordStateRevision(destination.filePath, "memory_fs:move")
+    await dependencies.persistence.recordStateRevision(source.filePath, "memory_fs:move")
+    await dependencies.persistence.recordStateRevision(destination.filePath, "memory_fs:move")
     await syncMemoryAfterWrite()
     return `moved ${source.uri} -> ${destination.uri}`
   }
@@ -348,8 +372,8 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
   let sourceBytes: number
   if (sourceIsLocal) {
     sourceLabel = (fileName as string).trim()
-    const source = await readClientFile(localFsPath(sourceLabel))
-    await recordStateRevision(destination.filePath, "external")
+    const source = await dependencies.readClientFile(localFsPath(sourceLabel))
+    await dependencies.persistence.recordStateRevision(destination.filePath, "external")
     await fs.writeFile(destination.filePath, source.data, { flag: "wx", mode: 0o600 })
     sourceBytes = source.data.length
   } else {
@@ -359,13 +383,13 @@ export async function memoryFs(fileName: unknown, rawOperation: unknown, rawTarg
     if (!sourceStat.isFile()) throw new Error("copy source must be a regular file")
     sourceLabel = source.uri
     sourceBytes = sourceStat.size
-    await recordStateRevision(source.filePath, "external")
-    await recordStateRevision(destination.filePath, "external")
+    await dependencies.persistence.recordStateRevision(source.filePath, "external")
+    await dependencies.persistence.recordStateRevision(destination.filePath, "external")
     await fs.copyFile(source.filePath, destination.filePath, constants.COPYFILE_EXCL)
     await fs.chmod(destination.filePath, 0o600)
-    await recordStateRevision(source.filePath, "memory_fs:copy")
+    await dependencies.persistence.recordStateRevision(source.filePath, "memory_fs:copy")
   }
-  await recordStateRevision(destination.filePath, "memory_fs:copy")
+  await dependencies.persistence.recordStateRevision(destination.filePath, "memory_fs:copy")
   await syncMemoryAfterWrite()
   return `copied ${sourceLabel} -> ${destination.uri} (${sourceBytes} bytes)`
 }
@@ -385,7 +409,7 @@ function memoryResourcePath(uri: unknown): MemoryResource {
     throw new Error("memory path must be a relative Markdown file")
   }
   if (normalized === "soul.md") {
-    return { filePath: path.join(NANO_HOME, "soul.md"), indexed: false, root: NANO_HOME }
+    return { filePath: path.join(home, "soul.md"), indexed: false, root: home }
   }
   const resolved = path.resolve(MEMORY_ROOT, normalized)
   const relative = path.relative(MEMORY_ROOT, resolved)
@@ -444,9 +468,9 @@ async function updateMemoryResource(
   if (expectedHash !== undefined && (typeof expectedHash !== "string" || !/^[a-f0-9]{40}$/i.test(expectedHash))) {
     throw new Error("expected_hash must be a SHA-1 document hash")
   }
-  const virtualSoul = options?.virtualizeSoul === true && resource.filePath === path.join(NANO_HOME, "soul.md")
+  const virtualSoul = options?.virtualizeSoul === true && resource.filePath === path.join(home, "soul.md")
   if (!virtualSoul) await prepareExistingMemoryResource(resource)
-  const existing = virtualSoul ? await readFrontendSoul() : await fs.readFile(resource.filePath, "utf8")
+  const existing = virtualSoul ? await dependencies.bootstrap.readFrontendSoul() : await fs.readFile(resource.filePath, "utf8")
   if (expectedHash !== undefined) {
     const actualHash = createHash("sha1").update(existing).digest("hex")
     if (actualHash !== expectedHash.toLowerCase()) {
@@ -456,20 +480,20 @@ async function updateMemoryResource(
   const content = update(existing, resource.filePath)
   validateContent(content, true)
   if (virtualSoul) {
-    const result = await writeFrontendSoul(existing, content)
-    const warning = await getWarningForFile(FRONTEND_SOUL_VIEW_PATH)
+    const result = await dependencies.bootstrap.writeFrontendSoul(existing, content)
+    const warning = await getWarningForFile(frontendSoulViewPath)
     return `edited virtual memory://soul.md; diff saved to ${result.patchPath}${result.conflicted ? "; unresolved merge markers remain" : ""}${warning}`
   }
-  await recordStateRevision(resource.filePath, "external")
+  await dependencies.persistence.recordStateRevision(resource.filePath, "external")
   await replaceFile(resource.filePath, content)
-  await recordStateRevision(resource.filePath, "edit")
+  await dependencies.persistence.recordStateRevision(resource.filePath, "edit")
   if (resource.indexed) await syncMemoryAfterWrite()
   const warning = await getWarningForFile(resource.filePath)
   return `edited ${resource.filePath}${warning}`
 }
 
 /** Replace one exact source fragment, or initialize an existing empty memory file. */
-export async function editMemoryResource(
+async function editMemoryResource(
   uri: unknown,
   oldText: unknown,
   newText: unknown,
@@ -493,7 +517,7 @@ export async function editMemoryResource(
 }
 
 /** Apply the same hashline edit engine used by attached client files. */
-export async function editMemoryResourceHashline(
+async function editMemoryResourceHashline(
   uri: unknown,
   edits: unknown,
   expectedHash?: unknown,
@@ -510,13 +534,13 @@ export async function editMemoryResourceHashline(
   return warnings?.length ? `${result}\nWarnings: ${warnings.join("; ")}` : result
 }
 
-export async function writeSoul(content: unknown, mode: unknown, target?: unknown): Promise<string> {
-  const filePath = path.join(NANO_HOME, "soul.md")
+async function writeSoul(content: unknown, mode: unknown, target?: unknown): Promise<string> {
+  const filePath = path.join(home, "soul.md")
   const value = validateContent(content)
   await fs.mkdir(path.dirname(filePath), { recursive: true })
 
   if (mode === "append") {
-    await recordStateRevision(filePath, "external")
+    await dependencies.persistence.recordStateRevision(filePath, "external")
     const handle = await fs.open(
       filePath,
       constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0),
@@ -529,7 +553,7 @@ export async function writeSoul(content: unknown, mode: unknown, target?: unknow
       await handle.close()
     }
     await fs.chmod(filePath, 0o600)
-    await recordStateRevision(filePath, "writeSoul:append")
+    await dependencies.persistence.recordStateRevision(filePath, "writeSoul:append")
     const warning = await getWarningForFile(filePath)
     return `appended ${filePath}${warning}`
   } else if (mode === "patch") {
@@ -555,9 +579,9 @@ export async function writeSoul(content: unknown, mode: unknown, target?: unknow
     }
 
     const newContent = existing.slice(0, index) + value + existing.slice(index + target.length)
-    await recordStateRevision(filePath, "external")
+    await dependencies.persistence.recordStateRevision(filePath, "external")
     await replaceFile(filePath, newContent)
-    await recordStateRevision(filePath, "writeSoul:patch")
+    await dependencies.persistence.recordStateRevision(filePath, "writeSoul:patch")
     const warning = await getWarningForFile(filePath)
     return `patched ${filePath}${warning}`
   } else {
@@ -565,7 +589,7 @@ export async function writeSoul(content: unknown, mode: unknown, target?: unknow
   }
 }
 
-export async function writeMemory(
+async function writeMemory(
   relativePath: unknown,
   content: unknown,
   mode: unknown,
@@ -575,10 +599,10 @@ export async function writeMemory(
   const filePath = memoryPath(relativePath)
   const value = validateContent(content, mode === "patch")
   await prepareMemoryFile(filePath)
-  const tracked = isTrackedStatePath(filePath)
+  const tracked = isTrackedStatePath(filePath, home)
 
   if (mode === "append") {
-    if (tracked) await recordStateRevision(filePath, "external")
+    if (tracked) await dependencies.persistence.recordStateRevision(filePath, "external")
     const handle = await fs.open(
       filePath,
       constants.O_APPEND | constants.O_CREAT | constants.O_WRONLY | (constants.O_NOFOLLOW ?? 0),
@@ -591,7 +615,7 @@ export async function writeMemory(
       await handle.close()
     }
     await fs.chmod(filePath, 0o600)
-    if (tracked) await recordStateRevision(filePath, "writeMemory:append")
+    if (tracked) await dependencies.persistence.recordStateRevision(filePath, "writeMemory:append")
     await syncMemoryAfterWrite()
     const warning = await getWarningForFile(filePath)
     return `appended ${filePath}${warning}`
@@ -628,9 +652,9 @@ export async function writeMemory(
 
     const newContent = existing.slice(0, index) + value + existing.slice(index + target.length)
     validateContent(newContent, true)
-    if (tracked) await recordStateRevision(filePath, "external")
+    if (tracked) await dependencies.persistence.recordStateRevision(filePath, "external")
     await replaceFile(filePath, newContent)
-    if (tracked) await recordStateRevision(filePath, "writeMemory:patch")
+    if (tracked) await dependencies.persistence.recordStateRevision(filePath, "writeMemory:patch")
     await syncMemoryAfterWrite()
     const warning = await getWarningForFile(filePath)
     return `patched ${filePath}${warning}`
@@ -653,7 +677,7 @@ function isGarbageFile(name: string): boolean {
 }
 
 async function getFilesRecursively(dir: string): Promise<string[]> {
-  let entries: import("node:fs").Dirent[]
+  let entries: Dirent[]
   try {
     entries = await fs.readdir(dir, { withFileTypes: true })
   } catch (error) {
@@ -683,13 +707,13 @@ async function getMemoryDirectoryEntries(dir: string, options?: MemoryAccessOpti
     .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)
 }
 
-export async function readMemory(relativePath: unknown, startLine?: unknown, endLine?: unknown, options?: MemoryAccessOptions): Promise<string> {
+async function readMemory(relativePath: unknown, startLine?: unknown, endLine?: unknown, options?: MemoryAccessOptions): Promise<string> {
   const { filePath, displayPath, root } = memoryReadTarget(relativePath)
   assertMemoryAccess(filePath, options)
   if (filePath === MEMORY_ROOT) await fs.mkdir(MEMORY_ROOT, { recursive: true, mode: 0o700 })
-  const virtualSoul = options?.virtualizeSoul === true && filePath === path.join(NANO_HOME, "soul.md")
+  const virtualSoul = options?.virtualizeSoul === true && filePath === path.join(home, "soul.md")
   if (virtualSoul) {
-    return formatMemoryRead(displayPath, await readFrontendSoul(), startLine, endLine, options?.hashline)
+    return formatMemoryRead(displayPath, await dependencies.bootstrap.readFrontendSoul(), startLine, endLine, options?.hashline)
   }
   const stat = await verifyMemoryReadTarget(filePath, root)
   if (stat.isDirectory()) {
@@ -756,7 +780,7 @@ function formatMemoryRead(displayPath: string, content: string, startLine?: unkn
   return `[${displayPath}  ${rangeStr}${totalStr}]\n${selected}`
 }
 
-export async function listMemory(options?: MemoryAccessOptions): Promise<string> {
+async function listMemory(options?: MemoryAccessOptions): Promise<string> {
   await fs.mkdir(MEMORY_ROOT, { recursive: true, mode: 0o700 })
   const absoluteFiles = await getFilesRecursively(MEMORY_ROOT)
   const relativeFiles = absoluteFiles
@@ -769,7 +793,7 @@ export async function listMemory(options?: MemoryAccessOptions): Promise<string>
   return relativeFiles.sort().join("\n")
 }
 
-export async function grepMemory(query: unknown, caseInsensitive?: unknown, options?: MemoryAccessOptions): Promise<string> {
+async function grepMemory(query: unknown, caseInsensitive?: unknown, options?: MemoryAccessOptions): Promise<string> {
   if (typeof query !== "string" || !query) {
     throw new Error("query is required")
   }
@@ -807,14 +831,12 @@ export async function grepMemory(query: unknown, caseInsensitive?: unknown, opti
   return matches.join("\n")
 }
 
-const SKILLS_ROOT = path.join(MEMORY_ROOT, "skills")
-
 /**
  * Loads a skill doc from memories/skills/<name>.md, stripping YAML frontmatter,
  * and returns the full body for injection into context. `name` may be given
  * with or without the .md extension.
  */
-export async function loadSkill(name: unknown): Promise<string> {
+async function loadSkill(name: unknown): Promise<string> {
   if (typeof name !== "string" || !name.trim()) {
     throw new Error("name is required")
   }
@@ -849,4 +871,17 @@ export async function loadSkill(name: unknown): Promise<string> {
   // strip leading YAML frontmatter block
   const body = content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, "").trimStart()
   return `[skill: ${base}]\n${body}`
+}
+
+  return {
+    memoryFs,
+    readMemory,
+    listMemory,
+    grepMemory,
+    editMemoryResource,
+    editMemoryResourceHashline,
+    writeMemory,
+    writeSoul,
+    loadSkill,
+  }
 }

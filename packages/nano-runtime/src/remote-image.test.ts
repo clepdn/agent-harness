@@ -1,13 +1,11 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { Context } from "./llm"
-import { initDb, startConversation } from "./db"
 import { fetchRemoteImage } from "./remote-image"
-import { fallbackModel } from "./runner/config"
 import { createNiriToolCatalog } from "./runner/tool-catalog"
-import { buildToolHandlers } from "./runner/loop-tool-registry"
 import { executeToolCall } from "./runner/loop-tool-runtime"
 import type { LoopHooks, LoopState } from "./runner/types"
+import { config } from "./config"
 
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aL1sAAAAASUVORK5CYII=", "base64")
 
@@ -60,15 +58,23 @@ test("remote image loader enforces the image byte limit before reading", async (
 })
 
 test("frontend can invoke URL image_tool without a client executor", async (t) => {
-  initDb(":memory:")
+  const vision = config.model.vision
+  config.model.vision = true
+  const { createExecutionServices } = await import("./test-model-provider")
+  const fixture = await createExecutionServices()
+  config.model.vision = vision
+  t.after(() => fixture.close())
+  const executionServices = fixture.services
+  const model = executionServices.model.current("frontend").fallbackModel
+  const convId = executionServices.persistence.startConversation("test", new Date().toISOString())
   t.mock.method(globalThis, "fetch", async () => new Response(png, { headers: { "content-type": "image/png" } }))
   const state: LoopState = {
     runtimeKind: "frontend",
-    context: new Context({ model: fallbackModel }),
+    context: new Context({ model, providerResolver: executionServices.providerResolver }),
     pendingInputs: [],
     tokenCount: 0,
     contextSize: 0,
-    toolCatalog: createNiriToolCatalog({ frontend: true, vision: true }),
+    toolCatalog: createNiriToolCatalog({ frontend: true, vision: true, contributions: executionServices.tools.list("frontend") }),
     toolCatalogEpoch: 1,
     toolCatalogFingerprint: "",
     toolInFlight: false,
@@ -77,6 +83,7 @@ test("frontend can invoke URL image_tool without a client executor", async (t) =
     memoryRecallPending: false,
     shutdownRequested: false,
     turnInFlight: false,
+    services: executionServices,
     restRequested: false,
     restReason: "",
   }
@@ -92,16 +99,15 @@ test("frontend can invoke URL image_tool without a client executor", async (t) =
     shouldShutdown: () => false,
     resolveShutdown() {},
   } satisfies LoopHooks
-  const convId = startConversation("test", new Date().toISOString())
-  await executeToolCall(convId, state, hooks, buildToolHandlers(), {
+  await executeToolCall(convId, state, hooks, {
     type: "toolCall",
     id: "url-image",
     name: "image_tool",
     arguments: { path: "https://8.8.8.8/photo.png", note: "inspect this" },
   })
 
-  assert.equal(state.context.items[0]?.role, "toolResult")
-  const imageMessage = state.context.items[1]
+  assert.ok(state.context.items.some((message) => message.role === "toolResult" && message.toolCallId === "url-image" && !message.isError))
+  const imageMessage = state.context.items.find((message) => message.role === "user")
   assert.equal(imageMessage?.role, "user")
   assert.equal(Array.isArray(imageMessage?.content) && imageMessage.content[1]?.type, "image")
 })

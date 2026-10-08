@@ -2,6 +2,27 @@ import assert from "node:assert/strict"
 import test from "node:test"
 import { HttpToolClient } from "./http-client.js"
 
+test("cancelled health handshake rejects late success without publishing capabilities", async () => {
+  let resolveResponse!: (response: Response) => void
+  const response = new Promise<Response>((resolve) => { resolveResponse = resolve })
+  const client = new HttpToolClient({
+    agentId: "mira",
+    endpoint: "http://client.example:3002",
+    capabilities: [],
+    fetchImpl: async () => response,
+  })
+  const controller = new AbortController()
+  const handshake = client.start(controller.signal)
+  const rejected = assert.rejects(handshake, /handshake cancelled/)
+  controller.abort(new Error("handshake cancelled"))
+  resolveResponse(Response.json({ capabilities: ["shell"], workspace: { id: "late", root: "/workspace" } }))
+  await rejected
+  assert.equal(client.status().connected, false)
+  assert.deepEqual(client.getCapabilities(), [])
+  assert.equal(client.getWorkspace(), null)
+})
+
+
 test("direct client calls need no token or pairing handshake", async () => {
   const requests: RequestInit[] = []
   const client = new HttpToolClient({

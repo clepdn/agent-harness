@@ -1,6 +1,6 @@
 import { CDN } from "discord.js"
+import type Database from "better-sqlite3"
 import { config } from "../config"
-import { getDb, isDbInitialized } from "../db"
 import { imageMime, type ContextImageAttachment, type ContextImageReference } from "../context-images"
 import type { UserMessage } from "../types"
 import { discordEmojiReferences } from "./context-emojis"
@@ -11,10 +11,10 @@ const validId = (id: string) => /^\d{1,22}$/.test(id)
 const object = (value: unknown): Record<string, unknown> | undefined =>
   value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined
 
-function profileReference(value: unknown): AvatarReference | undefined {
+function profileReference(value: unknown, botUserId?: string): AvatarReference | undefined {
   const user = object(value)
   const id = String(user?.id ?? "")
-  if (!validId(id) || id === config.discord.bot_user_id) return undefined
+  if (!validId(id) || id === (botUserId ?? config.discord.bot_user_id)) return undefined
   const name = String(user?.global_name ?? user?.username ?? id)
   return {
     kind: "discord-avatar", userId: id, label: `Discord profile picture of @${name} (user ${id})`,
@@ -24,22 +24,20 @@ function profileReference(value: unknown): AvatarReference | undefined {
 }
 
 /** Lookup only message rows actually surfaced, never mark avatars seen at ingestion. */
-function storedReference(messageId?: string, authorId?: string): AvatarReference | undefined {
-  if (!isDbInitialized()) return undefined
+function storedReference(db: Database.Database, messageId?: string, authorId?: string, botUserId?: string): AvatarReference | undefined {
   const row = messageId
-    ? getDb().prepare("select author_id, author_username, raw_json from discord_messages where message_id = ?").get(messageId)
-    : getDb().prepare("select author_id, author_username, raw_json from discord_messages where author_id = ? order by created_at desc limit 1").get(authorId)
+    ? db.prepare("select author_id, author_username, raw_json from discord_messages where message_id = ?").get(messageId)
+    : db.prepare("select author_id, author_username, raw_json from discord_messages where author_id = ? order by created_at desc limit 1").get(authorId)
   const record = object(row)
   if (!record) return undefined
   let raw: Record<string, unknown> | undefined
   try { raw = object(JSON.parse(String(record.raw_json))) } catch { /* old rows may have no payload */ }
   const message = object(raw?.message) ?? raw
-  return profileReference(object(message?.author) ?? { id: record.author_id, username: record.author_username })
+  return profileReference(object(message?.author) ?? { id: record.author_id, username: record.author_username }, botUserId)
 }
 
-function storedEmojiReferences(messageId: string): ContextImageReference[] {
-  if (!isDbInitialized()) return []
-  const row = getDb().prepare("select content from discord_messages where message_id = ?").get(messageId)
+function storedEmojiReferences(db: Database.Database, messageId: string): ContextImageReference[] {
+  const row = db.prepare("select content from discord_messages where message_id = ?").get(messageId)
   const content = object(row)?.content
   return typeof content === "string" ? discordEmojiReferences(content) : []
 }
@@ -53,16 +51,16 @@ function unique(refs: ContextImageReference[]): ContextImageReference[] {
   ])).values()]
 }
 
-export function discordEventImageReferences(event: UserMessage): ContextImageReference[] {
+export function discordEventImageReferences(db: Database.Database, event: UserMessage, botUserId?: string): ContextImageReference[] {
   if (event.source !== "discord") return []
   const refs: ContextImageReference[] = discordEmojiReferences(event.content)
   for (const raw of Array.isArray(event.raw) ? event.raw : [event.raw]) {
     const root = object(raw)
     const message = object(root?.message) ?? root
     if (config.discord.include_user_avatars) {
-      const ref = profileReference(message?.author)
+      const ref = profileReference(message?.author, botUserId)
       if (ref) refs.push(ref)
-      const reply = profileReference(object(message?.referenced_message)?.author)
+      const reply = profileReference(object(message?.referenced_message)?.author, botUserId)
       if (reply) refs.push(reply)
     }
     if (typeof message?.content === "string") refs.push(...discordEmojiReferences(message.content))
@@ -71,22 +69,22 @@ export function discordEventImageReferences(event: UserMessage): ContextImageRef
   }
   for (const match of event.content.matchAll(/\bsource_item_id\s*[:=]\s*(\d+)/g)) {
     if (config.discord.include_user_avatars) {
-      const ref = storedReference(match[1])
+      const ref = storedReference(db, match[1], undefined, botUserId)
       if (ref) refs.push(ref)
     }
-    refs.push(...storedEmojiReferences(match[1]!))
+    refs.push(...storedEmojiReferences(db, match[1]!))
   }
   for (const target of event.discordTargets ?? []) {
     if (config.discord.include_user_avatars) {
-      const ref = storedReference(target.messageId)
+      const ref = storedReference(db, target.messageId, undefined, botUserId)
       if (ref) refs.push(ref)
     }
-    refs.push(...storedEmojiReferences(target.messageId))
+    refs.push(...storedEmojiReferences(db, target.messageId))
   }
   return unique(refs)
 }
 
-export function discordToolImageReferences(text: string): ContextImageReference[] {
+export function discordToolImageReferences(db: Database.Database, text: string, botUserId?: string): ContextImageReference[] {
   if (!config.discord.include_user_avatars && !config.discord.attach_emoji_bitmap) return []
   const refs: ContextImageReference[] = []
   function visit(value: unknown): void {
@@ -100,12 +98,12 @@ export function discordToolImageReferences(text: string): ContextImageReference[
     const messageId = String(row.message_id ?? row.source_item_id ?? row.item_id ?? "")
     if (config.discord.include_user_avatars) {
       const authorId = String(row.author_id ?? "")
-      const ref = validId(messageId) ? storedReference(messageId)
-        : validId(authorId) ? storedReference(undefined, authorId) ?? profileReference({ id: authorId, username: row.author_username })
+      const ref = validId(messageId) ? storedReference(db, messageId, undefined, botUserId)
+        : validId(authorId) ? storedReference(db, undefined, authorId, botUserId) ?? profileReference({ id: authorId, username: row.author_username }, botUserId)
         : undefined
       if (ref) refs.push(ref)
     }
-    if (validId(messageId)) refs.push(...storedEmojiReferences(messageId))
+    if (validId(messageId)) refs.push(...storedEmojiReferences(db, messageId))
     for (const child of Object.values(row)) if (child && typeof child === "object") visit(child)
     for (const child of Object.values(row)) if (typeof child === "string") visit(child)
   }
@@ -130,11 +128,13 @@ export async function loadDiscordAvatar(ref: AvatarReference): Promise<ContextIm
       headers: { Authorization: `Bot ${config.discord.bot_token}` }, signal: AbortSignal.timeout(5000),
     })
     if (!response.ok) throw new Error("Discord profile unavailable")
-    const user = await response.json() as { id: string; avatar: string | null; discriminator?: string }
-    if (!validId(user.id)) throw new Error("invalid Discord profile")
-    id = user.id
-    avatar = user.avatar
-    discriminator = user.discriminator
+    const payload: unknown = await response.json()
+    const user = object(payload)
+    const resolvedId = String(user?.id ?? "")
+    if (!validId(resolvedId)) throw new Error("invalid Discord profile")
+    id = resolvedId
+    avatar = user?.avatar === null || typeof user?.avatar === "string" ? user.avatar : null
+    discriminator = typeof user?.discriminator === "string" ? user.discriminator : undefined
   }
   if (avatar != null && !/^[a-zA-Z0-9_]+$/.test(avatar)) throw new Error("invalid Discord avatar hash")
   const defaultIndex = discriminator && discriminator !== "0"

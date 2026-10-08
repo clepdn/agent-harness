@@ -1,101 +1,101 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { config } from "../config"
-import {
-  configureDiscordTyping,
-  dispatchDiscordTyping,
-  notifyDiscordModelActivity,
-  beginDiscordToolWait,
-  endDiscordToolWait,
-  stopDiscordTyping,
-  __discordTypingLeaseTest,
-} from "./typing-lease"
+import { createDiscordTypingLease } from "./typing-lease"
+
+const REFRESH_MS = 8_000
+const LONG_TOOL_WAIT_MS = 20_000
+
 
 test("Discord typing is enabled by default", () => {
-  assert.equal(config.discord.typing_enabled, true)
+  const sends: string[] = []
+  const typing = createDiscordTypingLease((channelId) => { sends.push(channelId) })
+  typing.dispatch("turn", "channel")
+  typing.notify("turn")
+  assert.deepEqual(sends, ["channel"])
+  typing.reset()
 })
 
 test("disabled typing does not create a lease", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })
   let sends = 0
-  configureDiscordTyping(() => { sends++ }, false)
+  const typing = createDiscordTypingLease(() => { sends++ }, false)
+  typing.dispatch("turn-disabled", "channel-disabled")
   try {
-    dispatchDiscordTyping("turn-disabled", "channel-disabled")
-    notifyDiscordModelActivity("turn-disabled")
-    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs * 2)
+    typing.notify("turn-disabled")
+    t.mock.timers.tick(REFRESH_MS * 2)
     assert.equal(sends, 0)
   } finally {
-    __discordTypingLeaseTest.reset()
+    typing.reset()
   }
 })
 
 test("typing lease starts on model activity and refreshes", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })
   const sends: string[] = []
-  configureDiscordTyping((channelId) => { sends.push(channelId) })
+  const typing = createDiscordTypingLease((channelId) => { sends.push(channelId) })
   try {
-    dispatchDiscordTyping("turn-1", "channel-1")
-    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs * 2)
+    typing.dispatch("turn-1", "channel-1")
+    t.mock.timers.tick(REFRESH_MS * 2)
     assert.deepEqual(sends, [])
-    notifyDiscordModelActivity("turn-1")
+    typing.notify("turn-1")
     assert.deepEqual(sends, ["channel-1"])
-    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs)
+    t.mock.timers.tick(REFRESH_MS)
     assert.deepEqual(sends, ["channel-1", "channel-1"])
   } finally {
-    __discordTypingLeaseTest.reset()
+    typing.reset()
   }
 })
 
 test("stale turn cannot start or stop a superseding lease", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })
   let sends = 0
-  configureDiscordTyping(() => { sends++ })
+  const typing = createDiscordTypingLease(() => { sends++ })
   try {
-    dispatchDiscordTyping("old", "old-channel")
-    dispatchDiscordTyping("new", "new-channel")
-    notifyDiscordModelActivity("old")
+    typing.dispatch("old", "old-channel")
+    typing.dispatch("new", "new-channel")
+    typing.notify("old")
     assert.equal(sends, 0)
-    notifyDiscordModelActivity("new")
+    typing.notify("new")
     assert.equal(sends, 1)
-    stopDiscordTyping("old")
-    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs)
+    typing.stop("old")
+    t.mock.timers.tick(REFRESH_MS)
     assert.equal(sends, 2)
   } finally {
-    __discordTypingLeaseTest.reset()
+    typing.reset()
   }
 })
 
 test("long tool wait pauses refresh and resumes after tool", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })
   let sends = 0
-  configureDiscordTyping(() => { sends++ })
+  const typing = createDiscordTypingLease(() => { sends++ })
   try {
-    dispatchDiscordTyping("turn-2", "channel-2")
-    notifyDiscordModelActivity("turn-2")
-    beginDiscordToolWait("turn-2")
-    t.mock.timers.tick(__discordTypingLeaseTest.longToolWaitMs - 1)
+    typing.dispatch("turn-2", "channel-2")
+    typing.notify("turn-2")
+    typing.beginToolWait("turn-2")
+    t.mock.timers.tick(LONG_TOOL_WAIT_MS - 1)
     assert.equal(sends, 3)
     t.mock.timers.tick(1)
-    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs)
+    t.mock.timers.tick(REFRESH_MS)
     assert.equal(sends, 3)
-    endDiscordToolWait("turn-2")
+    typing.endToolWait("turn-2")
     assert.equal(sends, 4)
   } finally {
-    __discordTypingLeaseTest.reset()
+    typing.reset()
   }
 })
 
 test("stop synchronously cancels refresh timers", (t) => {
   t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })
   let sends = 0
-  configureDiscordTyping(() => { sends++ })
+  const typing = createDiscordTypingLease(() => { sends++ })
   try {
-    dispatchDiscordTyping("turn-3", "channel-3")
-    notifyDiscordModelActivity("turn-3")
-    stopDiscordTyping("turn-3")
-    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs * 2)
+    typing.dispatch("turn-3", "channel-3")
+    typing.notify("turn-3")
+    typing.stop("turn-3")
+    t.mock.timers.tick(REFRESH_MS * 2)
     assert.equal(sends, 1)
   } finally {
-    __discordTypingLeaseTest.reset()
+    typing.reset()
   }
 })

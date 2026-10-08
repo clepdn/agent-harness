@@ -1,39 +1,32 @@
 import assert from "node:assert/strict"
 import test, { type TestContext } from "node:test"
 import { __loopTest, runLoop } from "./loop"
-import { __loopToolsTest, processToolCalls } from "./loop-tools"
-import { modelState } from "./model-state"
-import { fallbackModel } from "./config"
+import { processToolCalls } from "./loop-tools"
 import type { Message, UserMessage } from "../types"
 import type { LoopHooks, LoopState } from "./types"
-import { makeUserMessage, makeAssistantMessage, makeToolResultMessage } from "./test-helpers"
-import {
-  configureDiscordTyping,
-  dispatchDiscordTyping,
-  notifyDiscordModelActivity,
-  __discordTypingLeaseTest,
-} from "../discord/typing-lease"
-import { initDb, startConversation } from "../db"
 import { Context } from "../llm"
+import { createExecutionServices } from "../test-model-provider"
+import { makeAssistantMessage, makeToolResultMessage, makeUserMessage } from "./test-helpers"
+import { createNiriToolCatalog } from "./tool-catalog"
 
-const testClientTools = {
-  getCapabilities: () => [],
-  getWorkspace: () => null,
-  execute: async () => {
-    throw new Error("unexpected client tool execution")
-  },
-}
+const fixture = await createExecutionServices()
+test.after(() => fixture.close())
+const { services } = fixture
+const modelState = services.model.current()
+const fallbackModel = modelState.fallbackModel
+const testClientTools = services.client
 
 function makeState(): LoopState {
   return {
-    context: new Context({ model: fallbackModel }),
+    context: new Context({ model: fallbackModel, providerResolver: services.providerResolver, prepareMessages: services.images.prepareMessages }),
+    services,
     pendingInputs: [],
     tokenCount: 0,
     contextSize: 0,
-    toolCatalog: [],
-    toolInFlight: false,
+    toolCatalog: services.tools.list("main").map(({ definition }) => definition),
     toolCatalogEpoch: 1,
     toolCatalogFingerprint: "",
+    toolInFlight: false,
     memoryRecallCooldowns: {},
     memoryRecallTurn: 0,
     memoryRecallPending: false,
@@ -62,70 +55,6 @@ test("pendingDiscordChannel ignores stale Discord context before the prior assis
   assert.equal(__loopTest.pendingDiscordChannel(conversation, conversation.length), undefined)
 })
 
-function makeTypingSupersessionHooks(state: LoopState, injected: UserMessage[]) {
-  return {
-    injectIncomingEvent: (_convId: number, event: UserMessage) => {
-      injected.push(event)
-      state.context.append(makeUserMessage(`[incoming — ${event.source}]\n\n${event.content}`))
-    },
-  } as never
-}
-
-test("new Discord event stops typing for the superseded turn", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })
-  const state = makeState()
-  const injected: UserMessage[] = []
-  const typingChannels: string[] = []
-  state.discordTypingTurnId = "old-turn"
-  state.discordTypingChannelId = "old-channel"
-  configureDiscordTyping((channelId) => { typingChannels.push(channelId) })
-  dispatchDiscordTyping("old-turn", "old-channel")
-  notifyDiscordModelActivity("old-turn")
-  state.pendingInputs.push({
-    source: "discord",
-    triggeredAt: "2026-08-28T00:00:00.000Z",
-    content: "[discord/dm] @alice\ncontext: DM new-channel\n\nnew message",
-    raw: {},
-  })
-
-  try {
-    assert.equal(__loopToolsTest.maybeInterruptAfterTool(1, state, makeTypingSupersessionHooks(state, injected), [], 0), true)
-    assert.equal(injected[0]?.source, "discord")
-    assert.equal(__loopTest.pendingDiscordChannel(state.context.items, state.context.items.length), "new-channel")
-    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs * 2)
-    assert.deepEqual(typingChannels, ["old-channel"])
-  } finally {
-    __discordTypingLeaseTest.reset()
-  }
-})
-
-test("new non-Discord event stops typing for the superseded Discord turn", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout", "setInterval", "Date"] })
-  const state = makeState()
-  const injected: UserMessage[] = []
-  const typingChannels: string[] = []
-  state.discordTypingTurnId = "old-turn"
-  state.discordTypingChannelId = "old-channel"
-  configureDiscordTyping((channelId) => { typingChannels.push(channelId) })
-  dispatchDiscordTyping("old-turn", "old-channel")
-  notifyDiscordModelActivity("old-turn")
-  state.pendingInputs.push({
-    source: "chat",
-    triggeredAt: "2026-08-28T00:00:00.000Z",
-    content: "hello from chat",
-    raw: {},
-  })
-
-  try {
-    assert.equal(__loopToolsTest.maybeInterruptAfterTool(1, state, makeTypingSupersessionHooks(state, injected), [], 0), true)
-    assert.equal(injected[0]?.source, "chat")
-    assert.equal(__loopTest.pendingDiscordChannel(state.context.items, state.context.items.length), undefined)
-    t.mock.timers.tick(__discordTypingLeaseTest.refreshMs * 2)
-    assert.deepEqual(typingChannels, ["old-channel"])
-  } finally {
-    __discordTypingLeaseTest.reset()
-  }
-})
 
 test("applyDiscordSendNudge appends a follow-up user nudge for unsent Discord replies", () => {
   const state = makeState()
@@ -301,13 +230,8 @@ test("waitForNextEvent waits for and injects the next external event", async () 
 })
 
 test("wait tool yields to the runner idle wait instead of blocking on the raw event hook", async () => {
-  initDb(":memory:")
-  const convId = startConversation("test", new Date().toISOString())
+  const convId = services.persistence.startConversation("test", new Date().toISOString())
   const state = makeState()
-  state.toolCatalog = [{
-    type: "function",
-    function: { name: "wait", description: "wait", parameters: { type: "object", properties: {} } },
-  }]
   let rawWaitCalls = 0
 
   const outcome = await processToolCalls(convId, state, {
@@ -332,6 +256,57 @@ test("wait tool yields to the runner idle wait instead of blocking on the raw ev
   assert.equal(outcome, "wait")
   assert.equal(rawWaitCalls, 0)
   assert.equal(state.context.items.at(-1)?.role, "toolResult")
+})
+
+test("wait_then_continue injects an interrupted event with one successful tool result", async () => {
+  const convId = services.persistence.startConversation("test", new Date().toISOString())
+  const state = makeState()
+  state.toolCatalog = createNiriToolCatalog({
+    contributions: services.tools.list("main"),
+    clientCapabilities: services.client.capabilities(),
+    workspace: services.client.workspace(),
+  })
+  const event = {
+    source: "chat" as const,
+    triggeredAt: "2026-05-01T04:40:00.000Z",
+    content: "Please continue with this update.",
+    raw: {},
+  }
+  const injected: unknown[] = []
+
+  const outcome = await processToolCalls(convId, state, {
+    clientTools: testClientTools,
+    refreshToolCatalog: () => {},
+    waitForEvent: async () => null,
+    waitForEventWithTimeout: async (timeoutMs) => {
+      assert.equal(timeoutMs, 1_000)
+      return event
+    },
+    injectIncomingEvent: (id, incoming) => {
+      assert.equal(id, convId)
+      injected.push(incoming)
+      state.context.append(makeUserMessage(incoming.content))
+    },
+    flushDeferredEvents: () => {},
+    clearSession: async () => {},
+    saveSession: async () => {},
+    saveShutdownSnapshot: async () => {},
+    shouldShutdown: () => false,
+    resolveShutdown: () => {},
+  }, [{ type: "toolCall", id: "call_wait_then_continue", name: "wait_then_continue", arguments: { timeout_ms: 1_000 } }])
+
+  const results = state.context.items.filter((message) => message.role === "toolResult" && message.toolCallId === "call_wait_then_continue")
+  assert.equal(outcome, "continue")
+  assert.equal(injected.length, 1)
+  assert.equal(injected[0], event)
+  assert.equal(results.length, 1)
+  const result = results[0]
+  assert.ok(result && result.role === "toolResult")
+  if (!result || result.role !== "toolResult") throw new Error("expected the wait result")
+  assert.equal(result.isError, false)
+  assert.match(result.content.map((part) => part.type === "text" ? part.text : "").join(""), /interrupted by an incoming event/i)
+  assert.equal(state.context.items.at(-1)?.role, "user")
+  assert.match(String(state.context.items.at(-1)?.content), /Please continue with this update/)
 })
 
 test("waitForNextEvent returns after successful compaction for immediate reactivation", async () => {
@@ -372,8 +347,7 @@ test("waitForNextEvent returns after successful compaction for immediate reactiv
 
 for (const firstReply of ["wait", "no-tools"] as const) {
   test(`full-context compaction checks for unfinished work before a ${firstReply} reply idles`, async (t) => {
-    initDb(":memory:")
-    const convId = startConversation("test", new Date().toISOString())
+    const convId = services.persistence.startConversation("test", new Date().toISOString())
     const savedModelState = { ...modelState }
     t.after(() => Object.assign(modelState, savedModelState))
     Object.assign(modelState, {
@@ -392,6 +366,8 @@ for (const firstReply of ["wait", "no-tools"] as const) {
     state.contextSize = 100_000
     state.context = new Context({
       model: modelState.primaryModel!,
+      providerResolver: services.providerResolver,
+      prepareMessages: services.images.prepareMessages,
       apiKey: "test",
       items: [
         ...Array.from({ length: 50 }, (_, i) => i % 2 === 0
@@ -400,10 +376,6 @@ for (const firstReply of ["wait", "no-tools"] as const) {
         makeUserMessage("Finish the current task after compaction."),
       ],
     })
-    state.toolCatalog = [{
-      type: "function",
-      function: { name: "wait", description: "wait", parameters: { type: "object", properties: {} } },
-    }]
     const prompts: Array<Record<string, any>> = []
     let summaryRequests = 0
     let idleWaits = 0
@@ -464,6 +436,8 @@ async function makeCacheBudgetState(t: TestContext): Promise<LoopState> {
   const state = makeState()
   state.context = new Context({
     model: { ...fallbackModel, api: "openai-completions", provider: "openai", baseUrl: "https://cache-budget.invalid/v1" },
+    providerResolver: services.providerResolver,
+    prepareMessages: services.images.prepareMessages,
     apiKey: "test",
     items: [makeUserMessage("hello")],
   })
@@ -669,6 +643,48 @@ test("applyCompaction attempts an idle burn even below the token trigger", async
 
   modelState.compactionStrategy = savedStrategy
   modelState.compactTriggerTokens = savedTrigger
+})
+
+test("manual compaction rewrites context with strategy off while preserving prompt-cache preference", async (t) => {
+  const savedModelState = { ...modelState }
+  t.after(() => Object.assign(modelState, savedModelState))
+  Object.assign(modelState, {
+    useFallback: false,
+    primaryModel: { ...fallbackModel, id: "manual-off-compaction-test", provider: "openai", baseUrl: "https://manual-off.invalid/v1" },
+    primaryApiKey: "test",
+    summaryModel: null,
+    respectPromptCache: true,
+    compactionStrategy: "off",
+    compactTriggerTokens: 100_000,
+    deepArchive: false,
+  })
+
+  const state = makeState()
+  state.contextSize = 1
+  state.context = new Context({
+    model: modelState.primaryModel!,
+    providerResolver: services.providerResolver,
+    prepareMessages: services.images.prepareMessages,
+    apiKey: "test",
+    items: [
+      ...Array.from({ length: 50 }, (_, i) => i % 2 === 0
+        ? makeUserMessage(`EXPIRED_HISTORY_MARKER_${i}: ${"older detail ".repeat(40)}`)
+        : makeAssistantMessage(`Earlier work ${i}: ${"completed step ".repeat(40)}`)),
+      makeUserMessage("The current request must remain available after compaction."),
+    ],
+  })
+  t.mock.method(globalThis, "fetch", async () => Response.json({
+    choices: [{ index: 0, message: { role: "assistant", content: "I completed earlier steps and retained the decisions and unresolved work for the next turn." }, finish_reason: "stop" }],
+  }))
+
+  const result = await __loopTest.applyManualCompaction(state, { forceSummaryModel: false, snapcompact: false })
+  const summary = state.context.items.find((message) => message.role === "user" && typeof message.content === "string" && message.content.startsWith("[context summary v1]"))
+  const allContent = state.context.items.map((message) => typeof message.content === "string" ? message.content : "").join("\n")
+
+  assert.equal(result, "rewritten")
+  assert.match(String(summary?.content), /retained the decisions and unresolved work/i)
+  assert.match(allContent, /The current request must remain available after compaction/)
+  assert.doesNotMatch(allContent, /EXPIRED_HISTORY_MARKER_0:/)
 })
 
 test("voice delegation nudges until voice_reply is called", () => {

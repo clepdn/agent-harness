@@ -6,15 +6,27 @@
 
 import fs from "fs/promises"
 import path from "path"
-import { NANO_HOME as HOME_DIR } from "../agent-config"
 
 // ── directory layout ───────────────────────────────────────────────────
 
-export const MEMORIES_DIR = path.join(HOME_DIR, "memories")
-export const JOURNAL_DIR = path.join(MEMORIES_DIR, "journal")
-export const PEOPLE_DIR = path.join(MEMORIES_DIR, "people")
-export const CORE_FILE = path.join(MEMORIES_DIR, "core.md")
-export const ALIASES_FILE = path.join(MEMORIES_DIR, "aliases.json")
+export interface MemoryPaths {
+  memoriesDir: string
+  journalDir: string
+  peopleDir: string
+  coreFile: string
+  aliasesFile: string
+}
+
+export function memoryPaths(home: string): MemoryPaths {
+  const memoriesDir = path.join(home, "memories")
+  return {
+    memoriesDir,
+    journalDir: path.join(memoriesDir, "journal"),
+    peopleDir: path.join(memoriesDir, "people"),
+    coreFile: path.join(memoriesDir, "core.md"),
+    aliasesFile: path.join(memoriesDir, "aliases.json"),
+  }
+}
 
 // ── tuning constants ───────────────────────────────────────────────────
 
@@ -228,12 +240,16 @@ export function titleFromPath(filePath: string, fallback: string): string {
  * Classifies a memory file by its path.
  *
  * @param filePath - Absolute file path.
- * @returns Memory kind, or `null` when the path is outside known directories.
+ * @param paths - Explicit memory paths; when omitted, returns `null` because
+ *   this utility does not infer a home directory or access global state.
+ * @returns Memory kind, or `null` when no paths are supplied or the path is
+ *   outside the known directories.
  */
-export function detectMemoryKind(filePath: string): MemoryKind | null {
-  if (filePath === CORE_FILE) return "core"
-  if (filePath.startsWith(`${JOURNAL_DIR}${path.sep}`)) return "journal"
-  if (filePath.startsWith(`${PEOPLE_DIR}${path.sep}`)) return "people"
+export function detectMemoryKind(filePath: string, paths?: MemoryPaths): MemoryKind | null {
+  if (!paths) return null
+  if (filePath === paths.coreFile) return "core"
+  if (filePath.startsWith(`${paths.journalDir}${path.sep}`)) return "journal"
+  if (filePath.startsWith(`${paths.peopleDir}${path.sep}`)) return "people"
   return null
 }
 
