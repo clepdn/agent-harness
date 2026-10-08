@@ -75,7 +75,14 @@ export const workerOperationsPlugin: Plugin = {
     })
     registerOperation(ctx, workerAwpEnqueue, (input, context) => {
       checkSignal(context.signal)
-      const accepted = runner.enqueue(input.event, input.options)
+      const status = runner.status()
+      let accepted: boolean
+      if (status.running) accepted = runner.enqueue(input.event, input.options)
+      else if (input.options?.onlyIfWaiting) accepted = false
+      else {
+        runner.activate(input.event)
+        accepted = true
+      }
       return { ok: accepted, running: runner.status().running }
     })
     registerOperation(ctx, workerChatSubmit, async (input, context) => {

@@ -43,16 +43,22 @@ async function rootContext() {
   return ctx
 }
 
-test("worker operations are public service bindings and unload with their owner", async () => {
+test("worker enqueue cold-wakes a resting runner instead of only storing the event", async () => {
   const ctx = await rootContext()
-  await ctx.plugin(providerPlugin(fakeRunner(), fakeLifecycle))
+  const activations: unknown[] = []
+  const runner = fakeRunner()
+  runner.activate = (event) => { activations.push(event) }
+  runner.enqueue = () => { throw new Error("resting runner must not use queue-only delivery") }
+  await ctx.plugin(providerPlugin(runner, fakeLifecycle))
   const fiber = await ctx.plugin(workerOperationsPlugin)
   const context = { signal: new AbortController().signal, subject: "test" }
   const status = workerStatus.output.parse(await operation(ctx, workerStatus.name).handler({}, context))
   assert.equal(status.agentId, "fake-worker")
   assert.equal(status.idle, true)
-  const enqueue = await operation(ctx, workerAwpEnqueue.name).handler({ event: { source: "chat", triggeredAt: "2026-01-01T00:00:00.000Z", content: "hello", raw: null } }, context)
+  const event = { source: "chat" as const, triggeredAt: "2026-01-01T00:00:00.000Z", content: "hello", raw: null }
+  const enqueue = await operation(ctx, workerAwpEnqueue.name).handler({ event }, context)
   assert.deepEqual(enqueue, { ok: true, running: false })
+  assert.deepEqual(activations, [event])
   await fiber.dispose()
   assert.equal(listContributions(ctx, nano.operations).some((entry) => entry.key === workerStatus.name), false)
   await ctx.fiber.dispose()
