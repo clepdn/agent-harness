@@ -22,14 +22,9 @@ import {
   controlDiscordMessages,
   controlEnqueue,
 } from "@nano/protocol"
-import type {
-  OperationDescriptor,
-  OperationInput,
-  OperationOutput,
-  StreamInput,
-  StreamItem,
-} from "@nano/protocol"
-import { invokeWebAction, renderWebEvent, renderWebPanels } from "./ui-plugins"
+import type { OperationDescriptor, OperationInput, OperationOutput, StreamInput } from "@nano/protocol"
+import type { Panel, Agent, WorkerStatus, Compaction, WorkerEvent, DiscordChannel, DiscordMessage, ChatLine, ToolCallView, WebApplicationContext } from "@nano/web-api"
+import { webUI } from "./ui-plugins"
 
 hljs.registerLanguage("bash", bash)
 hljs.registerLanguage("css", css)
@@ -41,34 +36,7 @@ hljs.registerLanguage("rust", rust)
 hljs.registerLanguage("sql", sql)
 hljs.registerLanguage("typescript", typescript)
 
-export type Panel = {
-  id: string
-  name: string
-  baseUrl: string
-  /** Gateway credential held only for this browser session; never persisted. */
-  token?: string
-}
-
-export type Agent = OperationOutput<typeof controlAgentsList>["agents"][number]
-export type WorkerStatus = Extract<NonNullable<OperationOutput<typeof controlAgentOverview>["status"]>, { running: boolean }>
-export type Compaction = OperationOutput<typeof controlAgentOverview>["compactions"][number]
-export type WorkerEvent = StreamItem<typeof controlAgentStream>
-export type DiscordChannel = OperationOutput<typeof controlDiscordChannels>["channels"][number]
-export type DiscordMessage = OperationOutput<typeof controlDiscordMessages>["messages"][number]
 type Overview = OperationOutput<typeof controlAgentOverview>
-export type ChatLine = {
-  key: string
-  seq: number
-  at: string
-  kind: "agent" | "user" | "tool" | "note" | "context" | "error" | "thinking"
-  label: string
-  text: string
-  detail?: string
-  toolArgs?: string
-  toolResult?: string
-  toolStatus?: "running" | "complete" | "error"
-}
-export type ToolCallView = { id: string; name: string; arguments: unknown }
 
 const PANEL_COOKIE = "nano_control_panels"
 const NOTES_WIDTH_STORAGE_KEY = "nano_notes_width"
@@ -922,7 +890,7 @@ export function App() {
       setError("")
       setInput("")
       try {
-        await invokeWebAction("send", async () => { await callPanel(selected.panel, controlEnqueue, { agentId: selected.agent.id, body: { content } }) })
+        await webUI.invokeWebAction("send", async () => { await callPanel(selected.panel, controlEnqueue, { agentId: selected.agent.id, body: { content } }) })
         await loadSelected()
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err))
@@ -947,15 +915,16 @@ export function App() {
   const status = overview?.status && "running" in overview.status ? overview.status : null
 
   const reportActionFailure = (error: unknown): void => setError(error instanceof Error ? error.message : String(error))
-  const uiContext = {
+  let uiContext: WebApplicationContext
+  uiContext = {
     panels, agentsByPanel, selectedKey, selected, selectedAgentName: selected?.agent.name ?? "agent",
     error, status, chatLines, expandedTools, toggleTool,
-    refresh: () => void invokeWebAction("refresh", () => loadAgents()).catch(reportActionFailure),
+    refresh: () => void webUI.invokeWebAction("refresh", () => loadAgents()).catch(reportActionFailure),
     connect: (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault()
-      void invokeWebAction("connect", () => addPanel(event)).catch(reportActionFailure)
+      void webUI.invokeWebAction("connect", () => addPanel(event)).catch(reportActionFailure)
     },
-    remove: (panelId: string) => void invokeWebAction("remove", () => removePanel(panelId)).catch(reportActionFailure),
+    remove: (panelId: string) => void webUI.invokeWebAction("remove", () => removePanel(panelId)).catch(reportActionFailure),
     selectAgent: setSelectedKey,
     panelNameDraft, setPanelNameDraft, panelDraft, setPanelDraft, panelTokenDraft, setPanelTokenDraft,
     input, setInput, busy, send: sendMessage,
@@ -966,13 +935,15 @@ export function App() {
     selectDiscordChannel: setSelectedDiscordChannel, discordLoading, discordMessages,
     compactions, openCompaction, toggleCompaction: (key: string) => setOpenCompaction(key || null),
     renderMessage: (line: ChatLine, expanded: boolean) => <TerminalMessage key={line.key} line={line} agentName={selected?.agent.name ?? "agent"} expanded={expanded} onToggle={toggleTool} />,
+    renderEvent: (line: ChatLine) => webUI.renderWebEvent(line, uiContext),
+    renderWebViews: (placement, id) => webUI.renderWebViews(placement, uiContext, id),
   }
 
   return (
     <main className="place" style={{ "--notes-width": `${notesWidth}px` } as React.CSSProperties}>
-      {renderWebPanels("left", uiContext)}
-      {renderWebPanels("main", uiContext)}
-      {renderWebPanels("right", uiContext)}
+      {webUI.renderWebPanels("left", uiContext)}
+      {webUI.renderWebPanels("main", uiContext)}
+      {webUI.renderWebPanels("right", uiContext)}
     </main>
   )
 }

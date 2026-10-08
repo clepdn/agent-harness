@@ -2,18 +2,16 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { isConfigObject, type ConfigObject } from "@nano/config"
 import { parseRpcAuthConfig, type RpcAuthConfig } from "@nano/protocol/rpc"
-import { PluginBus, type Plugin } from "@nano/plugins"
+import { Contributions, CordisContext, getService, type Fiber, type Plugin } from "@nano/plugins"
 import type { FastifyInstance } from "fastify"
-import { controlHttpPlugin, CONTROL_HTTP } from "./server"
-import { ControlStore } from "./db"
-import {
-  controlDiscoveryPlugin,
-  controlOperationsPlugin,
-  controlRpcAuthPlugin,
-  controlStorePlugin,
-  controlSupervisorPlugin,
-} from "./plugins"
-import { staticUiPlugin } from "./static-ui"
+import { CONTROL_HTTP } from "@nano/control-api"
+import { controlHttpPlugin } from "@nano/plugin-control-http"
+import { controlDiscoveryPlugin } from "@nano/plugin-control-discovery"
+import { controlOperationsPlugin } from "@nano/plugin-control-operations"
+import { controlStorePlugin, ControlStore } from "@nano/plugin-control-persistence"
+import { controlSupervisorPlugin } from "@nano/plugin-control-supervisor"
+import { staticUiPlugin } from "@nano/plugin-control-static-ui"
+import { controlRpcAuthPlugin } from "@nano/plugin-control-auth"
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../..")
 const WORKER_ENTRY = path.join(REPO_ROOT, "packages", "nano-runtime", "src", "index.ts")
@@ -21,7 +19,7 @@ const WEB_DIST_DIR = path.join(REPO_ROOT, "apps", "web", "dist")
 
 export type ControlApplicationOptions = {
   readonly config: ConfigObject
-  /** Plugins may replace a built-in by id or add an independent contribution. */
+  /** Native plugins replace built-ins by name or add an independent contribution. */
   readonly plugins?: readonly Plugin[]
   readonly agentDirectory?: string
   readonly repoRoot?: string
@@ -32,20 +30,24 @@ export type ControlApplicationOptions = {
 }
 
 export type ControlApplication = {
-  readonly bus: PluginBus
+  readonly ctx: CordisContext
+  readonly fibers: ReadonlyMap<string, Fiber>
+  readonly plugins: readonly Plugin[]
   readonly server: FastifyInstance
   close(): Promise<void>
 }
 
 type Selection = { enabled: boolean; config?: unknown }
+type PluginPlan = { name: string; plugin: Plugin; config?: unknown }
 
-function pluginSelection(config: ConfigObject, id: string): Selection {
+function pluginSelection(config: ConfigObject, name: string): Selection {
   const all = isConfigObject(config.plugins) ? config.plugins : {}
-  const raw = all[id]
+  const raw = all[name]
   if (raw === undefined) return { enabled: true }
-  if (!isConfigObject(raw)) throw new TypeError(`plugin selection ${id} must be an object`)
+  if (!isConfigObject(raw)) throw new TypeError(`plugin selection ${name} must be an object`)
   return { enabled: raw.enabled !== false, config: raw.config }
 }
+
 /** An absent auth selection is the explicit local-open compatibility default. */
 function authConfig(config: ConfigObject): RpcAuthConfig {
   const all = isConfigObject(config.plugins) ? config.plugins : {}
@@ -57,57 +59,75 @@ function authConfig(config: ConfigObject): RpcAuthConfig {
   return parseRpcAuthConfig(selected)
 }
 
-const BUILTIN_IDS: Record<string, true> = {
-  "nano.rpc-auth": true,
-  "control.persistence": true,
-  "control.discovery": true,
-  "control.supervisor": true,
-  "control.operations": true,
-  "control.static-ui": true,
-  "control.http": true,
+function pluginName(plugin: Plugin): string {
+  const name = typeof plugin === "function" ? plugin.name : plugin.name ?? plugin.apply.name
+  if (!name) throw new TypeError("control plugins must have a native name")
+  return name
 }
-
 
 export async function createControlApplication(options: ControlApplicationOptions): Promise<ControlApplication> {
   const repoRoot = options.repoRoot ?? REPO_ROOT
   const agentDirectory = path.resolve(options.agentDirectory ?? path.join(repoRoot, "agents"))
   const workerEntry = options.workerEntry ?? WORKER_ENTRY
   const webDistDir = options.webDistDir ?? WEB_DIST_DIR
-  const bus = new PluginBus({ config: options.config })
-  const replacements = new Map((options.plugins ?? []).map((plugin) => [plugin.id, plugin]))
-  const selected = (id: string) => pluginSelection(options.config, id)
+  const selected = (name: string) => pluginSelection(options.config, name)
+  const replacements = new Map<string, Plugin>()
+  for (const plugin of options.plugins ?? []) replacements.set(pluginName(plugin), plugin)
 
-  const installBuiltin = async (id: string, fallback: Plugin, config: unknown, required = true): Promise<void> => {
-    const selection = selected(id)
-    const plugin = replacements.get(id) ?? fallback
-    if (!selection.enabled && required) {
-      throw new Error(`required control plugin ${id} cannot be disabled`)
+  const authSelection = selected("nano.rpc-auth")
+  const staticUiSelection = selected("control.static-ui")
+  const builtins: readonly [string, Plugin, unknown, boolean][] = [
+    ["nano.rpc-auth", controlRpcAuthPlugin, authConfig(options.config), true],
+    ["control.persistence", controlStorePlugin(new ControlStore(options.databasePath)), undefined, true],
+    ["control.discovery", controlDiscoveryPlugin({ directory: agentDirectory, controlPort: options.controlPort, repoRoot, allowEmpty: true }), undefined, true],
+    ["control.supervisor", controlSupervisorPlugin({ repoRoot, workerEntry }), undefined, true],
+    ["control.operations", controlOperationsPlugin(), undefined, true],
+    ["control.static-ui", staticUiPlugin({ directory: webDistDir, enabled: staticUiSelection.enabled }), undefined, false],
+    ["control.http", controlHttpPlugin({ staticUi: staticUiSelection.enabled }), undefined, true],
+  ]
+  const plan: PluginPlan[] = []
+  for (const [name, fallback, defaultConfig, required] of builtins) {
+    const selection = name === "nano.rpc-auth" ? authSelection : selected(name)
+    const replacement = replacements.get(name)
+    if (!selection.enabled) {
+      if (required) throw new Error(`required control plugin ${name} cannot be disabled`)
+      replacements.delete(name)
+      continue
     }
-    await bus.install(plugin, selection.config === undefined ? config : selection.config, { enabled: selection.enabled })
-    replacements.delete(id)
+    plan.push({
+      name,
+      plugin: replacement ?? fallback,
+      config: selection.config === undefined ? defaultConfig : selection.config,
+    })
+    replacements.delete(name)
+  }
+  for (const [name, plugin] of replacements) {
+    const selection = selected(name)
+    if (selection.enabled) plan.push({ name, plugin, config: selection.config })
+  }
+
+  const ctx = new CordisContext()
+  const fibers = new Map<string, Fiber>()
+  const plugins: Plugin[] = []
+  const install = async ({ name, plugin, config }: PluginPlan): Promise<void> => {
+    const fiber = config === undefined ? ctx.plugin(plugin) : ctx.plugin(plugin, config)
+    fibers.set(name, fiber)
+    plugins.push(plugin)
+    await fiber
   }
 
   try {
-    const auth = authConfig(options.config)
-    await installBuiltin("nano.rpc-auth", controlRpcAuthPlugin(), auth)
-    await installBuiltin("control.persistence", controlStorePlugin(new ControlStore(options.databasePath)), undefined)
-    await installBuiltin("control.discovery", controlDiscoveryPlugin({ directory: agentDirectory, controlPort: options.controlPort, repoRoot, allowEmpty: true }), undefined)
-    await installBuiltin("control.supervisor", controlSupervisorPlugin({ repoRoot, workerEntry }), undefined)
-    await installBuiltin("control.operations", controlOperationsPlugin(), undefined)
-    await installBuiltin("control.static-ui", staticUiPlugin({ directory: webDistDir, enabled: selected("control.static-ui").enabled }), undefined, false)
-    await installBuiltin("control.http", controlHttpPlugin({ staticUi: selected("control.static-ui").enabled }), undefined)
-
-    for (const plugin of options.plugins ?? []) {
-      if (!replacements.has(plugin.id)) continue
-      const selection = selected(plugin.id)
-      if (Object.hasOwn(BUILTIN_IDS, plugin.id)) throw new Error(`failed to install replacement plugin ${plugin.id}`)
-      await bus.install(plugin, selection.config, { enabled: selection.enabled })
-      replacements.delete(plugin.id)
+    await install({ name: "nano.contributions", plugin: Contributions })
+    for (const entry of plan) await install(entry)
+    return {
+      ctx,
+      fibers,
+      plugins,
+      server: getService(ctx, CONTROL_HTTP),
+      close: () => ctx.fiber.dispose(),
     }
-    if (replacements.size > 0) throw new Error(`unknown control plugin replacement(s): ${[...replacements.keys()].join(", ")}`)
-    return { bus, server: bus.get(CONTROL_HTTP), close: () => bus.close() }
   } catch (error) {
-    await bus.close().catch(() => {})
+    await ctx.fiber.dispose().catch(() => {})
     throw error
   }
 }

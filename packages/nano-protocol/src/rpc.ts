@@ -1,5 +1,5 @@
-import { defineService, defineSlot } from "@nano/plugins"
-import type { PluginScope } from "@nano/plugins"
+import { defineService, defineSlot, registerContribution } from "@nano/plugins"
+import type { CordisContext, Cleanup } from "@nano/plugins"
 import type { OperationDescriptor, OperationInput, OperationOutput, StreamDescriptor, StreamInput, StreamItem } from "./index.js"
 
 export interface OperationHandlerContext {
@@ -38,32 +38,62 @@ export const nanoStreams = defineSlot<StreamContribution>("nano.streams")
 export const nanoRpcAuth = defineService<RpcAuthService>("nano.rpc-auth")
 
 export function registerOperation<D extends OperationDescriptor>(
-  scope: PluginScope,
+  ctx: CordisContext,
   descriptor: D,
   handler: OperationContribution<D>["handler"],
-): () => void {
-  const guarded = scope.guard(async (input: unknown, context: OperationHandlerContext): Promise<unknown> => {
-    const parsedInput = descriptor.input.parse(input) as OperationInput<D>
-    const result = await handler(parsedInput, context)
-    return descriptor.output.parse(result)
-  })
-  return scope.register(nanoOperations, descriptor.name, { descriptor, handler: guarded, signal: scope.signal })
+): Cleanup {
+  const controller = new AbortController()
+  const registered: OperationContribution<D> = {
+    descriptor,
+    signal: controller.signal,
+    async handler(input: OperationInput<D>, context: OperationHandlerContext): Promise<OperationOutput<D>> {
+      const signal = AbortSignal.any([controller.signal, context.signal])
+      signal.throwIfAborted()
+      const parsedInput = descriptor.input.parse(input) as OperationInput<D>
+      const result = await handler(parsedInput, { ...context, signal })
+      signal.throwIfAborted()
+      return descriptor.output.parse(result) as OperationOutput<D>
+    },
+  }
+  const unregister = registerContribution(ctx, nanoOperations, descriptor.name, registered)
+  const abort = ctx.effect(() => () => controller.abort())
+  return async () => {
+    controller.abort()
+    await abort()
+    await unregister()
+  }
 }
 
 export function registerStream<D extends StreamDescriptor>(
-  scope: PluginScope,
+  ctx: CordisContext,
   descriptor: D,
   handler: StreamContribution<D>["handler"],
-): () => void {
-  const guarded = scope.guard(async (input: unknown, context: OperationHandlerContext): Promise<AsyncIterable<unknown>> => {
-    const parsedInput = descriptor.input.parse(input) as StreamInput<D>
-    const source = await handler(parsedInput, context)
-    async function* validateItems(): AsyncIterable<unknown> {
-      for await (const item of source) yield descriptor.item.parse(item)
-    }
-    return validateItems()
-  })
-  return scope.register(nanoStreams, descriptor.name, { descriptor, handler: guarded, signal: scope.signal })
+): Cleanup {
+  const controller = new AbortController()
+  const registered: StreamContribution<D> = {
+    descriptor,
+    signal: controller.signal,
+    async handler(input: StreamInput<D>, context: OperationHandlerContext): Promise<AsyncIterable<StreamItem<D>>> {
+      const signal = AbortSignal.any([controller.signal, context.signal])
+      signal.throwIfAborted()
+      const parsedInput = descriptor.input.parse(input) as StreamInput<D>
+      const source = await handler(parsedInput, { ...context, signal })
+      async function* validateItems(): AsyncIterable<StreamItem<D>> {
+        for await (const item of source) {
+          signal.throwIfAborted()
+          yield descriptor.item.parse(item) as StreamItem<D>
+        }
+      }
+      return validateItems()
+    },
+  }
+  const unregister = registerContribution(ctx, nanoStreams, descriptor.name, registered)
+  const abort = ctx.effect(() => () => controller.abort())
+  return async () => {
+    controller.abort()
+    await abort()
+    await unregister()
+  }
 }
 
 export function parseRpcAuthConfig(value: unknown): RpcAuthConfig {

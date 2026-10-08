@@ -1,0 +1,19 @@
+{
+  "name": "@nano/plugin-control-http",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "files": ["src"],
+  "scripts": { "typecheck": "tsc --noEmit -p tsconfig.json" },
+  "dependencies": {
+    "@nano/control-api": "*",
+    "@nano/plugins": "*",
+    "@nano/protocol": "*",
+    "@nano/runtime-api": "*",
+    "fastify": "^5.7.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.4"
+  },
+  "devDependencies": { "@types/node": "^25.5.0", "typescript": "^6.0.2" }
+}

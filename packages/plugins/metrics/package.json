@@ -1,0 +1,25 @@
+{
+  "name": "@nano/plugin-metrics",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src"],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@nano/plugins": "*",
+    "@nano/runtime-api": "*",
+    "better-sqlite3": "^12.8.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.4"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.0",
+    "typescript": "^6.0.2"
+  }
+}

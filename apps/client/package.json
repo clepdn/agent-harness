@@ -11,8 +11,9 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@deepseek-ai/cordis": "4.0.4",
     "@nano/plugins": "*",
-    "@nano/harness-client-node": "*"
+    "@nano/plugin-tool-client-executor": "*"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

@@ -32,16 +32,19 @@ you can also build it explicitly with `npm run build:web`.
 
 The implemented extension surface is documented in [the plugin architecture guide](docs/plugin-architecture.md). Third-party code is trusted in-process and must be statically imported into the application composition; JSON plugin selections enable/configure installed IDs but do not load executable modules.
 
-Runtime extensions use the public workspace imports:
+Runtime extensions use the public SDK entry points:
 
 ```ts
-import type { Plugin } from "@nano/plugins"
-import { nano, registerTool } from "@nano/runtime/plugins"
+import type { Plugin } from "@nano/runtime-api"
+import { nano, registerTool } from "@nano/runtime-api"
 import { defineOperation, defineValidator } from "@nano/protocol"
 import { registerOperation } from "@nano/protocol/rpc"
 ```
 
-Declare service dependencies and provide services through `scope.provide`; use keyed slots through `registerTool`, `registerCommand`, `registerModelProvider`, `registerOperation`, or `registerStream`. A plugin owns its registrations, callbacks, timers, and cleanup. Required dependents unload before a provider and remain pending until the service returns. Do not monkey-patch built-in catalogs or import internal source paths. Browser UI plugins use the local typed API in `apps/web/src/ui-plugins.tsx`; they contribute panels, views, event renderers, and actions through named slots and are isolated by the web error boundaries.
+Use `@nano/runtime-api/model` for the immutable conversation `Context`, model contracts, and `registerModelProvider`. Plugin contexts are the real published `@deepseek-ai/cordis@4.0.4` `Context`, exported as `CordisContext` by `@nano/plugins` and the runtime SDK. Plugins use native `name`, `inject`, `provide`, `Config`, `ctx.plugin`, and `ctx.effect`; Nano adds only typed feature contracts and a contribution service. Hosts supply the pinned Cordis runtime; SDKs and plugin packages declare it as a peer.
+
+Built-in source plugins are separate `@nano/plugin-*` packages under `packages/plugins/`, composed through the same native API as third-party plugins. Browser UI extensions use `@nano/web-api`. See the architecture guide for the public package layout and source-TypeScript loader/bundler requirements. Import declared package exports, never private host or package source paths. Plugins are trusted host-process code, not a sandbox.
+
 ## Run a client
 
 ```sh

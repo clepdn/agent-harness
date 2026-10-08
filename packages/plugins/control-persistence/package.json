@@ -1,0 +1,19 @@
+{
+  "name": "@nano/plugin-control-persistence",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "files": ["src"],
+  "scripts": { "test": "node --import tsx --test 'src/**/*.test.ts'", "typecheck": "tsc --noEmit -p tsconfig.json" },
+  "dependencies": {
+    "@nano/control-api": "*",
+    "@nano/plugins": "*",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.5.0",
+    "better-sqlite3": "^12.8.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.4"
+  },
+  "devDependencies": { "tsx": "^4.21.0", "typescript": "^6.0.2" }
+}

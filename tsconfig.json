@@ -3,6 +3,6 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["scripts", "packages/*/src", "apps/client/src", "apps/server/src"],
+  "include": ["scripts", "tests", "packages/*/src", "apps/client/src", "apps/server/src"],
   "exclude": ["home", "node_modules", "dist"]
 }

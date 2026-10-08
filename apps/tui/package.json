@@ -13,10 +13,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@deepseek-ai/cordis": "4.0.4",
     "@nano/plugins": "*",
     "@nano/protocol": "*",
-    "@nano/harness-client-node": "*",
-    "@nano/chat-client": "*"
+    "@nano/chat-client": "*",
+    "@nano/plugin-tui-executor": "*",
+    "@nano/plugin-tui-rpc-chat": "*"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

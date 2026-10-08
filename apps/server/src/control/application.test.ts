@@ -5,16 +5,15 @@ import path from "node:path"
 import test from "node:test"
 import type { Plugin } from "@nano/plugins"
 import { createControlApplication } from "./application"
-import { CONTROL_STATIC_UI, type ControlStaticUi } from "./static-ui"
+import { CONTROL_STATIC_UI, type ControlStaticUi } from "@nano/control-api"
 
 test("control application accepts a static UI replacement and unloads it on close", async (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "nano-control-plugin-"))
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }))
   let disposed = false
   const replacement: Plugin = {
-    id: "control.static-ui",
-    provides: [CONTROL_STATIC_UI],
-    apply(scope) {
+    name: "control.static-ui",
+    apply(ctx) {
       const service: ControlStaticUi = {
         enabled: true,
         directory,
@@ -22,8 +21,8 @@ test("control application accepts a static UI replacement and unloads it on clos
           return reply.type("text/plain").send("replacement-ui")
         },
       }
-      scope.provide(CONTROL_STATIC_UI, service)
-      scope.own(() => { disposed = true })
+      ctx.provide(CONTROL_STATIC_UI.name, service)
+      ctx.effect(() => () => { disposed = true })
     },
   }
   const application = await createControlApplication({

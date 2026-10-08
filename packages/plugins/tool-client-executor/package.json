@@ -1,0 +1,23 @@
+{
+  "name": "@nano/plugin-tool-client-executor",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src"],
+  "scripts": {
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@types/node": "^25.5.0",
+    "@nano/plugins": "*",
+    "@nano/harness-client-node": "*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.4"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.2"
+  }
+}

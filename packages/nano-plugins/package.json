@@ -2,7 +2,7 @@
   "name": "@nano/plugins",
   "version": "0.1.0",
   "private": true,
-  "description": "Generic typed lifecycle kernel for Nano plugins.",
+  "description": "Native Cordis exports and typed Nano contribution contracts.",
   "type": "module",
   "files": ["dist"],
   "exports": {
@@ -18,6 +18,9 @@
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "test": "node --import tsx --test 'src/**/*.test.ts'"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
     "@types/node": "^25.5.0",

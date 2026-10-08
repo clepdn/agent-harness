@@ -53,7 +53,9 @@ test("legacy routes disappear when their selected operation exports are withdraw
   const application = await createControlApplication({ config: {}, controlPort: 0, databasePath: path.join(directory, "control.db"), agentDirectory: directory })
   try {
     assert.equal((await application.server.inject({ method: "GET", url: "/agents" })).statusCode, 200)
-    await application.bus.disable("control.operations")
+    const operations = application.fibers.get("control.operations")
+    assert.ok(operations)
+    await operations.dispose()
     const withdrawn = await application.server.inject({ method: "GET", url: "/agents" })
     assert.equal(withdrawn.statusCode, 404)
   } finally {

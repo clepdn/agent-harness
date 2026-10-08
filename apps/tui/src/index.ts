@@ -13,9 +13,10 @@ import {
   workerClientDisconnect,
 } from "@nano/protocol"
 import type { StreamEvent, StreamItem } from "@nano/protocol"
-import { defineService, PluginBus } from "@nano/plugins"
+import { CordisContext, getService } from "@nano/plugins"
+import { createTuiExecutorPlugin, executorResource, type RunningExecutor } from "@nano/plugin-tui-executor"
+import { createTuiRpcChatPlugin } from "@nano/plugin-tui-rpc-chat"
 import { parseArgs, HELP } from "./args.js"
-import { startExecutor, type RunningExecutor } from "./executor.js"
 import {
   bold, cyan, dim, gray, green, magenta, red, yellow,
   HIDE_CURSOR, SHOW_CURSOR, clearLine,
@@ -33,7 +34,6 @@ const gatewayToken = args.gatewayTokenFile
     })()
   : process.env.NANO_RPC_TOKEN?.trim()
 const rpcOptions = () => ({ url: args.control, ...(gatewayToken ? { token: gatewayToken } : {}) })
-const executorResource = defineService<RunningExecutor>("nano.tui.executor")
 
 async function connect(executor: RunningExecutor): Promise<void> {
   const endpoint = args.advertise?.replace(/\/+$/, "") ?? executor.url
@@ -160,36 +160,29 @@ function clip(text: string, maxLines: number): string[] {
   return [...lines.slice(0, maxLines), `… (${lines.length - maxLines} more lines)`]
 }
 async function main(): Promise<void> {
-  const appBus = new PluginBus()
+  const ctx = new CordisContext()
+  const executorFiber = ctx.plugin(createTuiExecutorPlugin({
+    workspaceRoot: args.workspace,
+    listenHost: args.listenHost,
+    port: args.toolPort,
+    ...(args.capabilities ? { capabilities: args.capabilities } : {}),
+    hashline: args.hashline,
+  }))
   try {
-    await appBus.install({
-      id: "nano.tui.executor",
-      provides: [executorResource],
-      async apply(scope) {
-        const started = await startExecutor({
-          workspaceRoot: args.workspace,
-          listenHost: args.listenHost,
-          port: args.toolPort,
-          ...(args.capabilities ? { capabilities: args.capabilities } : {}),
-          hashline: args.hashline,
-        })
-        scope.provide(executorResource, started)
-        scope.own(() => started.stop())
-      },
-    })
+    await executorFiber
   } catch (error) {
     banner(red(`could not start executor: ${(error as Error).message}`))
-    await appBus.close()
+    await executorFiber.dispose()
     process.exit(1)
   }
-  const executor = appBus.get(executorResource)
+  const executor = getService(ctx, executorResource)
   banner(dim(`nano-tui → ${args.control}${args.agent ? ` (${args.agent})` : ""}`))
   banner(`${green("✓")} workspace ${bold(executor.workspaceRoot)} mounted (${executor.capabilities.length} tools)`)
   try {
     await connect(executor)
   } catch (error) {
     banner(red(`✗ ${(error as Error).message}`))
-    await appBus.close()
+    await executorFiber.dispose()
     process.exit(1)
   }
   banner(`${green("✓")} connected — nano now runs tools against your files`)
@@ -198,15 +191,8 @@ async function main(): Promise<void> {
   const chat = createTuiChatClient()
   const streamState = { streaming: false }
   const abort = new AbortController()
-  await appBus.install({
-    id: "nano.tui.rpc-chat",
-    apply(scope) {
-      scope.own(() => {
-        abort.abort()
-        chat.close()
-      })
-    },
-  })
+  const chatFiber = ctx.plugin(createTuiRpcChatPlugin({ abortController: abort, chat }))
+  await chatFiber
 
   const streamLoop = (async () => {
     for (;;) {
@@ -216,7 +202,10 @@ async function main(): Promise<void> {
       } catch (error) {
         if (abort.signal.aborted) return
         banner(yellow(`stream dropped, retrying: ${(error as Error).message}`))
-        await new Promise((r) => setTimeout(r, 1000))
+        let resolve!: () => void
+        const promise = new Promise<void>((done) => { resolve = done })
+        setTimeout(resolve, 1000)
+        await promise
       }
     }
   })()
@@ -246,13 +235,19 @@ async function main(): Promise<void> {
     prompt()
   })
 
+  let shuttingDown = false
   const shutdown = async () => {
+    if (shuttingDown) return
+    shuttingDown = true
     process.stdout.write(SHOW_CURSOR)
     banner(dim("\ndisconnecting…"))
-    await disconnect()
-    await appBus.close()
-    await streamLoop.catch(() => {})
-    process.exit(0)
+    try {
+      await disconnect()
+    } finally {
+      await Promise.all([chatFiber.dispose(), executorFiber.dispose()])
+      await streamLoop.catch(() => {})
+      process.exit(0)
+    }
   }
 
   rl.on("close", () => void shutdown())

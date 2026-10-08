@@ -37,6 +37,11 @@ The outer multi-agent control server and each worker are separate HTTP servers.
 4. On exit (Ctrl-C / `/quit`) the client disconnects and the worker reverts to
    its default client.
 
+The executor and chat lifecycle are native Cordis plugins in
+`@nano/plugin-tui-executor` and `@nano/plugin-tui-rpc-chat`. The terminal host
+composes them through the same public `ctx.plugin()` and `ctx.effect()` APIs
+available to third-party plugins, using `@deepseek-ai/cordis@4.0.4`.
+
 ## usage
 
 ```sh
@@ -90,5 +95,5 @@ also exposes the direct routes:
 - `GET /awp/client/status` — current active client status.
 
 Routing is handled by `SwitchableToolClient`
-(`packages/nano-runtime/src/client/switchable.ts`), which delegates to the
+(`packages/nano-runtime-api/src/client/switchable.ts`), which delegates to the
 default client until a remote one connects.

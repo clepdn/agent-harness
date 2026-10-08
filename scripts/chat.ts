@@ -5,7 +5,7 @@ import { createRpcClient } from "@nano/chat-client"
 import type { RpcClient } from "@nano/chat-client"
 import type { OperationOutput, StreamEvent, StreamItem } from "@nano/protocol"
 import { controlAgentStatus, controlAgentStream, controlEnqueue, workerChatStream, workerChatSubmit, workerStatus } from "@nano/protocol"
-import { defineService, PluginBus } from "@nano/plugins"
+import { Contributions, CordisContext, defineService } from "@nano/plugins"
 
 const tokenFlagIndex = process.argv.indexOf("--gateway-token-file")
 const gatewayTokenFile = tokenFlagIndex >= 0
@@ -26,7 +26,6 @@ if (tokenFilePath !== undefined) {
   if (!rpcToken) throw new Error("--gateway-token-file is empty")
 }
 const rpcResource = defineService<RpcClient>("nano.script-chat.rpc")
-const clientPlugins = new PluginBus()
 
 const HOST = process.env.NANO_HOST ?? "http://localhost"
 const directWorker = process.env.NANO_CHAT_DIRECT_WORKER?.trim().toLowerCase() === "true"
@@ -93,17 +92,24 @@ const createClientId = (): string => {
 }
 const clientId = createClientId()
 let rpc!: RpcClient
-const clientPluginReady = clientPlugins.install({
-  id: "nano.script-chat",
-  provides: [rpcResource],
-  apply(scope) {
+const controller = new AbortController()
+const clientContext = new CordisContext()
+const contributionsFiber = clientContext.plugin(Contributions)
+await contributionsFiber
+const clientFiber = clientContext.plugin({
+  name: "nano.script-chat",
+  provide: [rpcResource.name],
+  apply(ctx: CordisContext) {
     const client = createRpcClient({ url: BASE, ...(rpcToken ? { token: rpcToken } : {}) })
     rpc = client
-    scope.provide(rpcResource, client)
-    scope.own(() => client.close())
+    ctx.provide(rpcResource.name, client)
+    ctx.effect(() => () => {
+      controller.abort()
+      client.close()
+    })
   },
 })
-await clientPluginReady
+await clientFiber
 const sendMessage = async (content: string): Promise<void> => {
   if (directWorker) await rpc.call(workerChatSubmit, { content, clientId })
   else await rpc.call(controlEnqueue, { agentId: controlAgentId ?? "nano", body: { content, clientId } })
@@ -373,7 +379,6 @@ getStatus()
   })
   .catch((err) => print(c.red(err instanceof Error ? err.message : String(err))))
 
-const controller = new AbortController()
 streamEvents(controller.signal, handleStreamEvent).catch((err) => {
   if (controller.signal.aborted) return
   print(c.red(err instanceof Error ? err.message : String(err)))
@@ -392,7 +397,6 @@ rl.on("line", async (line) => {
     endActiveStream()
     controller.abort()
     rl.close()
-    process.exit(0)
   }
 
   if (trimmed === "/status") {
@@ -438,5 +442,5 @@ rl.on("SIGINT", () => {
 rl.on("close", async () => {
   endActiveStream()
   controller.abort()
-  await clientPlugins.close()
+  await Promise.all([clientFiber.dispose(), contributionsFiber.dispose()])
 })

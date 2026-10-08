@@ -4,26 +4,13 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
 import test from "node:test"
-import { config as runtimeConfig } from "../config"
-import type { Plugin } from "@nano/plugins"
-import {
-  createNanoApplication,
-  createPersistenceService,
-  nano,
-  type NanoApplication,
-  type NanoApplicationConfig,
-} from "@nano/runtime/plugins"
-import {
-  AssistantMessageEventStream,
-  Context,
-  registerModelProvider,
-} from "@nano/runtime/model"
-import type {
-  AssistantMessage,
-  Model,
-  ModelProvider,
-  Usage,
-} from "@nano/runtime/model"
+import { config as runtimeConfig } from "@nano/runtime-api/config"
+import { getService, listContributions, type Plugin } from "@nano/plugins"
+import { createNanoApplication, type NanoApplication, type NanoApplicationConfig } from "@nano/runtime/application"
+import { createPersistenceService } from "@nano/plugin-persistence"
+import { nano } from "@nano/runtime-api"
+import { AssistantMessageEventStream, Context, registerModelProvider } from "@nano/runtime-api/model"
+import type { AssistantMessage, Model, ModelProvider, Usage } from "@nano/runtime-api/model"
 
 const usage: Usage = {
   input: 1,
@@ -65,132 +52,69 @@ function fixtureProvider(onRequest?: (messages: string) => void): ModelProvider 
   }
 }
 
+
 function fixtureProviderPlugin(onRequest?: (messages: string) => void): Plugin {
   return {
-    id: "nano.model-provider",
-    apply(scope) {
-      return registerModelProvider(scope, "application-fixture", fixtureProvider(onRequest))
+    name: "nano.model-provider",
+    inject: ["nano.contributions"],
+    apply(ctx) {
+      return registerModelProvider(ctx, "application-fixture", fixtureProvider(onRequest))
     },
   }
 }
 
 function applicationConfig(dbPath: string, home: string): NanoApplicationConfig {
-  return {
-    plugins: {
-      "nano.persistence": { config: { path: dbPath, home } },
-    },
-  }
-}
-
-function status(app: NanoApplication, id: string): string | undefined {
-  return app.bus.statuses().find((entry) => entry.id === id)?.status
+  return { plugins: { "nano.persistence": { config: { path: dbPath, home } } } }
 }
 
 function toolCatalogFingerprint(catalog: readonly unknown[]): string {
   return createHash("sha256").update(JSON.stringify(catalog)).digest("hex")
 }
 
-test("the public application composes isolated optional plugins and recovers a fake provider", async () => {
+test("the public application composes plugins and recovers a fake provider", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "nano-application-lifecycle-"))
   const dbPath = path.join(root, "nano.db")
   const home = path.join(root, "home")
   const config = applicationConfig(dbPath, home)
   let app: NanoApplication | undefined
   try {
-    app = await createNanoApplication({
-      config,
-      replace: [fixtureProviderPlugin()],
-      disabled: ["nano.model-provider"],
-    })
-    assert.equal(status(app, "nano.discord"), "ACTIVE")
-    assert.equal(status(app, "nano.memory"), "ACTIVE")
-    assert.equal(status(app, "nano.model-provider"), "DISPOSED")
-    assert.ok(app.bus.optional(nano.discord))
-    assert.ok(app.bus.optional(nano.memory))
-
-    await app.bus.disable("nano.discord")
-    assert.equal(status(app, "nano.discord"), "DISPOSED")
-    assert.equal(app.bus.optional(nano.discord), undefined)
-    await app.bus.enable("nano.discord")
-    assert.equal(status(app, "nano.discord"), "ACTIVE")
-    assert.ok(app.bus.optional(nano.discord))
-
-    const staleMemory = app.bus.get(nano.memory)
-    await app.bus.disable("nano.memory")
-    assert.equal(status(app, "nano.memory"), "DISPOSED")
-    assert.equal(app.bus.optional(nano.memory), undefined)
-    await assert.rejects(async () => staleMemory.setAlias("stale", "must-not-write"), /cancelled/)
-    await app.bus.enable("nano.memory")
-    assert.equal(status(app, "nano.memory"), "ACTIVE")
-    assert.ok(app.bus.optional(nano.memory))
-    assert.notEqual(app.bus.get(nano.memory), staleMemory)
-
-    const staleMetrics = app.bus.get(nano.metrics)
-    await app.bus.disable("nano.metrics")
-    assert.ok(app.bus.optional(nano.persistence))
-    assert.throws(() => staleMetrics.discordDetail("missing-message"), /cancelled/)
-    await app.bus.enable("nano.metrics")
-    assert.notEqual(app.bus.get(nano.metrics), staleMetrics)
-
-    const modelService = app.bus.get(nano.model)
+    app = await createNanoApplication({ config, replace: [fixtureProviderPlugin()] })
+    const modelService = getService(app.ctx, nano.model)
     const current = modelService.current()
     const model = current.primaryModel ?? current.fallbackModel
     const context = new Context({ model, providerResolver: modelService.resolver() })
     context.append({ role: "user", content: "application lifecycle", timestamp: 0 })
-    await assert.rejects(context.complete(), /No model provider is installed/)
-
-    await app.bus.enable("nano.model-provider")
-    assert.equal(status(app, "nano.model-provider"), "ACTIVE")
-    assert.deepEqual(app.bus.list(nano.modelProviders).map((entry) => entry.key), ["application-fixture"])
+    assert.deepEqual(listContributions(app.ctx, nano.modelProviders).map((entry) => entry.key), ["application-fixture"])
     const response = await context.complete()
     assert.equal(response.content[0]?.type, "text")
     if (response.content[0]?.type !== "text") throw new Error("fixture provider returned no text")
     assert.equal(response.content[0].text, "application fixture")
 
-    const catalog = [{
-      type: "function" as const,
-      function: { name: "lifecycle_tool", description: "durable fixture tool", parameters: { type: "object" } },
-    }]
-    const conversationId = app.bus.get(nano.persistence).startConversation("lifecycle-test", "2026-10-07T00:00:00.000Z")
-    app.bus.get(nano.persistence).logMessage(conversationId, "user", "durable lifecycle message")
-    app.bus.get(nano.persistence).endConversation(conversationId, 3)
-    await app.bus.get(nano.persistence).saveSession({
-      version: 1,
-      messages: context.snapshot(),
-      toolCatalog: catalog,
-      toolCatalogEpoch: 1,
-      toolCatalogFingerprint: toolCatalogFingerprint(catalog),
-      contextId: context.id,
-      parentContextId: context.parentId,
-      contextModelId: context.model.id,
-    })
-    const published = app.bus.get(nano.persistence).publishWorkerEvent("runner.status", { presence: "awake" })
+    const catalog = [{ type: "function" as const, function: { name: "lifecycle_tool", description: "durable fixture tool", parameters: { type: "object" } } }]
+    const persistence = getService(app.ctx, nano.persistence)
+    const conversationId = persistence.startConversation("lifecycle-test", "2026-10-07T00:00:00.000Z")
+    persistence.logMessage(conversationId, "user", "durable lifecycle message")
+    persistence.endConversation(conversationId, 3)
+    await persistence.saveSession({ version: 1, messages: context.snapshot(), toolCatalog: catalog, toolCatalogEpoch: 1, toolCatalogFingerprint: toolCatalogFingerprint(catalog), contextId: context.id, parentContextId: context.parentId, contextModelId: context.model.id })
+    const published = persistence.publishWorkerEvent("runner.status", { presence: "awake" })
     assert.ok(published.seq > 0)
     await app.close()
     app = undefined
 
-    const restarted = await createNanoApplication({
-      config,
-      replace: [fixtureProviderPlugin()],
-      disabled: ["nano.discord", "nano.memory", "nano.model-provider"],
-    })
-    app = restarted
-    const persistence = app.bus.get(nano.persistence)
-    const loaded = await persistence.loadSession()
+    app = await createNanoApplication({ config, replace: [fixtureProviderPlugin()] })
+    const restartedPersistence = getService(app.ctx, nano.persistence)
+    const loaded = await restartedPersistence.loadSession()
     assert.ok(loaded)
     assert.equal(loaded.contextId, context.id)
     assert.deepEqual(loaded.toolCatalog, catalog)
     assert.equal(loaded.toolCatalogFingerprint, toolCatalogFingerprint(catalog))
-    const history = await persistence.history({ limit: 20 })
+    const history = await restartedPersistence.history({ limit: 20 })
     assert.ok(history.some((item) => item.content === "durable lifecycle message" && item.role === "user"))
-    const bounds = persistence.workerEventBounds()
+    const bounds = restartedPersistence.workerEventBounds()
     assert.ok(bounds.latestSeq >= published.seq)
     assert.ok(bounds.oldestSeq > 0)
-    const events = persistence.listWorkerEvents(published.seq - 1, 20, "after")
+    const events = restartedPersistence.listWorkerEvents(published.seq - 1, 20, "after")
     assert.ok(events.some((event) => event.seq === published.seq && event.type === "runner.status"))
-    assert.equal(status(app, "nano.model-provider"), "DISPOSED")
-    await app.bus.enable("nano.model-provider")
-    assert.equal(status(app, "nano.model-provider"), "ACTIVE")
   } finally {
     await app?.close()
     await rm(root, { recursive: true, force: true })
@@ -227,13 +151,13 @@ test("public application discards stale frontend history before waking a soul co
       replace: [fixtureProviderPlugin()],
       disabled: ["nano.discord"],
     })
-    const bootstrap = app.bus.get(nano.bootstrap)
+    const bootstrap = getService(app.ctx, nano.bootstrap)
     assert.equal((await bootstrap.reconcileFrontendSoul()).soul, priorMainSoul)
     const edit = await bootstrap.writeFrontendSoul(priorMainSoul, frontendSoul)
     assert.equal(edit.conflicted, false)
     assert.match(await readFile(edit.patchPath, "utf8"), /frontend version/)
-    await app.bus.get(nano.persistence).saveSession(staleSession, "frontend")
-    assert.equal((await app.bus.get(nano.persistence).loadSession("frontend"))?.contextId, "stale-frontend-context")
+    await getService(app.ctx, nano.persistence).saveSession(staleSession, "frontend")
+    assert.equal((await getService(app.ctx, nano.persistence).loadSession("frontend"))?.contextId, "stale-frontend-context")
     await app.close()
     app = undefined
 
@@ -244,8 +168,8 @@ test("public application discards stale frontend history before waking a soul co
       disabled: ["nano.discord"],
     })
 
-    const persistence = app.bus.get(nano.persistence)
-    const reconciledSoul = await app.bus.get(nano.bootstrap).readFrontendSoul()
+    const persistence = getService(app.ctx, nano.persistence)
+    const reconciledSoul = await getService(app.ctx, nano.bootstrap).readFrontendSoul()
     assert.match(reconciledSoul, /^<<<<<<< main soul\.md$/m)
     assert.match(reconciledSoul, /^>>>>>>> frontend soul\.md$/m)
     assert.equal(await persistence.loadSession("frontend"), null)

@@ -1,22 +1,17 @@
 import assert from "node:assert/strict"
 import test from "node:test"
-import { PluginBus, type Plugin, type PluginScope } from "@nano/plugins"
+import { CordisContext, Contributions, listContributions, type Plugin } from "@nano/plugins"
 import { workerAwpEnqueue, workerEvents, workerStatus } from "@nano/protocol"
-import { nano, type LifecycleService, type RunnerService } from "./api"
-import { workerOperationsPlugin } from "./worker-operations"
-import { createPersistencePlugin } from "./persistence"
+import { nano, type LifecycleService, type RunnerService } from "@nano/runtime-api"
+import { workerOperationsPlugin } from "@nano/plugin-worker-operations"
+import { createPersistencePlugin } from "@nano/plugin-persistence"
 import { mkdtemp, rm } from "node:fs/promises"
 
 function fakeRunner(): RunnerService {
   return {
-    activate() {},
-    wake: async () => {},
-    enqueue: () => true,
+    activate() {}, wake: async () => {}, enqueue: () => true,
     status: () => ({ agentId: "fake-worker", running: false, idle: true, tokenCount: 0, contextSize: 1000, processStartedAt: "2026-01-01T00:00:00.000Z", uptimeMs: 1 }),
-    interrupt: () => "idle",
-    discard: () => true,
-    rest: () => true,
-    compact: () => true,
+    interrupt: () => "idle", discard: () => true, rest: () => true, compact: () => true,
     swapModel: async (preset) => ({ preset, model: "fake", provider: "fake", graceful: true }),
     modelSnapshot: () => ({ primary: null, fallback: { id: "fake", provider: "fake", baseUrl: "https://fake.invalid" }, respectPromptCache: true, useFallback: false, enableThinking: false, thinkingEffort: "none", vision: false }),
     trigger: async (source) => ({ ok: true, source }),
@@ -27,55 +22,59 @@ const fakeLifecycle: LifecycleService = { shutdown() {}, restart() {} }
 
 function providerPlugin(runner: RunnerService, lifecycle: LifecycleService): Plugin {
   return {
-    id: "fake-worker-services",
-    provides: [nano.runner, nano.lifecycle],
-    apply(scope: PluginScope) {
-      scope.provide(nano.runner, runner)
-      scope.provide(nano.lifecycle, lifecycle)
+    name: "fake-worker-services",
+    inject: ["nano.contributions"],
+    apply(ctx) {
+      ctx.provide(nano.runner.name, runner)
+      ctx.provide(nano.lifecycle.name, lifecycle)
     },
   }
 }
 
-function operation(bus: PluginBus, name: string) {
-  const contribution = bus.list(nano.operations).find((entry) => entry.key === name)
+function operation(ctx: CordisContext, name: string) {
+  const contribution = listContributions(ctx, nano.operations).find((entry) => entry.key === name)
   assert.ok(contribution, `missing operation ${name}`)
   return contribution.value
 }
 
+async function rootContext() {
+  const ctx = new CordisContext()
+  await ctx.plugin(Contributions)
+  return ctx
+}
+
 test("worker operations are public service bindings and unload with their owner", async () => {
-  const bus = new PluginBus()
-  await bus.install(providerPlugin(fakeRunner(), fakeLifecycle))
-  await bus.install(workerOperationsPlugin)
+  const ctx = await rootContext()
+  await ctx.plugin(providerPlugin(fakeRunner(), fakeLifecycle))
+  const fiber = await ctx.plugin(workerOperationsPlugin)
   const context = { signal: new AbortController().signal, subject: "test" }
-  const status = workerStatus.output.parse(await operation(bus, workerStatus.name).handler({}, context))
+  const status = workerStatus.output.parse(await operation(ctx, workerStatus.name).handler({}, context))
   assert.equal(status.agentId, "fake-worker")
   assert.equal(status.idle, true)
-  const enqueue = await operation(bus, workerAwpEnqueue.name).handler({
-    event: { source: "chat", triggeredAt: "2026-01-01T00:00:00.000Z", content: "hello", raw: null },
-  }, context)
+  const enqueue = await operation(ctx, workerAwpEnqueue.name).handler({ event: { source: "chat", triggeredAt: "2026-01-01T00:00:00.000Z", content: "hello", raw: null } }, context)
   assert.deepEqual(enqueue, { ok: true, running: false })
-  await bus.disable(workerOperationsPlugin.id)
-  assert.equal(bus.list(nano.operations).some((entry) => entry.key === workerStatus.name), false)
-  await bus.close()
+  await fiber.dispose()
+  assert.equal(listContributions(ctx, nano.operations).some((entry) => entry.key === workerStatus.name), false)
+  await ctx.fiber.dispose()
 })
 
 test("worker operation callbacks fail closed when an optional service is absent", async () => {
-  const bus = new PluginBus()
-  await bus.install(providerPlugin(fakeRunner(), fakeLifecycle))
-  await bus.install(workerOperationsPlugin)
-  const events = operation(bus, "worker.events.list")
+  const ctx = await rootContext()
+  await ctx.plugin(providerPlugin(fakeRunner(), fakeLifecycle))
+  await ctx.plugin(workerOperationsPlugin)
+  const events = operation(ctx, "worker.events.list")
   await assert.rejects(async () => { await events.handler({}, { signal: new AbortController().signal, subject: "test" }) }, /nano\.persistence service is unavailable/)
-  await bus.close()
+  await ctx.fiber.dispose()
 })
 
 test("cancelling an idle worker stream settles next without another published event", async (t) => {
   const home = await mkdtemp("/tmp/nano-worker-stream-")
-  const bus = new PluginBus()
-  t.after(async () => { await bus.close(); await rm(home, { recursive: true, force: true }) })
-  await bus.install(createPersistencePlugin({ home, path: ":memory:" }))
-  await bus.install(providerPlugin(fakeRunner(), fakeLifecycle))
-  await bus.install(workerOperationsPlugin)
-  const stream = bus.list(nano.streams).find((entry) => entry.key === workerEvents.name)
+  const ctx = await rootContext()
+  t.after(async () => { await ctx.fiber.dispose(); await rm(home, { recursive: true, force: true }) })
+  await ctx.plugin(createPersistencePlugin({ home, path: ":memory:" }), {})
+  await ctx.plugin(providerPlugin(fakeRunner(), fakeLifecycle))
+  await ctx.plugin(workerOperationsPlugin)
+  const stream = listContributions(ctx, nano.streams).find((entry) => entry.key === workerEvents.name)
   assert.ok(stream)
   const controller = new AbortController()
   const source = await stream.value.handler({}, { signal: controller.signal, subject: "test" })

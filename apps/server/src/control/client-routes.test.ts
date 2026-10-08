@@ -5,9 +5,10 @@ import assert from "node:assert/strict"
 import { createServer, type Server } from "node:http"
 import test from "node:test"
 import type { Plugin } from "@nano/plugins"
-import { ControlStore } from "./db"
+import { getService } from "@nano/plugins"
+import { ControlStore } from "@nano/plugin-control-persistence"
 import { createControlApplication } from "./application"
-import { CONTROL_AGENTS, CONTROL_LOCAL_AGENTS, CONTROL_STORE } from "./plugins"
+import { CONTROL_AGENTS, CONTROL_LOCAL_AGENTS, CONTROL_STORE } from "@nano/control-api"
 type WorkerRequest = {
   method: string
   path: string
@@ -59,13 +60,11 @@ test("control plane forwards client handshakes to the configured worker", async 
   seed.upsertAgent({ id: agentId, baseUrl: worker.url })
   seed.close()
   const registryPlugin: Plugin = {
-    id: "control.supervisor",
-    requires: [CONTROL_STORE, CONTROL_LOCAL_AGENTS],
-    provides: [CONTROL_AGENTS],
-    apply(scope) {
-      scope.use(CONTROL_LOCAL_AGENTS)
-      const store = scope.use(CONTROL_STORE)
-      scope.provide(CONTROL_AGENTS, {
+    name: "control.supervisor",
+    inject: [CONTROL_STORE.name, CONTROL_LOCAL_AGENTS.name],
+    apply(ctx) {
+      const store = getService(ctx, CONTROL_STORE)
+      ctx.provide(CONTROL_AGENTS.name, {
         configuredAgentIds: new Set(store.listAgents().map((agent) => agent.id)),
         async stopLocalAgent() { return false },
       })

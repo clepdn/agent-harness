@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
-import { REPO_ROOT } from "./agent-config"
-import { config } from "./config"
-import { tryShim, SHIM_FAILED_ENV } from "./shim"
+import { REPO_ROOT } from "@nano/runtime-api/agent-config"
+import { config } from "@nano/runtime-api/config"
+import { tryShim, SHIM_FAILED_ENV } from "@nano/runtime-api/shim"
 import { createNanoApplication } from "./plugins/application"
 import type { NanoApplication } from "./plugins/application"
 
@@ -37,17 +37,9 @@ async function main(): Promise<void> {
     if (closing) return closing
     closing = (async () => {
       console.log(`[nano] ${reason}${restartReason ? ` (${restartReason})` : ""}, saving sessions and closing plugins...`)
-      const deadline = setTimeout(() => {
-        console.error("[nano] shutdown timed out; forcing exit")
-        process.exit(1)
-      }, 310_000)
-      try {
-        await application?.close()
-        if (restart && !MANAGED_WORKER) spawnReplacement()
-        process.exitCode = 0
-      } finally {
-        clearTimeout(deadline)
-      }
+      await application?.close()
+      if (restart && !MANAGED_WORKER) spawnReplacement()
+      process.exitCode = 0
     })()
     return closing
   }
@@ -59,7 +51,6 @@ async function main(): Promise<void> {
     config,
     listen: { port: PORT, host: HOST },
     ...(config.prometheus.port > 0 ? { observability: { port: config.prometheus.port } } : {}),
-    disposeTimeoutMs: 300_000,
     lifecycle: {
       shutdown() { if (!closing) requestClose("SHUTDOWN") },
       restart(reason) {
@@ -70,8 +61,6 @@ async function main(): Promise<void> {
       },
     },
   })
-  const failed = application.bus.statuses().filter((entry) => entry.status === "FAILED")
-  for (const entry of failed) console.error(`[nano] plugin ${entry.id} failed (${entry.phase ?? "unknown"}):`, entry.error)
   process.on("SIGINT", () => {
     if (closing) process.exit(1)
     void close("SIGINT")

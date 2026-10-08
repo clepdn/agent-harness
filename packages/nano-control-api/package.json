@@ -1,0 +1,28 @@
+{
+  "name": "@nano/control-api",
+  "version": "0.1.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./local-agents": "./src/local-agents.ts"
+  },
+  "files": ["src"],
+  "scripts": {
+    "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@types/node": "^25.5.0",
+    "@nano/config": "*",
+    "@nano/plugins": "*",
+    "@nano/protocol": "*",
+    "fastify": "^5.7.4"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.4"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}
