@@ -258,7 +258,7 @@ test("memory patch mode edits successfully and enforces unique target presence",
   const home = path.join(root, "home")
   const memoriesDir = path.join(home, "memories")
   await fs.mkdir(memoriesDir, { recursive: true })
-  
+
   const testFile = path.join(memoriesDir, "journal.md")
   await fs.writeFile(testFile, "# Journal\n\n## today\n\nsome text\n\n## today\n\nother text\n", "utf8")
   t.after(() => fs.rm(root, { recursive: true, force: true }))
@@ -292,14 +292,14 @@ test("memory patch mode edits successfully and enforces unique target presence",
       },
       syncMemoryIndex: async () => { syncEvents.push(true) },
     })
-    
+
     // 1. Success case
     const res = await service.writeMemory("journal.md", "some new text", "patch", "some text")
     assert.match(res, /patched/)
-    
+
     // 2. Reject non-existent target
     await assert.rejects(() => service.writeMemory("journal.md", "new", "patch", "missing content"))
-    
+
     // 3. Reject non-unique target
     await assert.rejects(() => service.writeMemory("journal.md", "new", "patch", "## today"))
   `
@@ -378,7 +378,7 @@ test("soul patch mode edits successfully and enforces unique target presence", a
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "nano-soul-patch-"))
   const home = path.join(root, "home")
   await fs.mkdir(home, { recursive: true })
-  
+
   const testFile = path.join(home, "soul.md")
   await fs.writeFile(testFile, "I am an agent named Niri.\nI am very smart.\n", "utf8")
   t.after(() => fs.rm(root, { recursive: true, force: true }))
@@ -412,14 +412,14 @@ test("soul patch mode edits successfully and enforces unique target presence", a
       },
       syncMemoryIndex: async () => { syncEvents.push(true) },
     })
-    
+
     // 1. Success case
     const res = await service.writeSoul("an advanced coder.", "patch", "an agent named Niri.")
     assert.match(res, /patched/)
-    
+
     // 2. Reject non-existent target
     await assert.rejects(() => service.writeSoul("new", "patch", "missing content"))
-    
+
     // 3. Reject non-unique target
     await assert.rejects(() => service.writeSoul("new", "patch", "I am"))
   `
@@ -489,11 +489,11 @@ test("memory read and list tools function correctly", async (t) => {
       },
       syncMemoryIndex: async () => { syncEvents.push(true) },
     })
-    
+
     // 1. Test listMemory (should filter out .git and .gitignore, but keep .legit-hidden.md)
     const filesList = await service.listMemory()
     assert.equal(filesList, ".legit-hidden.md\\ncore.md\\njournal/2026-07-12.md\\njournal/long.md\\njournal/long_sectioned.md\\njournal/sectioned.md")
-    
+
     // 2. Test readMemory whole file
     const contentAll = await service.readMemory("journal/2026-07-12.md")
     assert.match(contentAll, /Line 1\\nLine 2\\nLine 3/)
@@ -507,26 +507,26 @@ test("memory read and list tools function correctly", async (t) => {
     assert.match(uriFile, /Line 1\\nLine 2\\nLine 3/)
     const soul = await service.readMemory("memory://soul.md")
     assert.match(soul, /A server soul/)
-    
+
     // 3. Test readMemory line ranges
     const contentRange = await service.readMemory("journal/2026-07-12.md", 2, 3)
     assert.match(contentRange, /Line 2\\nLine 3/)
     assert.doesNotMatch(contentRange, /Line 1/)
-    
+
     // 4. Test readMemory non-existent file
     await assert.rejects(() => service.readMemory("missing.md"))
-    
+
     // 5. Test header stopping logic on small file returns all lines when no endLine is specified
     const sec1 = await service.readMemory("journal/sectioned.md", 1)
     assert.match(sec1, /Sec 1\\nContent 1\\n## Sec 2\\nContent 2/)
     assert.doesNotMatch(sec1, /Note: Content stopped/)
-    
+
     // 6. Test that range checks continue past endLine to the next header (e.g. read 1-1 continues to 2)
     const extendedSec = await service.readMemory("journal/sectioned.md", 1, 1)
     assert.match(extendedSec, /Sec 1\\nContent 1/)
     assert.doesNotMatch(extendedSec, /Sec 2/)
     assert.match(extendedSec, /Note: Content stopped before the next section header on line 3/)
-    
+
     // 7. Test reading all sections by passing endLine past the last header
     const bothSecs = await service.readMemory("journal/sectioned.md", 1, 4)
     assert.match(bothSecs, /Sec 1\\nContent 1\\n## Sec 2\\nContent 2/)
@@ -600,13 +600,13 @@ test("memory and soul validation, warning, and revision history", async (t) => {
       () => service.writeSoul("##Header without space", "append"),
       /Markdown validation failed/
     )
-    
+
     // 2. Test Markdown Validation (unclosed code blocks)
     await assert.rejects(
       () => service.writeSoul("some text\\n\`\`\`\\ncode block", "append"),
       /Markdown validation failed/
     )
-    
+
     // 3. Track changed contents, but not no-op patches
     await service.writeSoul("# Valid Soul", "append")
     await service.writeSoul("# Updated Soul", "patch", "# Valid Soul")
