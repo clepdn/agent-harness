@@ -1,8 +1,8 @@
 import type { Plugin } from "@nano/plugins"
-import { createAgentChannelService, type AgentMailbox } from "@nano/runtime-api/runner/agent-channel"
-import type { RuntimeKind } from "@nano/runtime-api/runner/types"
+import { createAgentChannelService } from "./agent-channel"
+import type { RuntimeKind } from "@nano/runtime-api/contracts/runner"
 import { getService, listContributions, nano, onEvent } from "@nano/runtime-api"
-import type { AgentChannelService } from "@nano/runtime-api"
+import type { AgentChannelService, AgentMailbox } from "@nano/runtime-api/contracts/agent-channel"
 export const agentChannelPlugin: Plugin = {
   name: "nano.agent-channel",
   inject: [nano.persistence.name, "nano.contributions"],
@@ -25,3 +25,4 @@ export const agentChannelPlugin: Plugin = {
     onEvent(ctx, nano.runtimeReady, (runtimeKind: RuntimeKind) => mailbox.runtimeReady(runtimeKind))
   },
 }
+export { createAgentChannelService } from "./agent-channel"

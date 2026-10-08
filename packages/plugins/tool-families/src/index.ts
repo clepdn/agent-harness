@@ -8,13 +8,14 @@ import type {
 } from "@nano/runtime-api"
 import { findService, getService, nano, registerTool } from "@nano/runtime-api"
 import { AGENT_ID } from "@nano/runtime-api/agent-config"
-import { normalizeTimeoutMs } from "@nano/runtime-api/container/config"
-import { pushToolMessage, runStandardTool } from "@nano/runtime-api/runner/loop-tool-runtime"
-import type { ToolExecutionOutcome } from "@nano/runtime-api/runner/loop-shared"
-import type { LoopState, RuntimeKind } from "@nano/runtime-api/runner/types"
-import { GIT_UPSTREAM_NAG } from "@nano/runtime-api/runner/config"
-import { createGitUpstreamChecker } from "@nano/runtime-api/runner/git-upstream-check"
-import { compactForShutdown } from "@nano/runtime-api/runner/loop"
+import { normalizeTimeoutMs } from "./container/config"
+import { pushToolMessage, runStandardTool } from "@nano/plugin-runner/loop-tool-runtime"
+import type { ToolExecutionOutcome } from "@nano/plugin-runner/loop-shared"
+import type { LoopState, RuntimeKind } from "@nano/runtime-api/contracts/runner"
+import { config } from "@nano/runtime-api/config"
+const GIT_UPSTREAM_NAG = config.agent.git_upstream_nag
+import { createGitUpstreamChecker } from "./git-upstream-check"
+import { compactForShutdown } from "@nano/plugin-runner/loop"
 
 type Properties = Record<string, unknown>
 type GitUpstreamCheck = (filePath: string, convId: number, state: LoopState, signal: AbortSignal) => Promise<void>

@@ -1,7 +1,6 @@
 import { Contributions } from "@nano/plugins"
-import { createWebUI } from "@nano/web-api"
 import { builtInWebPlugin } from "@nano/plugin-web-builtins"
-import { createWebObserverPlugin } from "@nano/plugin-web-observer"
+import { createWebObserverPlugin, createWebUI } from "@nano/plugin-web-observer"
 
 export const webUI = createWebUI()
 

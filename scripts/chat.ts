@@ -397,6 +397,7 @@ rl.on("line", async (line) => {
     endActiveStream()
     controller.abort()
     rl.close()
+    return
   }
 
   if (trimmed === "/status") {

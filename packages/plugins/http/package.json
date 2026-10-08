@@ -7,17 +7,25 @@
   },
   "files": ["src"],
   "scripts": {
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-http-test/home NANO_AGENT_STATE_DIR=/tmp/nano-plugin-http-test/state node --import tsx --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@nano/plugin-events": "*",
+    "@nano/harness-protocol": "*",
     "@nano/plugins": "*",
-    "@nano/runtime-api": "*"
+    "@nano/protocol": "*",
+    "@nano/runtime-api": "*",
+    "fastify": "^5.7.4"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
+    "@nano/plugin-runner": "*",
+    "@nano/plugin-worker-operations": "*",
     "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
 }

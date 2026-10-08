@@ -3,21 +3,36 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./runtime": "./src/memory/index.ts",
+    "./shared": "./src/memory/shared.ts",
+    "./state-tools": "./src/agent-state-tools.ts",
+    "./search": "./src/memory/search.ts",
+    "./sync": "./src/memory/sync.ts",
+    "./aliases": "./src/memory/aliases.ts",
+    "./discord-query": "./src/memory/discord-query.ts"
   },
   "files": ["src"],
   "scripts": {
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-memory-test/home NANO_MIGRATE_LEGACY_STATE=false NANO_AGENT_STATE_DIR=/tmp/nano-plugin-memory-test/state node --import tsx --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@nano/plugins": "*",
-    "@nano/runtime-api": "*"
+    "@nano/runtime-api": "*",
+    "@nano/harness-client-node": "*",
+    "@nano/plugin-persistence": "*",
+    "@nano/plugin-client": "*",
+    "@nano/plugin-bootstrap": "*",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.5.0",
+    "better-sqlite3": "^12.8.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
-    "@types/node": "^25.5.0",
+    "tsx": "^4.20.6",
     "typescript": "^6.0.2"
   }
 }

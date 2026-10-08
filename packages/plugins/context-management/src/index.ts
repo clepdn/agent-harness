@@ -1,12 +1,12 @@
 import type { Plugin, CordisContext } from "@nano/plugins"
 import { config } from "@nano/runtime-api/config"
-import { journalCompactionSummary, resolveDeepArchiveBackend, initSnapcompactRenderer } from "@nano/runtime-api/runner/compaction-companion"
+import { journalCompactionSummary, resolveDeepArchiveBackend, initSnapcompactRenderer } from "./compaction-companion"
 import {
   loadAgentSummaryContext,
   proactiveCompaction,
   summarizeConversationViaLLM,
-} from "@nano/runtime-api/runner/summarize"
-import type { SummaryOptions } from "@nano/runtime-api/runner/summarize"
+} from "./summarize"
+import type { SummaryOptions } from "@nano/runtime-api/contracts/context-management"
 import { getService, findService, nano, type ContextManagementService } from "@nano/runtime-api"
 
 export const contextManagementPlugin: Plugin.Object = {
@@ -48,3 +48,10 @@ export const contextManagementPlugin: Plugin.Object = {
     ctx.provide(nano.contextManagement.name, service)
   },
 }
+
+export { journalCompactionSummary, resolveDeepArchiveBackend, initSnapcompactRenderer } from "./compaction-companion"
+export { loadAgentSummaryContext, proactiveCompaction, summarizeConversationViaLLM } from "./summarize"
+export type { SummaryOptions } from "@nano/runtime-api/contracts/context-management"
+export { meetsToolResultCompactionContextThreshold, COMPACTION_STRATEGY, CONTEXT_COMPACT_TRIGGER_TOKENS, DEEP_ARCHIVE_ENABLED, JOURNAL_BEFORE_COMPACTION, REMOTE_COMPACTION_ENDPOINT, REMOTE_COMPACTION_MODEL, REMOTE_COMPACTION_STREAMING_ENDPOINT, RESPECT_PROMPT_CACHE, TOOL_RESULT_COMPACTION_MIN_AGE_TURNS, TOOL_RESULT_COMPACTION_MIN_CHARS, TOOL_RESULT_COMPACTION_MIN_CONTEXT_PERCENT } from "./settings"
+export { fallbackContextWindow } from "./summarize"
+export type { DeepArchiveBackend, DeepArchiveResult, SummaryContextDependencies } from "@nano/runtime-api/contracts/context-management"

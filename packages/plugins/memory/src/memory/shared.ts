@@ -1,0 +1,332 @@
+/**
+ * Shared constants, types, and pure utility functions used across memory modules.
+ *
+ * @module memory/shared
+ */
+
+import fs from "fs/promises"
+import path from "path"
+export type { AliasMap, AuthoredMemorySearchResult, DiscordMemorySearchResult, MemoryKind, MemorySearchProfile, MemorySearchResult, SemanticQuerySignal } from "@nano/runtime-api/contracts/memory"
+import type { MemoryKind } from "@nano/runtime-api/contracts/memory"
+import { MEMORY_SEMANTIC_MIN_SIMILARITY } from "@nano/runtime-api"
+export { MEMORY_SEMANTIC_MIN_SIMILARITY }
+
+// ── directory layout ───────────────────────────────────────────────────
+
+export interface MemoryPaths {
+  memoriesDir: string
+  journalDir: string
+  peopleDir: string
+  coreFile: string
+  aliasesFile: string
+}
+
+export function memoryPaths(home: string): MemoryPaths {
+  const memoriesDir = path.join(home, "memories")
+  return {
+    memoriesDir,
+    journalDir: path.join(memoriesDir, "journal"),
+    peopleDir: path.join(memoriesDir, "people"),
+    coreFile: path.join(memoriesDir, "core.md"),
+    aliasesFile: path.join(memoriesDir, "aliases.json"),
+  }
+}
+
+// ── tuning constants ───────────────────────────────────────────────────
+
+export const MEMORY_RECALL_HEADER = "[injected recalled memories]"
+export const MEMORY_RECALL_NOTE =
+  "Potentially relevant long-term notes. Use only if helpful; trust newer conversation details if anything conflicts."
+export const MEMORY_RECALL_MAX_CHUNKS = 4
+export const MEMORY_RECALL_MAX_CHUNKS_HARD_CAP = 8
+export const MEMORY_QUERY_TOKEN_LIMIT = 12
+export const MEMORY_RECALL_COOLDOWN_TURNS = 7
+export const MEMORY_EMBEDDING_BATCH_SIZE = 24
+export const MEMORY_SEMANTIC_STRONG_SIMILARITY = 0.32
+export const MEMORY_CHATTER_SIMILARITY_THRESHOLD = 0.74
+export const MEMORY_RECALL_INTENT_SIMILARITY_THRESHOLD = 0.55
+export const SCHEDULED_HEARTBEAT_CONTENT = "Scheduled heartbeat."
+export const BODY_INFORMATIVE_BM25_THRESHOLD = -5
+
+export const MEMORY_EMBEDDING_PROTOTYPES = [
+  { id: 1, name: "affection-love", category: "chatter", text: "i love you so much sweetie <33" },
+  { id: 2, name: "cat-greeting", category: "chatter", text: "boop mraow meow hi sweetie" },
+  { id: 3, name: "celebration", category: "chatter", text: "yay yayy lets gooooo <33" },
+  { id: 4, name: "goodnight", category: "chatter", text: "goodnight sweet dreams rest well" },
+  { id: 101, name: "who-person", category: "recall_intent", text: "who is this person what do i know about them" },
+  { id: 102, name: "past-event", category: "recall_intent", text: "what happened before remember when that event happened" },
+  { id: 103, name: "task-context", category: "recall_intent", text: "what context do i need for this task or project" },
+  { id: 104, name: "system-lesson", category: "recall_intent", text: "what lesson or instruction should i remember here" },
+] as const
+
+export const MEMORY_STOP_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "been", "but", "by",
+  "for", "from", "had", "has", "have", "he", "her", "hers", "him",
+  "his", "i", "if", "in", "into", "is", "it", "its", "me", "my",
+  "of", "on", "or", "our", "she", "that", "the", "their", "them",
+  "there", "they", "this", "to", "up", "us", "was", "we", "were",
+  "with", "you", "your",
+])
+
+// ── types ──────────────────────────────────────────────────────────────
+
+
+export type MemoryDocumentRow = {
+  id: number
+  path: string
+  content_hash: string
+  mtime_ms: number
+  kind?: string
+  title?: string
+}
+
+export type MemoryChunkInput = {
+  title: string
+  headingPath: string | null
+  text: string
+  tags: string
+}
+
+export type MemoryHit = {
+  chunkId: number
+  path: string
+  documentHash: string
+  kind: MemoryKind
+  documentTitle: string
+  title: string
+  headingPath: string | null
+  text: string
+  rank: number
+  semanticDistance?: number
+  semanticSimilarity?: number
+}
+
+
+// ── pure utilities ─────────────────────────────────────────────────────
+
+
+/**
+ * Truncates text to a maximum character count, appending `...` when truncated.
+ *
+ * @param value - Text to trim.
+ * @param maxChars - Maximum character count.
+ * @returns Trimmed text.
+ */
+export function trimForPrompt(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value
+  if (maxChars <= 3) return ".".repeat(maxChars)
+  return `${value.slice(0, maxChars - 3).trimEnd()}...`
+}
+
+/**
+ * Returns the filename without extension.
+ *
+ * @param filePath - File path.
+ * @returns Basename with extension removed.
+ */
+export function basenameWithoutExt(filePath: string): string {
+  return path.basename(filePath, path.extname(filePath))
+}
+
+/**
+ * Splits text into paragraph-delimited chunks that fit within a character budget.
+ *
+ * @param text - Text to chunk.
+ * @param maxChars - Maximum characters per chunk.
+ * @returns Array of text chunks.
+ */
+export function chunkLargeSection(text: string, maxChars = 900): string[] {
+  const paragraphs = text
+    .split(/\n\s*\n/g)
+    .map((part) => part.trim())
+    .filter(Boolean)
+
+  if (paragraphs.length === 0) return []
+
+  const chunks: string[] = []
+  let current = ""
+
+  for (const paragraph of paragraphs) {
+    const next = current ? `${current}\n\n${paragraph}` : paragraph
+    if (next.length <= maxChars || current.length === 0) {
+      current = next
+      continue
+    }
+    chunks.push(current)
+    current = paragraph
+  }
+
+  if (current) chunks.push(current)
+  return chunks
+}
+
+/**
+ * Derives a human-readable title from a file path.
+ *
+ * @param filePath - File path.
+ * @param fallback - Fallback title when the path yields nothing.
+ * @returns Title string.
+ */
+export function titleFromPath(filePath: string, fallback: string): string {
+  const base = basenameWithoutExt(filePath).replace(/[-_]+/g, " ").trim()
+  return base ? base : fallback
+}
+
+/**
+ * Classifies a memory file by its path.
+ *
+ * @param filePath - Absolute file path.
+ * @param paths - Explicit memory paths; when omitted, returns `null` because
+ *   this utility does not infer a home directory or access global state.
+ * @returns Memory kind, or `null` when no paths are supplied or the path is
+ *   outside the known directories.
+ */
+export function detectMemoryKind(filePath: string, paths?: MemoryPaths): MemoryKind | null {
+  if (!paths) return null
+  if (filePath === paths.coreFile) return "core"
+  if (filePath.startsWith(`${paths.journalDir}${path.sep}`)) return "journal"
+  if (filePath.startsWith(`${paths.peopleDir}${path.sep}`)) return "people"
+  return null
+}
+
+/**
+ * Checks whether a filesystem path exists.
+ *
+ * @param target - Path to check.
+ * @returns `true` when accessible.
+ */
+export async function pathExists(target: string): Promise<boolean> {
+  try {
+    await fs.access(target)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Normalizes a user handle by trimming and removing leading `@` signs.
+ *
+ * @param handle - Raw handle string.
+ * @returns Lowercased, cleaned handle.
+ */
+export function normalizeHandle(handle: string): string {
+  return handle.trim().replace(/^@+/, "").toLowerCase()
+}
+
+/**
+ * Normalizes body text for tokenization — strips mentions, ids, punctuation.
+ *
+ * @param raw - Raw text.
+ * @returns Lowercased, cleaned text.
+ */
+export function normalizeBodyText(raw: string): string {
+  return raw
+    .replace(/@([a-z0-9_.-]+)/gi, " $1 ")
+    .replace(/\b\d{6,}\b/g, " ")
+    .replace(/[^\p{L}\p{N}\s'-]+/gu, " ")
+    .toLowerCase()
+    .trim()
+}
+
+/**
+ * Tokenizes text into deduplicated search terms, stopping at the token limit.
+ *
+ * @param raw - Raw text to tokenize.
+ * @returns Array of unique meaningful tokens.
+ */
+export function tokensFromText(raw: string): string[] {
+  const clean = normalizeBodyText(raw)
+  const tokens = clean
+    .split(/\s+/)
+    .map((token) => token.replace(/^['-]+|['-]+$/g, ""))
+    .filter((token) => token.length >= 2 || /\d{2,}/.test(token))
+    .filter((token) => !MEMORY_STOP_WORDS.has(token))
+
+  const unique: string[] = []
+  const seen = new Set<string>()
+  for (const token of tokens) {
+    if (seen.has(token)) continue
+    seen.add(token)
+    unique.push(token)
+    if (unique.length >= MEMORY_QUERY_TOKEN_LIMIT) break
+  }
+  return unique
+}
+
+// ── markdown parsing ───────────────────────────────────────────────────
+
+/**
+ * Splits a markdown document into titled sections and chunks large paragraphs.
+ *
+ * @param filePath - Absolute file path (used for title extraction).
+ * @param content - Raw markdown content.
+ * @returns Document title and array of chunk inputs.
+ */
+export function parseMarkdownDocument(filePath: string, content: string): { title: string; chunks: MemoryChunkInput[] } {
+  const lines = content.replace(/\r\n/g, "\n").split("\n")
+  const h1 = lines.find((line) => /^#\s+/.test(line))
+  const title = h1 ? h1.replace(/^#\s+/, "").trim() : titleFromPath(filePath, "Memory")
+  const headingStack: string[] = []
+  let sectionLines: string[] = []
+  let sectionTitle = title
+  const chunks: MemoryChunkInput[] = []
+
+  const flushSection = () => {
+    const body = sectionLines.join("\n").trim()
+    if (!body) {
+      sectionLines = []
+      return
+    }
+
+    const headingPath = headingStack.length > 0 ? headingStack.join(" > ") : null
+    const tags = [basenameWithoutExt(filePath), ...headingStack].join(" ").trim()
+    for (const part of chunkLargeSection(body)) {
+      chunks.push({
+        title: sectionTitle || title,
+        headingPath,
+        text: part,
+        tags,
+      })
+    }
+    sectionLines = []
+  }
+
+  for (const line of lines) {
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/)
+    if (!headingMatch) {
+      sectionLines.push(line)
+      continue
+    }
+
+    flushSection()
+
+    const level = headingMatch[1]!.length
+    const heading = headingMatch[2]!.trim()
+    if (level === 1) {
+      sectionTitle = heading || title
+      headingStack.length = 0
+      continue
+    }
+
+    while (headingStack.length >= level - 1) headingStack.pop()
+    headingStack.push(heading)
+    sectionTitle = heading || title
+  }
+
+  flushSection()
+
+  if (chunks.length === 0) {
+    const body = content.trim()
+    if (body) {
+      chunks.push({
+        title,
+        headingPath: null,
+        text: body,
+        tags: basenameWithoutExt(filePath),
+      })
+    }
+  }
+
+  return { title, chunks }
+}

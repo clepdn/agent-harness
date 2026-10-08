@@ -3,21 +3,29 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./bootstrap": "./src/bootstrap.ts",
+    "./frontend-soul": "./src/frontend-soul.ts"
   },
   "files": ["src"],
   "scripts": {
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-bootstrap-test/home NANO_AGENT_STATE_DIR=/tmp/nano-plugin-bootstrap-test/state node --import tsx --test 'src/*.test.ts'",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@nano/plugins": "*",
-    "@nano/runtime-api": "*"
+    "@nano/runtime-api": "*",
+    "@nano/plugin-images": "*",
+    "@nano/plugin-discord": "*",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.5.0",
+    "better-sqlite3": "^12.8.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
-    "@types/node": "^25.5.0",
+    "@nano/plugin-memory": "*",
     "typescript": "^6.0.2"
   }
 }

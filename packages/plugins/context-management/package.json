@@ -3,21 +3,31 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./settings": "./src/settings.ts",
+    "./summarize": "./src/summarize.ts",
+    "./compaction-companion": "./src/compaction-companion.ts",
+    "./message-utils": "./src/message-utils.ts"
   },
   "files": ["src"],
   "scripts": {
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-context-management-test/home NANO_AGENT_STATE_DIR=/tmp/nano-plugin-context-management-test/state node --import tsx --test 'src/*.test.ts'",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@nano/plugins": "*",
-    "@nano/runtime-api": "*"
+    "@nano/runtime-api": "*",
+    "@nano/plugin-persistence": "*",
+    "@nano/plugin-images": "*",
+    "@nano/harness-core": "*",
+    "@types/node": "^25.5.0",
+    "@oh-my-pi/pi-natives": "17.2.2"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
-    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
 }

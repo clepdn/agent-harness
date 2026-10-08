@@ -67,7 +67,7 @@ function sourceFiles(root: string): string[] {
       }
       if (!entry.isFile() || !/\.(?:[cm]?tsx?|mts|cts)$/.test(entry.name)) continue
       if (/\.(?:test|spec)\.(?:[cm]?tsx?|mts|cts)$/.test(entry.name)) continue
-      if (["test-model-provider.ts", "test-helpers.ts"].includes(entry.name)) continue
+      if (entry.name === "test-helpers.ts") continue
       files.push(path.join(directory, entry.name))
     }
   }
@@ -393,6 +393,7 @@ test("source-exported web plugins require Cordis and render from an isolated pac
     const packagesToCopy = [
       { name: "web-api", directory: "packages/nano-web-api", content: "src" },
       { name: "plugin-web-builtins", directory: "packages/plugins/web-builtins", content: "src" },
+      { name: "plugin-web-observer", directory: "packages/plugins/web-observer", content: "src" },
       { name: "plugins", directory: "packages/nano-plugins", content: "dist" },
       { name: "protocol", directory: "packages/nano-protocol", content: "dist" },
     ]
@@ -409,7 +410,7 @@ test("source-exported web plugins require Cordis and render from an isolated pac
     const renderScript = path.join(temporaryRoot, "render.mjs")
     writeFileSync(renderScript, `import { renderToStaticMarkup } from "react-dom/server"
 import { Contributions } from "@nano/plugins"
-import { createWebUI } from "@nano/web-api"
+import { createWebUI } from "@nano/plugin-web-observer"
 import { builtInWebPlugin } from "@nano/plugin-web-builtins"
 
 const ui = createWebUI()

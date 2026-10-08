@@ -1,5 +1,7 @@
 import { watchContributions, type CordisContext, type Plugin } from "@nano/plugins"
 import { webActionSlot, webEventRendererSlot, webPanelSlot, webViewSlot } from "@nano/web-api"
+export { createWebUI } from "./web-ui.js"
+export type { WebUI } from "@nano/web-api"
 
 export type WebObserverOptions = {
   onChange(): void

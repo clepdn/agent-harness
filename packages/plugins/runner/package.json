@@ -3,22 +3,54 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./runtime": "./src/runner/index.ts",
+    "./frontend": "./src/runner/frontend.ts",
+    "./context": "./src/runner/context.ts",
+    "./loop": "./src/runner/loop.ts",
+    "./loop-completion": "./src/runner/loop-completion.ts",
+    "./loop-content": "./src/runner/loop-content.ts",
+    "./loop-shared": "./src/runner/loop-shared.ts",
+    "./loop-signatures": "./src/runner/loop-signatures.ts",
+    "./loop-tool-runtime": "./src/runner/loop-tool-runtime.ts",
+    "./loop-tools": "./src/runner/loop-tools.ts",
+    "./messages": "./src/runner/messages.ts",
+    "./presence": "./src/runner/presence.ts",
+    "./boredom-timer": "./src/runner/boredom-timer.ts",
+    "./cache-warmer": "./src/runner/cache-warmer.ts",
+    "./execution-model": "./src/runner/execution-model.ts",
+    "./test-helpers": "./src/runner/test-helpers.ts",
+    "./api-errors": "./src/api-errors.ts",
+    "./settings": "./src/settings.ts",
+    "./triggers/boredom": "./src/triggers/boredom.ts",
+    "./triggers/bsky": "./src/triggers/bsky.ts",
+    "./triggers/chat": "./src/triggers/chat.ts",
+    "./triggers/cron": "./src/triggers/cron.ts",
+    "./triggers/webhook": "./src/triggers/webhook.ts"
   },
   "files": ["src"],
   "scripts": {
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-runner-test/home NANO_MIGRATE_LEGACY_STATE=false NANO_AGENT_STATE_DIR=/tmp/nano-plugin-runner-test/state node --import tsx --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@nano/plugin-context-management": "*",
+    "@nano/plugin-discord": "*",
+    "@nano/plugin-images": "*",
+    "@nano/plugin-metrics": "*",
+    "@nano/plugin-tools": "*",
     "@nano/plugins": "*",
     "@nano/protocol": "*",
-    "@nano/runtime-api": "*"
+    "@nano/runtime-api": "*",
+    "@nano/harness-core": "*",
+    "@types/node": "^25.5.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
-    "@types/node": "^25.5.0",
+    "@nano/plugin-jobs-service": "*",
+    "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
 }

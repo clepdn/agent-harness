@@ -11,13 +11,13 @@
   },
   "dependencies": {
     "@nano/plugins": "*",
-    "@nano/runtime-api": "*"
+    "@nano/runtime-api": "*",
+    "@types/node": "^25.5.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
-    "@types/node": "^25.5.0",
     "typescript": "^6.0.2"
   }
 }

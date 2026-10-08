@@ -10,14 +10,18 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@nano/harness-core": "*",
+    "@nano/plugin-model": "*",
+    "@nano/plugin-runner": "*",
+    "@nano/plugin-tools": "*",
     "@nano/plugins": "*",
-    "@nano/runtime-api": "*"
+    "@nano/runtime-api": "*",
+    "@types/node": "^25.5.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
-    "@types/node": "^25.5.0",
     "typescript": "^6.0.2"
   }
 }

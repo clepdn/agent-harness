@@ -27,6 +27,37 @@ const HEALTH_TIMEOUT_MS = 30_000
 const STOP_TIMEOUT_MS = 75_000
 const STABLE_RUNTIME_MS = 60_000
 
+const SAFE_PARENT_SETTINGS: Record<string, true> = {
+  COLORTERM: true,
+  LANG: true,
+  NO_COLOR: true,
+  NODE_OPTIONS: true,
+  NANO_EXECUTOR_TOKEN_FILE: true,
+  PATH: true,
+  TEMP: true,
+  TERM: true,
+  TMP: true,
+  TMPDIR: true,
+}
+export function buildWorkerEnvironment(parentEnv: NodeJS.ProcessEnv, agent: ResolvedLocalAgent): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {}
+  for (const [key, value] of Object.entries(parentEnv)) {
+    if (Object.hasOwn(SAFE_PARENT_SETTINGS, key) || key.startsWith("LC_")) env[key] = value
+  }
+  Object.assign(env, agent.settings, {
+    HOME: agent.home,
+    NANO_AGENT_ID: agent.id,
+    NANO_HOME: agent.home,
+    NANO_CLIENT: agent.client,
+    ...(agent.workspace ? { NANO_CLIENT_WORKSPACE: agent.workspace } : {}),
+    PORT: String(agent.port),
+    NANO_WORKER_HOST: "127.0.0.1",
+    NANO_MANAGED_WORKER: "true",
+    NANO_MIGRATE_LEGACY_STATE: agent.settings.NANO_MIGRATE_LEGACY_STATE ?? "false",
+  })
+  return env
+}
+
 function childExited(child: ChildProcess): boolean {
   return child.exitCode !== null || child.signalCode !== null
 }

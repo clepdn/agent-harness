@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process"
 import { REPO_ROOT } from "@nano/runtime-api/agent-config"
 import { config } from "@nano/runtime-api/config"
-import { tryShim, SHIM_FAILED_ENV } from "@nano/runtime-api/shim"
+import { tryShim, SHIM_FAILED_ENV } from "./shim"
 import { createNanoApplication } from "./plugins/application"
 import type { NanoApplication } from "./plugins/application"
 

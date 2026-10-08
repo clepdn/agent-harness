@@ -3,21 +3,30 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./client": "./src/client/index.ts",
+    "./switchable": "./src/client/switchable.ts",
+    "./triggers/client": "./src/triggers/client.ts"
   },
   "files": ["src"],
   "scripts": {
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-client-test/home HOME=/tmp/nano-plugin-client-test/home XDG_STATE_HOME=/tmp/nano-plugin-client-test/state node --import tsx --test src/client/switchable.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@nano/harness-client-node": "*",
+    "@nano/harness-core": "*",
+    "@nano/harness-protocol": "*",
+    "@nano/harness-server": "*",
     "@nano/plugins": "*",
-    "@nano/runtime-api": "*"
+    "@nano/runtime-api": "*",
+    "@types/node": "^25.5.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
-    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
 }

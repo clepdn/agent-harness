@@ -1,7 +1,8 @@
 import type { Plugin, CordisContext } from "@nano/plugins"
 import { configSchema } from "@nano/plugins"
 import { getService, nano, type EventService, type PersistenceService } from "@nano/runtime-api"
-import { createStreamService } from "@nano/runtime-api/stream"
+import { createStreamService } from "./stream"
+import { workerEvents, type StreamItem } from "@nano/protocol"
 
 export interface EventPluginConfig {
   readonly bufferSize?: number
@@ -13,6 +14,14 @@ export function createEventService(
   options: EventPluginConfig = {},
 ): EventService {
   return createStreamService((event) => persistence.publishWorkerEvent("stream.event", event), options)
+}
+
+export function formatEventStreamItem(item: StreamItem<typeof workerEvents>): string {
+  if ("seq" in item) {
+    const event = item.value
+    return `id: ${event.seq}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`
+  }
+  return `event: gap\ndata: ${JSON.stringify(item)}\n\n`
 }
 
 function parseEventConfig(raw: unknown, defaults: EventPluginConfig): EventPluginConfig {
@@ -45,3 +54,5 @@ export function createEventPlugin(defaults: EventPluginConfig = {}): Plugin.Obje
   }
 }
 export const eventsPlugin = createEventPlugin()
+export { createStreamService } from "./stream"
+export type { RuntimeStreamService } from "@nano/runtime-api/contracts/events"

@@ -1,15 +1,15 @@
 import type { Plugin } from "@nano/plugins"
 import { AGENT_ID } from "@nano/runtime-api/agent-config"
 import { config } from "@nano/runtime-api/config"
-import { fromBsky } from "@nano/runtime-api/triggers/bsky"
-import { fromChat } from "@nano/runtime-api/triggers/chat"
-import { fromCron } from "@nano/runtime-api/triggers/cron"
-import { fromDiscord } from "@nano/runtime-api/triggers/discord"
-import { fromWebhook } from "@nano/runtime-api/triggers/webhook"
+import { fromBsky } from "./triggers/bsky"
+import { fromChat } from "./triggers/chat"
+import { fromCron } from "./triggers/cron"
+import { fromDiscord } from "@nano/plugin-discord/trigger"
+import { fromWebhook } from "./triggers/webhook"
 import { emitEvent, findService, getService, listContributions, nano, onEvent, registerContribution } from "@nano/runtime-api"
 import type { ConversationEvent, ConversationService, RunnerService, RuntimeExecutionServices } from "@nano/runtime-api"
-import { createRunnerRuntime } from "@nano/runtime-api/runner"
-import { createFrontendRunnerRuntime } from "@nano/runtime-api/runner/frontend"
+import { createRunnerRuntime } from "./runner/index"
+import { createFrontendRunnerRuntime } from "./runner/frontend"
 import type { WorkerEvent } from "@nano/protocol"
 
 export function createRunnerPlugin(): Plugin {
@@ -42,10 +42,8 @@ export function createRunnerPlugin(): Plugin {
       }
       const frontend = createFrontendRunnerRuntime(services)
       const main = createRunnerRuntime(services, frontend)
-      ctx.effect(() => async () => {
-        await main.cleanup()
-        await frontend.cleanup()
-      })
+      ctx.effect(() => () => main.cleanup())
+      ctx.effect(() => () => frontend.cleanup())
       await bootstrap.ensureSoulFilePlacement()
       const frontendSoul = config.frontend.enable ? await bootstrap.reconcileFrontendSoul() : undefined
       if (frontendSoul?.requiresFreshSession) await persistence.clearSession("frontend")

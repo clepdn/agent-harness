@@ -3,23 +3,57 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./access": "./src/discord/access.ts",
+    "./activity-trace": "./src/discord/activity-trace.ts",
+    "./context-avatars": "./src/discord/context-avatars.ts",
+    "./context-emojis": "./src/discord/context-emojis.ts",
+    "./cooldown": "./src/discord/cooldown.ts",
+    "./db": "./src/discord/db.ts",
+    "./dm-debounce": "./src/discord/dm-debounce.ts",
+    "./friendly-id": "./src/discord/friendly-id.ts",
+    "./gateway": "./src/discord/gateway.ts",
+    "./inbox": "./src/discord/inbox.ts",
+    "./owner-alerts": "./src/discord/owner-alerts.ts",
+    "./parse": "./src/discord/parse.ts",
+    "./pipeline": "./src/discord/pipeline.ts",
+    "./pronouns": "./src/discord/pronouns.ts",
+    "./reply-context": "./src/discord/reply-context.ts",
+    "./rest": "./src/discord/rest.ts",
+    "./search": "./src/discord/search.ts",
+    "./slash-commands": "./src/discord/slash-commands.ts",
+    "./state": "./src/discord/state.ts",
+    "./status-updater": "./src/discord/status-updater.ts",
+    "./targets": "./src/discord/targets.ts",
+    "./typing-lease": "./src/discord/typing-lease.ts",
+    "./voice": "./src/discord/voice.ts",
+    "./voice-rtp": "./src/discord/voice-rtp.ts",
+    "./trigger": "./src/triggers/discord.ts"
   },
   "files": ["src"],
   "scripts": {
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-discord-test/home NANO_MIGRATE_LEGACY_STATE=false NANO_AGENT_STATE_DIR=/tmp/nano-plugin-discord-test/state node --import tsx --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@discordjs/voice": "^0.19.2",
     "@nano/plugins": "*",
     "@nano/protocol": "*",
     "@nano/runtime-api": "*",
-    "discord.js": "^14.25.1"
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.5.0",
+    "better-sqlite3": "^12.8.0",
+    "discord.js": "^14.25.1",
+    "werift": "^0.24.4"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
-    "@types/node": "^25.5.0",
-    "typescript": "^6.0.2"
+    "@nano/plugin-memory": "*",
+    "@nano/plugin-persistence": "*",
+    "@nano/plugin-runner": "*",
+    "typescript": "^6.0.2",
+    "tsx": "^4.20.6"
   }
 }

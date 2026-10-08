@@ -1,7 +1,8 @@
 import type { Plugin } from "@nano/plugins"
 import { findService, getService, nano } from "@nano/runtime-api"
-import type { RuntimeExecutionServices, SubagentService } from "@nano/runtime-api"
-import { createSubagentService } from "@nano/runtime-api/runner/subagent"
+import type { RuntimeExecutionServices } from "@nano/runtime-api"
+import type { SubagentService } from "@nano/runtime-api/contracts/subagents"
+import { createSubagentService } from "./runtime"
 
 export const subagentsPlugin: Plugin = {
   name: "nano.subagents",
@@ -48,3 +49,4 @@ export const subagentsPlugin: Plugin = {
     ctx.provide(nano.subagents.name, service)
   },
 }
+export { createSubagentService } from "./runtime"

@@ -1,6 +1,6 @@
 import type { Plugin, CordisContext } from "@nano/plugins"
 import { config } from "@nano/runtime-api/config"
-import { createEmbeddingsService } from "@nano/runtime-api/embeddings"
+import { createEmbeddingsService } from "./embeddings"
 import { nano } from "@nano/runtime-api"
 
 export const embeddingsPlugin: Plugin.Object = {
@@ -20,3 +20,5 @@ export const embeddingsPlugin: Plugin.Object = {
     ctx.provide(nano.embeddings.name, service)
   },
 }
+export { createEmbeddingsService } from "./embeddings"
+export type { EmbeddingsConfig, EmbeddingsService } from "@nano/runtime-api/contracts/embeddings"

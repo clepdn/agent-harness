@@ -3,21 +3,24 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./prometheus-exporter": "./src/prometheus-exporter.ts"
   },
   "files": ["src"],
   "scripts": {
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-observability-test/home HOME=/tmp/nano-plugin-observability-test/home XDG_STATE_HOME=/tmp/nano-plugin-observability-test/state node --import tsx --test",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
-    "@types/node": "^25.5.0",
     "@nano/plugins": "*",
-    "@nano/runtime-api": "*"
+    "@nano/runtime-api": "*",
+    "@types/node": "^25.5.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
+    "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
 }

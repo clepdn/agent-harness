@@ -1,6 +1,6 @@
 import type { AddressInfo } from "node:net"
 import type { CordisContext, Plugin } from "@nano/plugins"
-import { createPrometheusExporter, type PrometheusScrapeSource } from "@nano/runtime-api/prometheus"
+import { createPrometheusExporter, type PrometheusScrapeSource } from "./prometheus-exporter"
 import { configSchema, getService, nano } from "@nano/runtime-api"
 import type { MetricsService } from "@nano/runtime-api"
 export interface ObservabilityPluginConfig {

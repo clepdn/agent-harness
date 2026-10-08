@@ -15,7 +15,7 @@ import {
 } from "./model-api"
 import { AssistantMessageEventStream } from "./model-events"
 import type { AssistantMessageEvent } from "./model-events"
-import type { ContextImageAttachment, ContextImageState } from "./context-images"
+import type { ContextImageAttachment, ContextImageState } from "./contracts/images"
 
 // ── Content part types ────────────────────────────────────────────────────────
 

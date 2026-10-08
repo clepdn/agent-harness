@@ -3,23 +3,36 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./db": "./src/db.ts",
+    "./state-history": "./src/state-history.ts",
+    "./session": "./src/runner/session.ts",
+    "./context-store": "./src/runner/context-store.ts",
+    "./awp/types": "./src/awp/types.ts",
+    "./awp/outbox": "./src/awp/outbox.ts"
   },
   "files": ["src"],
   "scripts": {
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-persistence-test/home HOME=/tmp/nano-plugin-persistence-test/home XDG_STATE_HOME=/tmp/nano-plugin-persistence-test/state node --import tsx --test src/db.test.ts src/awp/outbox.test.ts src/runner/context-store.test.ts src/runner/session.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@nano/harness-core": "*",
+    "@nano/plugins": "*",
+    "@nano/plugin-context-management": "*",
+    "@nano/protocol": "*",
+    "@nano/runtime-api": "*",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.5.0",
-    "@nano/plugins": "*",
-    "@nano/runtime-api": "*",
-    "better-sqlite3": "^12.8.0"
+    "better-sqlite3": "^12.8.0",
+    "sqlite-vec": "^0.1.9"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
+    "@nano/plugin-metrics": "*",
+    "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
 }

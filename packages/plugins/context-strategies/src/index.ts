@@ -1,8 +1,7 @@
 import type { Plugin, CordisContext } from "@nano/plugins"
 import { nano, registerContribution, type CompactionStrategyRequest, type StrategyService } from "@nano/runtime-api"
-import type { CompactionResult } from "@nano/runtime-api/runner/types"
+import type { CompactionResult } from "@nano/runtime-api/contracts/runner"
 import type { CompactionStrategy } from "@nano/runtime-api/config"
-
 function strategy(id: CompactionStrategy): StrategyService {
   return {
     id,

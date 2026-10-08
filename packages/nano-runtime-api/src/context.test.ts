@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 import { Context, type Model } from "./llm"
-import { providerResolver } from "./test-model-provider"
+import { providerResolver } from "../../../tests/support/runtime-services"
 
 const model: Model = {
   id: "context-test",

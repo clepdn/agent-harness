@@ -1,9 +1,8 @@
 import { getService, type Plugin } from "@nano/plugins"
 import { CONTROL_AGENTS, CONTROL_LOCAL_AGENTS, CONTROL_STORE } from "@nano/control-api"
-import { buildWorkerEnvironment } from "@nano/control-api/local-agents"
-import { LocalAgentSupervisor } from "./supervisor.js"
+import { buildWorkerEnvironment, LocalAgentSupervisor } from "./supervisor.js"
 
-export { LocalAgentSupervisor, matchesWorkerIdentity } from "./supervisor.js"
+export { LocalAgentSupervisor, matchesWorkerIdentity, buildWorkerEnvironment } from "./supervisor.js"
 
 export function controlSupervisorPlugin(options: { repoRoot: string; workerEntry: string }): Plugin.Object<unknown> {
   return {

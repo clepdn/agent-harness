@@ -15,7 +15,18 @@
         "xxhashjs": "^0.2.2",
       },
       "devDependencies": {
+        "@nano/plugin-bootstrap": "*",
+        "@nano/plugin-client": "*",
+        "@nano/plugin-context-management": "*",
         "@nano/plugin-context-strategies": "*",
+        "@nano/plugin-discord": "*",
+        "@nano/plugin-images": "*",
+        "@nano/plugin-memory": "*",
+        "@nano/plugin-model": "*",
+        "@nano/plugin-persistence": "*",
+        "@nano/plugin-tool-families": "*",
+        "@nano/plugin-tools": "*",
+        "@nano/plugin-web-observer": "*",
         "@nano/runtime-api": "*",
         "@types/better-sqlite3": "^7.6.13",
         "@types/node": "^25.5.0",
@@ -93,6 +104,7 @@
         "@nano/chat-client": "*",
         "@nano/plugin-web-builtins": "*",
         "@nano/plugin-web-observer": "*",
+        "@nano/plugins": "*",
         "@nano/protocol": "*",
         "@nano/web-api": "*",
         "highlight.js": "^11.11.1",
@@ -188,7 +200,6 @@
       "name": "@nano/control-api",
       "version": "0.1.0",
       "dependencies": {
-        "@nano/config": "*",
         "@nano/plugins": "*",
         "@nano/protocol": "*",
         "@types/node": "^25.5.0",
@@ -269,29 +280,19 @@
       "name": "@nano/runtime-api",
       "version": "0.1.0",
       "dependencies": {
-        "@anthropic-ai/sdk": "^0.100.1",
-        "@discordjs/voice": "^0.19.2",
         "@fastify/websocket": "^11.2.0",
         "@nano/config": "*",
-        "@nano/harness-client-node": "*",
         "@nano/harness-core": "*",
         "@nano/harness-protocol": "*",
         "@nano/harness-server": "*",
         "@nano/plugins": "*",
         "@nano/protocol": "*",
-        "@oh-my-pi/pi-natives": "17.2.2",
-        "@openrouter/sdk": "^0.12.21",
         "@types/better-sqlite3": "^7.6.13",
         "@types/node": "^25.5.0",
         "@types/ws": "^8.18.1",
         "better-sqlite3": "^12.8.0",
         "discord.js": "^14.25.1",
         "fastify": "^5.8.4",
-        "mdast-util-from-markdown": "^2.0.3",
-        "node-pty": "^1.1.0",
-        "openai": "^6.33.0",
-        "sqlite-vec": "^0.1.9",
-        "werift": "^0.24.4",
         "ws": "^8.19.0",
       },
       "devDependencies": {
@@ -339,9 +340,13 @@
       "dependencies": {
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
+        "@types/better-sqlite3": "^7.6.13",
+        "@types/node": "^25.5.0",
+        "better-sqlite3": "^12.8.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "@nano/plugin-persistence": "*",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -352,11 +357,16 @@
       "name": "@nano/plugin-bootstrap",
       "version": "0.1.0",
       "dependencies": {
+        "@nano/plugin-discord": "*",
+        "@nano/plugin-images": "*",
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
+        "@types/better-sqlite3": "^7.6.13",
+        "@types/node": "^25.5.0",
+        "better-sqlite3": "^12.8.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "@nano/plugin-memory": "*",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -367,11 +377,16 @@
       "name": "@nano/plugin-client",
       "version": "0.1.0",
       "dependencies": {
+        "@nano/harness-client-node": "*",
+        "@nano/harness-core": "*",
+        "@nano/harness-protocol": "*",
+        "@nano/harness-server": "*",
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
+        "@types/node": "^25.5.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -382,11 +397,16 @@
       "name": "@nano/plugin-context-management",
       "version": "0.1.0",
       "dependencies": {
+        "@nano/harness-core": "*",
+        "@nano/plugin-images": "*",
+        "@nano/plugin-persistence": "*",
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
+        "@oh-my-pi/pi-natives": "17.2.2",
+        "@types/node": "^25.5.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -427,11 +447,13 @@
       "name": "@nano/plugin-control-discovery",
       "version": "0.1.0",
       "dependencies": {
+        "@nano/config": "*",
         "@nano/control-api": "*",
         "@nano/plugins": "*",
+        "@types/node": "^25.5.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -527,13 +549,21 @@
       "name": "@nano/plugin-discord",
       "version": "0.1.0",
       "dependencies": {
+        "@discordjs/voice": "^0.19.2",
         "@nano/plugins": "*",
         "@nano/protocol": "*",
         "@nano/runtime-api": "*",
+        "@types/better-sqlite3": "^7.6.13",
+        "@types/node": "^25.5.0",
+        "better-sqlite3": "^12.8.0",
         "discord.js": "^14.25.1",
+        "werift": "^0.24.4",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "@nano/plugin-memory": "*",
+        "@nano/plugin-persistence": "*",
+        "@nano/plugin-runner": "*",
+        "tsx": "^4.20.6",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -546,9 +576,11 @@
       "dependencies": {
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
+        "@types/node": "^25.5.0",
+        "openai": "^6.33.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -560,10 +592,11 @@
       "version": "0.1.0",
       "dependencies": {
         "@nano/plugins": "*",
+        "@nano/protocol": "*",
         "@nano/runtime-api": "*",
+        "@types/node": "^25.5.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -590,11 +623,18 @@
       "name": "@nano/plugin-http",
       "version": "0.1.0",
       "dependencies": {
+        "@nano/harness-protocol": "*",
+        "@nano/plugin-events": "*",
         "@nano/plugins": "*",
+        "@nano/protocol": "*",
         "@nano/runtime-api": "*",
+        "fastify": "^5.7.4",
       },
       "devDependencies": {
+        "@nano/plugin-runner": "*",
+        "@nano/plugin-worker-operations": "*",
         "@types/node": "^25.5.0",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -605,11 +645,19 @@
       "name": "@nano/plugin-images",
       "version": "0.1.0",
       "dependencies": {
+        "@nano/harness-protocol": "*",
+        "@nano/plugin-discord": "*",
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
+        "@types/better-sqlite3": "^7.6.13",
+        "@types/node": "^25.5.0",
+        "better-sqlite3": "^12.8.0",
+        "mdast-util-from-markdown": "^2.0.3",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "@nano/plugin-runner": "*",
+        "@nano/plugin-tools": "*",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -622,9 +670,10 @@
       "dependencies": {
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
+        "@types/node": "^25.5.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -650,11 +699,18 @@
       "name": "@nano/plugin-memory",
       "version": "0.1.0",
       "dependencies": {
+        "@nano/harness-client-node": "*",
+        "@nano/plugin-bootstrap": "*",
+        "@nano/plugin-client": "*",
+        "@nano/plugin-persistence": "*",
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
+        "@types/better-sqlite3": "^7.6.13",
+        "@types/node": "^25.5.0",
+        "better-sqlite3": "^12.8.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "tsx": "^4.20.6",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -668,10 +724,11 @@
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
         "@types/better-sqlite3": "^7.6.13",
+        "@types/node": "^25.5.0",
         "better-sqlite3": "^12.8.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -684,9 +741,11 @@
       "dependencies": {
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
+        "@types/node": "^25.5.0",
+        "openai": "^6.33.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -702,6 +761,7 @@
         "@types/node": "^25.5.0",
       },
       "devDependencies": {
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -712,13 +772,19 @@
       "name": "@nano/plugin-persistence",
       "version": "0.1.0",
       "dependencies": {
+        "@nano/harness-core": "*",
+        "@nano/plugin-context-management": "*",
         "@nano/plugins": "*",
+        "@nano/protocol": "*",
         "@nano/runtime-api": "*",
         "@types/better-sqlite3": "^7.6.13",
         "@types/node": "^25.5.0",
         "better-sqlite3": "^12.8.0",
+        "sqlite-vec": "^0.1.9",
       },
       "devDependencies": {
+        "@nano/plugin-metrics": "*",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -745,12 +811,20 @@
       "name": "@nano/plugin-runner",
       "version": "0.1.0",
       "dependencies": {
+        "@nano/harness-core": "*",
+        "@nano/plugin-context-management": "*",
+        "@nano/plugin-discord": "*",
+        "@nano/plugin-images": "*",
+        "@nano/plugin-metrics": "*",
+        "@nano/plugin-tools": "*",
         "@nano/plugins": "*",
         "@nano/protocol": "*",
         "@nano/runtime-api": "*",
+        "@types/node": "^25.5.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "@nano/plugin-jobs-service": "*",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -761,11 +835,15 @@
       "name": "@nano/plugin-subagents",
       "version": "0.1.0",
       "dependencies": {
+        "@nano/harness-core": "*",
+        "@nano/plugin-model": "*",
+        "@nano/plugin-runner": "*",
+        "@nano/plugin-tools": "*",
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
+        "@types/node": "^25.5.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -792,11 +870,15 @@
       "version": "0.1.0",
       "dependencies": {
         "@nano/harness-core": "*",
+        "@nano/plugin-images": "*",
+        "@nano/plugin-runner": "*",
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
         "@types/node": "^25.5.0",
+        "node-pty": "^1.1.0",
       },
       "devDependencies": {
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -807,11 +889,19 @@
       "name": "@nano/plugin-tools",
       "version": "0.1.0",
       "dependencies": {
+        "@nano/harness-core": "*",
+        "@nano/harness-protocol": "*",
+        "@nano/plugin-images": "*",
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
+        "@types/node": "^25.5.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
+        "@nano/plugin-client": "*",
+        "@nano/plugin-memory": "*",
+        "@nano/plugin-persistence": "*",
+        "@nano/plugin-tool-families": "*",
+        "tsx": "^4.21.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -869,9 +959,9 @@
       "dependencies": {
         "@nano/plugins": "*",
         "@nano/web-api": "*",
+        "@types/react": "^19.2.2",
       },
       "devDependencies": {
-        "@types/react": "^19.2.2",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -885,9 +975,9 @@
       "dependencies": {
         "@nano/plugins": "*",
         "@nano/runtime-api": "*",
+        "@types/node": "^25.5.0",
       },
       "devDependencies": {
-        "@types/node": "^25.5.0",
         "typescript": "^6.0.2",
       },
       "peerDependencies": {
@@ -1192,8 +1282,6 @@
     "@oh-my-pi/pi-natives-linux-x64": ["@oh-my-pi/pi-natives-linux-x64@17.2.2", "", { "os": "linux", "cpu": "x64" }, "sha512-P5JD5rpgeN3/MYKS613SMMdpq1F4FcW72l1SiN9UTQWJi+D71VmmslUbNvLrp6zwEVzOLG5M+cHL5y2XKB4BaQ=="],
 
     "@oh-my-pi/pi-natives-win32-x64": ["@oh-my-pi/pi-natives-win32-x64@17.2.2", "", { "os": "win32", "cpu": "x64" }, "sha512-QregkQTNzOvxwE2tzJH9bqmNrL3lvWW9p+Kw74H/pW8mds3Grz4yA9/yUp53A9uaZgXo/0yYQbq7nYnZUwTv5g=="],
-
-    "@openrouter/sdk": ["@openrouter/sdk@0.12.21", "", { "dependencies": { "zod": "^3.25.0 || ^4.0.0" } }, "sha512-iKAlh0RbWzV6KphuE6NZFwsSjKJr6SsK5145LbxDB87Wa92imB5I9mpbv3hGHmacdnz/zCY/gokFSJXAxuO2/A=="],
 
     "@peculiar/asn1-cms": ["@peculiar/asn1-cms@2.10.0", "", { "dependencies": { "@peculiar/asn1-schema": "^2.10.0", "@peculiar/asn1-x509": "^2.10.0", "@peculiar/asn1-x509-attr": "^2.10.0", "asn1js": "^3.0.10", "tslib": "^2.8.1" } }, "sha512-CkX0H4NCIOMHOU3rh2xXZywinYZ/EnJlaOlJiGI0e5L4XjFqHf4iH30LMbXWChVppdA9ljbanjtzQFOhDNfTWg=="],
 

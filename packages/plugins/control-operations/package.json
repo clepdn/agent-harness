@@ -4,7 +4,7 @@
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "files": ["src"],
-  "scripts": { "test": "node --import tsx --test 'src/**/*.test.ts'", "typecheck": "tsc --noEmit -p tsconfig.json" },
+  "scripts": { "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-control-operations-test/home NANO_MIGRATE_LEGACY_STATE=false NANO_AGENT_STATE_DIR=/tmp/nano-plugin-control-operations-test/state node --import tsx --test 'src/**/*.test.ts'", "typecheck": "tsc --noEmit -p tsconfig.json" },
   "dependencies": {
     "@nano/control-api": "*",
     "@nano/plugins": "*",

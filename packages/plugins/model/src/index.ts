@@ -1,9 +1,10 @@
 import type { Plugin, CordisContext } from "@nano/plugins"
-import { createBridgeModelMetadata } from "@nano/runtime-api/bridge-model-metadata"
+import { createBridgeModelMetadata } from "./bridge-model-metadata"
 import { config, listModelPresets } from "@nano/runtime-api/config"
-import { createModelStateFactory } from "@nano/runtime-api/runner/model-state"
-import { completeModel, createOpenAICompatibleModelProvider, registerModelProvider, streamModel } from "@nano/runtime-api/model"
-import type { Model } from "@nano/runtime-api/model"
+import { createModelStateFactory } from "./runner/model-state"
+import { createOpenAICompatibleModelProvider } from "./model/openai-compatible"
+import { completeModel, registerModelProvider, streamModel } from "@nano/runtime-api/model"
+import type { Model } from "@nano/runtime-api/llm"
 import { getService, modelProviderResolver, nano } from "@nano/runtime-api"
 import type { ModelService } from "@nano/runtime-api"
 
@@ -68,3 +69,9 @@ export const openAICompatiblePlugin: Plugin.Object = {
     registerModelProvider(ctx, "openai-compatible", createOpenAICompatibleModelProvider(model.serviceTier))
   },
 }
+
+export * from "./settings"
+export * from "./bridge-model-metadata"
+export * from "./codex-fast-mode"
+export * from "./model/openai-compatible"
+export * from "./runner/model-state"

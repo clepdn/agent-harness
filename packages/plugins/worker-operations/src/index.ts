@@ -47,7 +47,7 @@ import {
 } from "@nano/runtime-api"
 import type { WorkerMetricQuery } from "@nano/protocol"
 import { isToolCapability, type WorkspaceDescriptor } from "@nano/harness-protocol"
-import type { RemoteClientConnection } from "@nano/runtime-api/client/switchable"
+import type { RemoteClientConnection } from "@nano/runtime-api/contracts/client"
 
 type WorkerClientStatus = NonNullable<WorkerStatusSnapshot["client"]>
 type MetricsQuery = NonNullable<Parameters<MetricsService["list"]>[0]>

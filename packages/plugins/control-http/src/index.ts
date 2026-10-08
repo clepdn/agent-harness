@@ -196,11 +196,13 @@ export function registerControlRoutes(
   })
 
   app.get("/ui", async (_request, reply) => {
-    if (services.ui) return services.ui.serve(undefined, reply)
+    const ui = services.ui
+    if (ui) return ui.serve(undefined, reply)
     return reply.code(503).send({ error: "web ui is not built yet. run `npm run build:web` first." })
   })
-  app.get("/ui/*", async (request, reply) => {
-    if (services.ui) return services.ui.serve((request.params as { "*"?: string })["*"], reply)
+  app.get<{ Params: { "*": string } }>("/ui/*", async (request, reply) => {
+    const ui = services.ui
+    if (ui) return ui.serve(request.params["*"], reply)
     return reply.code(503).send({ error: "web ui is not built yet. run `npm run build:web` first." })
   })
 }
@@ -217,7 +219,6 @@ export function controlHttpPlugin(options: ControlHttpOptions): Plugin.Object<un
       const store = getService(ctx, CONTROL_STORE)
       const agents = getService(ctx, CONTROL_AGENTS)
       const auth = getService(ctx, nanoRpcAuth)
-      const ui = options.staticUi === false ? undefined : findService(ctx, CONTROL_STATIC_UI)
       const gateway: RpcGatewayOptions = {
         operations: () => listContributions(ctx, nanoOperations),
         streams: () => listContributions(ctx, nanoStreams),
@@ -226,7 +227,11 @@ export function controlHttpPlugin(options: ControlHttpOptions): Plugin.Object<un
         maxFrameBytes: options.maxFrameBytes,
       }
       installLegacyAuth(app, auth)
-      registerControlRoutes(app, { store, configuredAgentIds: agents.configuredAgentIds, ui }, gateway)
+      registerControlRoutes(app, {
+        store,
+        configuredAgentIds: agents.configuredAgentIds,
+        get ui() { return options.staticUi === false ? undefined : findService(ctx, CONTROL_STATIC_UI) },
+      }, gateway)
       await registerRpcTransport(app, gateway)
       ctx.provide(CONTROL_HTTP.name, app)
     },

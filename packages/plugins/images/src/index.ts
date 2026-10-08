@@ -1,6 +1,6 @@
 import type { Plugin, CordisContext } from "@nano/plugins"
-import { markdownExcerptImageReferences, prepareContextImages } from "@nano/runtime-api/context-images"
-import { fetchRemoteImage } from "@nano/runtime-api/remote-image"
+import { markdownExcerptImageReferences, prepareContextImages } from "./context-images"
+import { fetchRemoteImage } from "./remote-image"
 import { findService, getService, nano, type ImageService } from "@nano/runtime-api"
 
 export function createImagesPlugin(): Plugin.Object {
@@ -30,5 +30,11 @@ export function createImagesPlugin(): Plugin.Object {
     },
   }
 }
+
+export { enabledContextImages, markdownImageReferences, markdownExcerptImageReferences, prepareContextImages } from "./context-images"
+export { imageMime } from "@nano/runtime-api/media"
+export { fetchRemoteImage, isRemoteImageUrl } from "./remote-image"
+export type { ContextImageReference, ContextImageAttachment, ContextImageState, DiscordContextImageLoader, RemoteImageDependencies, FetchRemoteImage } from "@nano/runtime-api/contracts/images"
+export { IMAGE_ROOT, IMAGE_MAX_BYTES, imageRootForModelInput } from "./config"
 
 export const imagesPlugin = createImagesPlugin()

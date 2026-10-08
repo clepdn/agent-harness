@@ -2,8 +2,8 @@ import type { Plugin, CordisContext } from "@nano/plugins"
 import { configSchema } from "@nano/plugins"
 import type Database from "better-sqlite3"
 import type { Usage } from "@nano/runtime-api/llm"
-import { createMetricsStore, type MetricsQuery, type MetricsStore, type MetricEventInput } from "@nano/runtime-api/metrics"
-import { createPrometheusRegistry, type PrometheusRegistry } from "@nano/runtime-api/prometheus"
+import { createMetricsStore, type MetricsQuery, type MetricsStore, type MetricEventInput } from "./metrics"
+import { createPrometheusRegistry, type PrometheusRegistry } from "./prometheus"
 import { getService, nano, type MetricsService, type PersistenceService } from "@nano/runtime-api"
 
 export interface MetricsPluginConfig {
@@ -93,4 +93,10 @@ export function createMetricsPlugin(defaults: MetricsPluginConfig = {}): Plugin.
     },
   }
 }
+
+export { createMetricsStore, summarizePromptResponse } from "./metrics"
+export type { MetricsQuery, MetricsStore, MetricEventInput, MetricsStoreOptions } from "./metrics"
+export { createPrometheusRegistry } from "./prometheus"
+export type { PrometheusRegistry } from "./prometheus"
+export type { PrometheusScrapeSource } from "@nano/runtime-api/contracts/metrics"
 export const metricsPlugin = createMetricsPlugin()

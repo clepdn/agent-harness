@@ -3,21 +3,34 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./config": "./src/config.ts",
+    "./context-images": "./src/context-images.ts",
+    "./remote-image": "./src/remote-image.ts",
+    "./tool-context-images": "./src/tool-context-images.ts"
   },
   "files": ["src"],
-  "scripts": {
-    "typecheck": "tsc --noEmit -p tsconfig.json"
-  },
   "dependencies": {
     "@nano/plugins": "*",
-    "@nano/runtime-api": "*"
+    "@nano/runtime-api": "*",
+    "@nano/plugin-discord": "*",
+    "@nano/harness-protocol": "*",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.5.0",
+    "better-sqlite3": "^12.8.0",
+    "mdast-util-from-markdown": "^2.0.3"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
+  "scripts": {
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-images-test/home NANO_AGENT_STATE_DIR=/tmp/nano-plugin-images-test/state node --import tsx --test 'src/*.test.ts'",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
   "devDependencies": {
-    "@types/node": "^25.5.0",
+    "@nano/plugin-runner": "*",
+    "@nano/plugin-tools": "*",
+    "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
 }

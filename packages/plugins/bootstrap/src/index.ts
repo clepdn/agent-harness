@@ -1,5 +1,5 @@
 import type { Plugin, CordisContext } from "@nano/plugins"
-import { buildBootstrap, createBootstrapHome, ensureSoulFilePlacement } from "@nano/runtime-api/bootstrap"
+import { buildBootstrap, createBootstrapHome, ensureSoulFilePlacement } from "./bootstrap"
 import { findService, getService, nano, type BootstrapService } from "@nano/runtime-api"
 import type { UserMessage } from "@nano/runtime-api/types"
 

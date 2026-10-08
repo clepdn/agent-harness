@@ -1,6 +1,6 @@
 import type { Plugin, CordisContext } from "@nano/plugins"
-import { createAgentStateService } from "@nano/runtime-api/agent-state-tools"
-import { createMemoryApplicationService, createMemoryRuntime } from "@nano/runtime-api/memory"
+import { createAgentStateService } from "./agent-state-tools"
+import { createMemoryApplicationService, createMemoryRuntime } from "./memory/index"
 import { findService, getService, nano, type EmbeddingsService, type MemoryService } from "@nano/runtime-api"
 
 export const memoryPlugin: Plugin.Object = {
@@ -68,3 +68,13 @@ export const memoryPlugin: Plugin.Object = {
     ctx.provide(nano.memory.name, service)
   },
 }
+export { createAgentStateService } from "./agent-state-tools"
+export type { AgentStateDependencies, AgentStateService, MemoryAccessOptions } from "./agent-state-tools"
+export { createMemoryApplicationService, createMemoryRuntime } from "./memory/index"
+export type { MemoryRuntimeDependencies, MemoryRuntime } from "./memory/index"
+export type { MemoryApplicationService, MemorySearchOptions, MemoryQueryParts } from "./memory/index"
+export { createMemorySearch } from "./memory/search"
+export { createAliasService } from "./memory/aliases"
+export { createMemoryIndexer, vectorParam } from "./memory/sync"
+export * from "./memory/discord-query"
+export * from "./memory/shared"

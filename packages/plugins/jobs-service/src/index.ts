@@ -1,5 +1,5 @@
 import type { Plugin } from "@nano/plugins"
-import { createJobManager } from "@nano/runtime-api/runner/jobs"
+import { createJobManager } from "./jobs"
 import { emitEvent, nano } from "@nano/runtime-api"
 import type { JobsService } from "@nano/runtime-api"
 
@@ -26,3 +26,4 @@ export const jobsServicePlugin: Plugin = {
     }
   },
 }
+export { createJobManager } from "./jobs"

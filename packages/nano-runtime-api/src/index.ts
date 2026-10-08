@@ -10,28 +10,22 @@ import type { ModelProviderResolver } from "./model-api"
 import { modelProviders } from "./model-api"
 import type { UserMessage } from "./types"
 import type { CompactionStrategy, SubagentConfig } from "./config"
-import type { CompactionResult, LoopHooks, LoopState, ManualCompactionRequest, RuntimeKind } from "./runner/types"
-import type { FunctionToolCall } from "./runner/loop-shared"
-import type { InterruptRequestResult, ModelSwapResult } from "./runner/index"
-import type { DeepArchiveBackend } from "./runner/compaction-companion"
-import type { SummaryOptions } from "./runner/summarize"
-import type { ModelSwapSelection, RuntimeModelConfig } from "./runner/model-state"
-import type { SwitchableToolClient } from "./client/switchable"
-import type { ContextImageReference } from "./context-images"
-import type { MemoryApplicationService } from "./memory"
-import type { MetricsStore } from "./metrics"
-import type { SessionStore } from "./runner/session"
-import type { ContextStoreService } from "./runner/context-store"
-import type { JobManager } from "./runner/jobs"
-import type { AgentChannelService } from "./runner/agent-channel"
-import type { WebSearchService } from "./web-search"
-import type * as RemoteImage from "./remote-image"
-import type { BootstrapCapabilities, PriorRestContext } from "./bootstrap"
-import type { FrontendSoulReconciliation } from "./frontend-soul"
-import type { ClassifiedApiError } from "./api-errors"
+import type { CompactionResult, LoopHooks, LoopState, ManualCompactionRequest, RuntimeKind, FunctionToolCall, InterruptRequestResult, ModelSwapResult } from "./contracts/runner"
+import type { DeepArchiveBackend, SummaryOptions } from "./contracts/context-management"
+import type { ModelSwapSelection, RuntimeModelConfig } from "./contracts/model"
+import type { SwitchableToolClient } from "./contracts/client"
+import type { ContextImageReference, FetchRemoteImage } from "./contracts/images"
+import type { MemoryApplicationService } from "./contracts/memory"
+import type { MetricsStore } from "./contracts/metrics"
+import type { SessionStore, ContextStoreService } from "./contracts/persistence"
+import type { JobManager } from "./contracts/jobs"
+import type { AgentChannelService } from "./contracts/agent-channel"
+import type { WebSearchService } from "./contracts/web-search"
+import type { BootstrapCapabilities, PriorRestContext, FrontendSoulReconciliation } from "./contracts/bootstrap"
+import type { ClassifiedApiError } from "./contracts/api-errors"
 import type { DiscordMessageTarget } from "./types"
-import type { ContextImageAttachment } from "./context-images"
-import type { DiscordMemorySearchResult } from "./memory/shared"
+import type { ContextImageAttachment } from "./contracts/images"
+import type { DiscordMemorySearchResult } from "./contracts/memory"
 import type { DiscordChannel, DiscordMessage } from "@nano/protocol"
 import type { GuildMember } from "discord.js"
 
@@ -280,7 +274,7 @@ export interface StrategyService {
 }
 export interface ImageService {
   prepareMessages: PrepareModelMessages
-  fetchRemoteImage: typeof RemoteImage.fetchRemoteImage
+  fetchRemoteImage: FetchRemoteImage
   memoryExcerptImageReferences(text: string, path: string): Promise<ContextImageReference[]>
 }
 export interface BootstrapService extends BootstrapApplicationService {}
@@ -302,6 +296,10 @@ export interface RuntimeDelivery {
   waiting(): boolean
   enqueue(event: UserMessage, options?: { onlyIfWaiting?: boolean; priority?: boolean }): boolean
 }
+/** Shared vector schema and retrieval metadata used by persistence, memory and Discord. */
+export const MEMORY_EMBEDDING_DIMENSIONS = 3072
+export const MEMORY_SEMANTIC_MIN_SIMILARITY = 0.18
+
 export const nano = {
   conversation: defineService<ConversationService>("nano.conversation"),
   runner: defineService<RunnerService>("nano.runner"),

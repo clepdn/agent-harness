@@ -1,9 +1,9 @@
 import type { Plugin } from "@nano/plugins"
 import type { ClientService } from "@nano/runtime-api"
 import { emitEvent, nano } from "@nano/runtime-api"
-import { createConfiguredToolClient, readClientFile } from "@nano/runtime-api/client"
-import type { ConfiguredToolClientOptions } from "@nano/runtime-api/client"
-import { fromClientLifecycle } from "@nano/runtime-api/triggers/client"
+import { createConfiguredToolClient, readClientFile } from "./client/index"
+import type { ConfiguredToolClientOptions } from "./client/index"
+import { fromClientLifecycle } from "./triggers/client"
 
 export type ClientPluginOptions = ConfiguredToolClientOptions
 
@@ -72,3 +72,10 @@ export function clientPlugin(options: ClientPluginOptions = {}): Plugin {
     },
   }
 }
+
+export { createConfiguredToolClient, readClientFile } from "./client/index"
+export type { ConfiguredToolClient, ConfiguredToolClientOptions } from "./client/index"
+export { SwitchableToolClient } from "./client/switchable"
+export type { ActiveClientInfo, RemoteClientConnection } from "./client/switchable"
+export { fromClientLifecycle } from "./triggers/client"
+export type { ClientLifecycleAction } from "./triggers/client"

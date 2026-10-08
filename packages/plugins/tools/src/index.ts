@@ -1,8 +1,8 @@
 import type { Plugin } from "@nano/plugins"
 import { findService, listContributions, nano } from "@nano/runtime-api"
 import type { ToolService } from "@nano/runtime-api"
-import { createNiriToolCatalog } from "@nano/runtime-api/runner/tool-catalog"
-import { getCompletionTools } from "@nano/runtime-api/runner/tools"
+import { createNiriToolCatalog } from "./tool-catalog"
+import { getCompletionTools } from "./tools"
 
 export const toolsPlugin: Plugin = {
   name: "nano.tools",
@@ -50,3 +50,8 @@ export const toolsPlugin: Plugin = {
     ctx.provide(nano.tools.name, service)
   },
 }
+
+export { createNiriToolCatalog, reconcileImageToolDefinition, reconcileMemoryFileToolDefinitions } from "./tool-catalog"
+export { getCompletionTools, isToolEnabled, isToolEnabledForSubagent, getSubagentTools } from "./tools"
+export type { NiriToolCatalogOptions } from "./tool-catalog"
+export type { ToolFilteringPolicy } from "./tools"

@@ -43,8 +43,8 @@ import type {
   Usage,
   UserMessage as ModelUserMessage,
 } from "@nano/runtime-api/llm"
-import type { ContextImageReference, ContextImageState, ContextImageAttachment } from "@nano/runtime-api/context-images"
-import type { RuntimeKind } from "@nano/runtime-api/runner/types"
+import type { ContextImageAttachment, ContextImageReference, ContextImageState } from "@nano/runtime-api/contracts/images"
+import type { RuntimeKind } from "@nano/runtime-api/contracts/runner"
 import type { UserMessage as ConversationUserMessage } from "@nano/runtime-api/types"
 
 /** Public conversation RPC bindings. Execution is delegated to the active conversation service. */

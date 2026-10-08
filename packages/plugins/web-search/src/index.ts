@@ -1,7 +1,7 @@
 import type { Plugin, CordisContext } from "@nano/plugins"
 import { configSchema } from "@nano/plugins"
 import { config } from "@nano/runtime-api/config"
-import { createWebSearch } from "@nano/runtime-api/web-search"
+import { createWebSearch, type WebSearch, type WebSearchResult } from "./web-search"
 import { nano, type WebSearchService } from "@nano/runtime-api"
 
 export interface WebSearchPluginConfig {
@@ -29,3 +29,6 @@ export const webSearchPlugin: Plugin.Object<WebSearchPluginConfig> = {
     ctx.provide(nano.webSearch.name, service)
   },
 }
+export { createWebSearch }
+export type { WebSearch, WebSearchResult }
+export type { WebSearchService } from "@nano/runtime-api/contracts/web-search"

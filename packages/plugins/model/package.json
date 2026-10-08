@@ -3,21 +3,29 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./runtime": "./src/runtime.ts",
+    "./provider": "./src/model/openai-compatible.ts",
+    "./state": "./src/runner/model-state.ts",
+    "./metadata": "./src/bridge-model-metadata.ts",
+    "./codex-fast-mode": "./src/codex-fast-mode.ts"
   },
   "files": ["src"],
   "scripts": {
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-model-test/home HOME=/tmp/nano-plugin-model-test/home XDG_STATE_HOME=/tmp/nano-plugin-model-test/state node --import tsx --test src/runner/model-state.test.ts src/codex-fast-mode.test.ts",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@nano/plugins": "*",
-    "@nano/runtime-api": "*"
+    "@nano/runtime-api": "*",
+    "@types/node": "^25.5.0",
+    "openai": "^6.33.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
-    "@types/node": "^25.5.0",
+    "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
 }

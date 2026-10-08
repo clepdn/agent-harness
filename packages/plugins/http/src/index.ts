@@ -1,5 +1,5 @@
 import type { CordisContext, Plugin } from "@nano/plugins"
-import { createServer } from "@nano/runtime-api/server"
+import { createServer } from "./server"
 import { configSchema, getService, listContributions, nano } from "@nano/runtime-api"
 
 export interface HttpPluginConfig {
@@ -33,3 +33,4 @@ export function createHttpPlugin(defaults: HttpPluginConfig): Plugin<HttpPluginC
     },
   }
 }
+export { createServer }

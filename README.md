@@ -43,7 +43,7 @@ import { registerOperation } from "@nano/protocol/rpc"
 
 Use `@nano/runtime-api/model` for the immutable conversation `Context`, model contracts, and `registerModelProvider`. Plugin contexts are the real published `@deepseek-ai/cordis@4.0.4` `Context`, exported as `CordisContext` by `@nano/plugins` and the runtime SDK. Plugins use native `name`, `inject`, `provide`, `Config`, `ctx.plugin`, and `ctx.effect`; Nano adds only typed feature contracts and a contribution service. Hosts supply the pinned Cordis runtime; SDKs and plugin packages declare it as a peer.
 
-Built-in source plugins are separate `@nano/plugin-*` packages under `packages/plugins/`, composed through the same native API as third-party plugins. Browser UI extensions use `@nano/web-api`. See the architecture guide for the public package layout and source-TypeScript loader/bundler requirements. Import declared package exports, never private host or package source paths. Plugins are trusted host-process code, not a sandbox.
+Built-in source plugins are 37 separate `@nano/plugin-*` packages under `packages/plugins/`, composed through the same native API as third-party plugins. Each package owns its feature behavior and tests; the SDKs retain contracts, fixed core, and genuinely shared infrastructure rather than implementation factories. Browser UI contracts use `@nano/web-api`; `createWebUI` and React rendering use `@nano/plugin-web-observer`. See the architecture guide for ownership, public package layout, and source-TypeScript loader/bundler requirements. Import declared package exports, never private host or package source paths. Plugins are trusted host-process code, not a sandbox.
 
 ## Run a client
 

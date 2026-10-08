@@ -1,6 +1,9 @@
 import type { Plugin } from "@nano/plugins"
 import { CONTROL_LOCAL_AGENTS, CONTROL_STORE } from "@nano/control-api"
-import { assertNoDuplicateBridgePorts, assertNoDuplicateDiscordTokens, loadAgentFiles, resolveLocalAgents, type ResolvedLocalAgent } from "@nano/control-api/local-agents"
+import { assertNoDuplicateBridgePorts, assertNoDuplicateDiscordTokens, loadAgentFiles, resolveLocalAgents } from "./local-agents.js"
+import type { ResolvedLocalAgent } from "@nano/control-api"
+export { assertNoDuplicateBridgePorts, assertNoDuplicateDiscordTokens, effectiveRuntimeConfig, loadAgentFiles, parseAgentFile, resolveLocalAgents } from "./local-agents.js"
+export type { AgentFile, ResolvedLocalAgent } from "@nano/control-api"
 
 export function controlDiscoveryPlugin(options: { directory: string; controlPort: number; repoRoot: string; allowEmpty?: boolean }): Plugin.Object<unknown> {
   return {

@@ -1,10 +1,33 @@
 import { defineService } from "@nano/plugins"
 import type { AgentRecord, AgentEventsPage, AgentOverview, CompactionsPage, ControlAgentsList, DiscordChannels, DiscordMessages, JsonValue, WorkerClientStatus, WorkerEvent, WorkerStatusSnapshot } from "@nano/protocol"
 import type { FastifyInstance, FastifyReply } from "fastify"
-import type { ResolvedLocalAgent } from "./local-agents.js"
 
 export type { AgentRecord, AgentEventsPage, AgentOverview, CompactionsPage, ControlAgentsList, DiscordChannels, DiscordMessages, JsonValue, WorkerClientStatus, WorkerEvent, WorkerStatusSnapshot }
-export type { AgentFile, ResolvedLocalAgent } from "./local-agents.js"
+
+export type AgentFile = {
+  id?: string
+  name?: string
+  port?: number
+  home?: string
+  client?: string
+  workspace?: string
+  config?: string[]
+  secrets?: string
+  settings?: Record<string, string | number | boolean>
+}
+
+export type ResolvedLocalAgent = {
+  id: string
+  name: string
+  port: number
+  home: string
+  client: string
+  workspace?: string
+  config: string[]
+  secrets?: string
+  settings: Record<string, string>
+  source: string
+}
 
 export type MirroredCompaction = {
   agentId: string

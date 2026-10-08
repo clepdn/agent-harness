@@ -7,9 +7,9 @@ Plugins are trusted in-process code. JSON configuration selects statically suppl
 ## Public packages
 
 - `@nano/plugins`: real Cordis `CordisContext`, `Plugin`, `Fiber`, and `Service`, typed service/slot/event names, `configSchema`, and the ordinary `Contributions` service.
-- `@nano/runtime-api`: runtime contracts, `nano` tokens, tool/command registration, and the same public Cordis/helper exports. `@nano/runtime-api/model` exports the immutable conversation `Context`, model contracts, `modelProviders`, and `registerModelProvider`.
-- `@nano/control-api`: control contracts/tokens; `@nano/control-api/local-agents` exports agent configuration support.
-- `@nano/web-api`: UI contracts, four slots, registration/rendering helpers, and `createWebUI`.
+- `@nano/runtime-api`: runtime contracts, `nano` tokens, tool/command registration, fixed conversation/model-dispatch core, and genuinely shared infrastructure. `@nano/runtime-api/contracts/*` contains type-only feature contracts. `@nano/runtime-api/model` exports the immutable conversation `Context`, model contracts, `modelProviders`, and `registerModelProvider`, not provider implementations.
+- `@nano/control-api`: control contracts, typed service tokens, and public Cordis/helper exports. Agent discovery/configuration behavior belongs to `@nano/plugin-control-discovery`; worker environment construction belongs to `@nano/plugin-control-supervisor`.
+- `@nano/web-api`: UI contracts, four slot tokens, registration helpers, and public Cordis/helper exports. `createWebUI` and React slot rendering belong to `@nano/plugin-web-observer`.
 - `@nano/protocol` and `@nano/protocol/rpc`: shared operation/stream descriptors, validators, auth contracts, and RPC registration.
 
 Built-ins are 37 independent `@nano/plugin-<name>` packages under `packages/plugins/<name>`: 25 runtime, 7 control, 2 web, and 3 executor/TUI packages. They import only public package exports and use the same native `ctx.plugin()` composition path as third-party plugins. There are no private host imports or cross-package `src` imports.
@@ -17,6 +17,24 @@ Built-ins are 37 independent `@nano/plugin-<name>` packages under `packages/plug
 Plugin packages and the three feature SDKs ship TypeScript/TSX source. Node consumers need a loader such as `tsx`; browser consumers need a TypeScript-capable bundler such as Vite. Source-required declaration dependencies ship as production dependencies. `@nano/plugins` and the protocol/harness support packages expose their built outputs.
 
 Hosts depend on exact Cordis version `4.0.4`; SDKs and plugins declare that version as a peer, rather than bundling another runtime. The packed-package checks compare the actual Cordis constructor identity, not merely `Context.is()`'s cross-copy global brand. Always import declared package exports, not private implementation paths.
+
+## Implementation ownership
+
+Each built-in package owns its feature implementation and corresponding tests, not just a lifecycle adapter to an SDK factory. Public owner subpaths expose behavior needed by other plugins; obsolete SDK feature paths are not compatibility aliases.
+
+| Owner packages | Implementation |
+|---|---|
+| `runner`, `agent-channel`, `jobs-service`, `subagents` | Conversation/frontend execution, triggers, mailbox, jobs, and subagent execution. |
+| `persistence`, `model`, `client` | SQLite/schema/history/outbox/session/context storage; model state/OpenAI-compatible provider; configured/switchable executor client. |
+| `discord`, `memory`, `embeddings` | Discord gateway/REST/state/commands/voice; memory indexing/search/sync/state tools; embeddings and provider headers. |
+| `bootstrap`, `images`, `context-management` | Bootstrap/soul; image preparation/fetching; summarization/deep archive and canonical conversation-message helpers. |
+| `tools`, `tool-families`, `web-search` | Catalog/filter/reconciliation; command/file/git behavior; search provider behavior. |
+| `events`, `metrics`, `observability`, `http` | Event stream; metric store/registry; Prometheus HTTP exporter; worker HTTP carrier. |
+| `control-discovery`, `control-supervisor`, `web-observer` | Agent loading/resolution/configuration; worker environment/supervision; UI notifications/actions/React rendering. |
+
+The remaining runtime SDK contains immutable conversation `Context`, model/provider contracts and dispatch, stream/message types, configuration/identity, typed registration, and shared helpers: durable file writes (bootstrap/memory/model/persistence), cache policy (configuration/model/runner), RPC gateway (worker/control HTTP), whitespace normalization (memory/Discord), media validation (images/Discord), and shared memory schema constants. Error classification belongs to `runner`; OpenAI header construction belongs to `embeddings`. Host-only shim code remains in `@nano/runtime`, and multi-plugin fixtures remain under `tests/support`, not in shipped APIs.
+
+`tests/plugin-ownership.test.ts` restricts runtime SDK modules/value exports and requires feature contracts to erase at runtime. Together with the public-boundary regression and packed consumption smoke, it rejects the former runtime-SDK wrapper-only layout and preserves the public consumption boundary. Feature ownership is also reviewed across all built-ins; a renamed shared implementation catch-all is not an acceptable replacement.
 
 ## Native plugins and services
 
@@ -129,7 +147,7 @@ The separate control application composes `nano.rpc-auth`, `control.persistence`
 
 ## Browser and terminal extensions
 
-`createWebUI(ctx = new CordisContext())` exposes the real `ctx`, UI notification/rendering/action methods, and no plugin-manager facade. `apps/web/src/ui-plugins.tsx` installs `Contributions`, `builtInWebPlugin`, and `createWebObserverPlugin({ onChange: webUI.notifyChanged })` through native `ctx.plugin()` calls.
+`createWebUI(ctx = new CordisContext())` from `@nano/plugin-web-observer` exposes the real `ctx`, UI notification/rendering/action methods, and no plugin-manager facade. `apps/web/src/ui-plugins.tsx` installs `Contributions`, `builtInWebPlugin`, and `createWebObserverPlugin({ onChange: webUI.notifyChanged })` through native `ctx.plugin()` calls.
 
 The four public UI contracts are `WebPanel`, `WebView`, `WebEventRenderer`, and `WebAction`, with their slot tokens and `registerWeb*` helpers. Panels use `left | main | right`, views use `main | right`; event renderers match and render `ChatLine`, and actions receive `execute`. Observers refresh React slot views. Render failures are isolated by the actual React error surface; an unmatched event uses the existing message renderer. Built-ins retain connections/conversation/notes panels and status/history/Discord/compactions views. They do not install server plugins.
 

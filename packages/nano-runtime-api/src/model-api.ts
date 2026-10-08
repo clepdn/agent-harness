@@ -10,7 +10,6 @@ import type {
 import { AssistantMessageEventStream } from "./model-events"
 export { AssistantMessageEventStream } from "./model-events"
 export type { AssistantMessageEvent } from "./model-events"
-import { createOpenAICompatibleModelProvider } from "./model/openai-compatible"
 
 export type { PrepareModelMessages } from "./llm"
 export interface ProviderCacheWarmOptions {
@@ -145,7 +144,6 @@ export function streamModel(model: Model, context: CompletionContext, options: O
   return provider.stream(model, context, options)
 }
 
-export { createOpenAICompatibleModelProvider }
 export { Context, ContextChangedError, CompletionRequestError } from "./llm"
 export type {
   Model,

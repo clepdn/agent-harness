@@ -3,22 +3,30 @@
   "version": "0.1.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./container": "./src/container/index.ts",
+    "./container/config": "./src/container/config.ts",
+    "./git-upstream-check": "./src/git-upstream-check.ts"
   },
   "files": ["src"],
   "scripts": {
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-tool-families-test/home NANO_AGENT_STATE_DIR=/tmp/nano-plugin-tool-families-test/state node --import tsx --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
     "@types/node": "^25.5.0",
     "@nano/harness-core": "*",
     "@nano/plugins": "*",
-    "@nano/runtime-api": "*"
+    "@nano/runtime-api": "*",
+    "@nano/plugin-images": "*",
+    "@nano/plugin-runner": "*",
+    "node-pty": "^1.1.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"
   },
   "devDependencies": {
+    "tsx": "^4.21.0",
     "typescript": "^6.0.2"
   }
 }
