@@ -39,7 +39,11 @@ export function createObservabilityPlugin(defaults: ObservabilityPluginConfig = 
     }),
     async apply(ctx: CordisContext, config: ObservabilityPluginConfig) {
       const service = createObservabilityService(getService(ctx, nano.metrics), config)
-      await service.start()
+      try {
+        await service.start()
+      } catch (error) {
+        console.error("[prometheus] server error:", error)
+      }
       return () => service.close()
     },
   }

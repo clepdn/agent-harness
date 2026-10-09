@@ -209,16 +209,20 @@ export type DiscordGatewayHandle = {
   refreshCommands: () => Promise<void>
 }
 
-async function setDiscordPresence(client: Client, presence: DiscordPresence): Promise<void> {
+export async function setDiscordPresence(client: Client, presence: DiscordPresence): Promise<void> {
   if (!client.user) return
-  await client.user.setPresence(
-    presence === "resting"
-      ? {
-          status: "idle",
-          activities: [{ name: "resting", state: "resting", type: ActivityType.Custom }],
-        }
-      : { status: "online", activities: [] },
-  )
+  try {
+    await client.user.setPresence(
+      presence === "resting"
+        ? {
+            status: "idle",
+            activities: [{ name: "resting", state: "resting", type: ActivityType.Custom }],
+          }
+        : { status: "online", activities: [] },
+    )
+  } catch (error) {
+    console.warn("[discord gateway] failed to update presence:", error)
+  }
 }
 
 export async function startDiscordGateway(options: DiscordGatewayOptions): Promise<DiscordGatewayHandle | null> {
@@ -416,9 +420,9 @@ export async function startDiscordGateway(options: DiscordGatewayOptions): Promi
           effectiveBotUserId = ready.user?.id ?? effectiveBotUserId
           console.log(`[discord gateway] connected as ${ready.user?.tag ?? ready.user?.id ?? "unknown"} (id=${ready.user?.id ?? "unknown"})`)
           await options.onReady?.(ready.user?.id ?? "")
-          await setDiscordPresence(client, latestPresence)
+          void setDiscordPresence(client, latestPresence)
           options.statusUpdater.start(client)
-          await refreshCommands()
+          void refreshCommands().catch((error) => console.warn("[discord gateway] failed to register commands:", error))
           readySettled = true
           resolve()
         } catch (err) {
@@ -428,6 +432,9 @@ export async function startDiscordGateway(options: DiscordGatewayOptions): Promi
       })()
     })
   })
+  // Login or an early abort can trigger cleanup before this promise is awaited.
+  // Observe it immediately so rejecting readiness never becomes an orphaned rejection.
+  void readyInitialization.catch(() => {})
   client.on("raw", onRaw)
   client.on(Events.VoiceStateUpdate, onVoiceStateUpdate)
   client.on(Events.MessageCreate, onMessageCreate)

@@ -86,7 +86,12 @@ function asDiscordMessage(value: unknown): DiscordMessage {
     (typeof isFromBot !== "number" && typeof isFromBot !== "boolean")) throw new Error("invalid Discord message row")
   return { message_id: messageId, channel_id: channelId, guild_id: guildId, author_id: authorId, author_username: authorUsername, content, created_at: createdAt, is_dm: isDm, mentions_bot: mentionsBot, is_from_bot: isFromBot }
 }
-export function createDiscordPlugin(): Plugin {
+export interface DiscordPluginDependencies {
+  readonly startGateway?: typeof startDiscordGateway
+}
+
+export function createDiscordPlugin(dependencies: DiscordPluginDependencies = {}): Plugin {
+  const startGateway = dependencies.startGateway ?? startDiscordGateway
   return {
     name: "nano.discord",
     inject: [nano.persistence.name, "nano.contributions"],
@@ -244,7 +249,7 @@ export function createDiscordPlugin(): Plugin {
         await gateway?.stop()
         await voice.stop()
       })
-      const startup = startDiscordGateway({
+      const startup = startGateway({
         db,
         subscribePresence: (listener) => {
           const unsubscribe = persistence.subscribeWorkerEvents((event) => {
@@ -283,7 +288,11 @@ export function createDiscordPlugin(): Plugin {
         trigger,
       })
       gatewayStartup = startup
-      gateway = await startup
+      try {
+        gateway = await startup
+      } catch (error) {
+        console.warn("[discord gateway] startup failed:", error)
+      }
     },
   }
 }

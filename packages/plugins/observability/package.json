@@ -8,7 +8,7 @@
   },
   "files": ["src"],
   "scripts": {
-    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-observability-test/home HOME=/tmp/nano-plugin-observability-test/home XDG_STATE_HOME=/tmp/nano-plugin-observability-test/state node --import tsx --test",
+    "test": "NANO_CONFIG=../../../test-config.json NANO_HOME=/tmp/nano-plugin-observability-test/home HOME=/tmp/nano-plugin-observability-test/home XDG_STATE_HOME=/tmp/nano-plugin-observability-test/state node --import tsx --test 'src/**/*.test.ts'",
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
