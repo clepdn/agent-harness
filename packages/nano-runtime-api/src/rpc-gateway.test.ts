@@ -109,11 +109,11 @@ function waitForMessage(socket: WebSocket, predicate: (frame: Record<string, unk
   })
 }
 
-async function connect(app: FastifyInstance): Promise<WebSocket> {
+async function connect(app: FastifyInstance, headers?: Record<string, string>): Promise<WebSocket> {
   await app.listen({ host: "127.0.0.1", port: 0 })
   const address = app.server.address()
   assert.ok(address && typeof address === "object")
-  const socket = new WebSocket(`ws://127.0.0.1:${address.port}/rpc/stream`)
+  const socket = new WebSocket(`ws://127.0.0.1:${address.port}/rpc/stream`, { headers })
   await new Promise<void>((resolve, reject) => {
     socket.once("open", () => resolve())
     socket.once("error", reject)
@@ -143,6 +143,50 @@ test("local-open rejects remote peers even when Host and forwarding headers clai
     assert.equal(local.statusCode, 200)
     assert.deepEqual(local.json(), { value: { value: "proof" } })
     assert.equal(calls, 1)
+  })
+})
+
+test("open RPC accepts remote hosts and same-origin browsers behind HTTPS termination", async () => {
+  await withApp({
+    auth: () => auth("open"),
+    operations: () => [contribution<OperationContribution<typeof echo>>("test.echo", {
+      descriptor: echo,
+      handler: (value) => value,
+    })],
+  }, async (app) => {
+    const request = {
+      method: "POST" as const,
+      url: "/rpc/test.echo",
+      remoteAddress: "192.0.2.10",
+      payload: { input: { value: "remote browser" } },
+      headers: { host: "control.example:3000", origin: "https://control.example:3000" },
+    }
+    const allowed = await app.inject(request)
+    assert.equal(allowed.statusCode, 200)
+    assert.deepEqual(allowed.json(), { value: { value: "remote browser" } })
+    for (const origin of ["https://other.example:3000", "https://control.example:4000", "null"]) {
+      const denied = await app.inject({ ...request, headers: { ...request.headers, origin } })
+      assert.equal(denied.statusCode, 403)
+    }
+  })
+})
+
+test("open WebSocket RPC streams on a remote hostname without a token", { timeout: 5_000 }, async () => {
+  await withApp({
+    auth: () => auth("open"),
+    streams: () => [contribution<StreamContribution<typeof stream>>("test.stream", {
+      descriptor: stream,
+      handler: async function* (value) { yield value },
+    })],
+  }, async (app) => {
+    const socket = await connect(app, { host: "control.example", origin: "https://control.example" })
+    try {
+      const next = waitForMessage(socket, (frame) => frame.id === "remote")
+      socket.send(JSON.stringify({ id: "remote", op: "subscribe", method: "test.stream", input: { value: "remote stream" } }))
+      assert.deepEqual(await next, { id: "remote", op: "item", value: { value: "remote stream" } })
+    } finally {
+      await closeSocket(socket)
+    }
   })
 })
 

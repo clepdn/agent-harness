@@ -34,7 +34,7 @@ async function installWorkerServices(fixture: TestExecutionFixture, events: User
 
 function gateway(fixture: TestExecutionFixture) {
   return {
-    auth: () => ({ mode: "local-open" as const, allowedOrigins: [], permissions: ["*"] }),
+    auth: () => ({ mode: "open" as const, allowedOrigins: [], permissions: ["*"] }),
     operations: () => listContributions(fixture.ctx, nano.operations),
     streams: () => listContributions(fixture.ctx, nano.streams),
   }
@@ -49,6 +49,7 @@ test("worker routes need no bearer token and do not enable permissive CORS", asy
     const crossOriginHealth = await app.inject({ method: "GET", url: "/health", headers: { origin: "https://evil.example" } })
     assert.equal(crossOriginHealth.headers["access-control-allow-origin"], undefined)
     assert.equal((await app.inject({ method: "GET", url: "/awp/status" })).statusCode, 200)
+    assert.equal((await app.inject({ method: "GET", url: "/awp/status", remoteAddress: "192.0.2.10", headers: { host: "worker.example" } })).statusCode, 200)
   } finally {
     await app.close()
     await fixture.close()

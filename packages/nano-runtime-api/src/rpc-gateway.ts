@@ -99,8 +99,12 @@ function originAllowed(request: FastifyRequest, auth: RpcAuthService): boolean {
   if (!origin) return true
   if (auth.allowedOrigins.includes(origin)) return true
   try {
-    const originHost = new URL(origin).hostname.toLowerCase()
-    return auth.mode === "local-open" && isLocalHost(request) && (originHost === "localhost" || originHost === "127.0.0.1" || originHost === "::1")
+    const originUrl = new URL(origin)
+    if (originUrl.protocol !== "http:" && originUrl.protocol !== "https:") return false
+    // Compare the public authority so HTTPS termination at a reverse proxy works.
+    if (originUrl.host === request.host.toLowerCase()) return true
+    const originHost = originUrl.hostname.toLowerCase()
+    return auth.mode === "local-open" && isLocalHost(request) && (originHost === "localhost" || originHost === "127.0.0.1" || originHost === "[::1]")
   } catch {
     return false
   }
@@ -154,7 +158,7 @@ export async function authenticateRpcRequest(
   if (auth.mode === "local-open" && !custom && (!isLocalHost(request) || !isLocalPeer(request))) {
     throw rpcUnavailable("UNAUTHENTICATED", "Local RPC access is limited to localhost")
   }
-  return { subject: custom?.subject ?? "local" }
+  return { subject: custom?.subject ?? (auth.mode === "open" ? "anonymous" : "local") }
 }
 
 export async function authorizeRpcRequest(
@@ -349,7 +353,7 @@ export function createRpcGateway(options: RpcGatewayOptions): {
         socket.close(1011, "RPC authentication unavailable")
         return
       }
-      if (initialAuth.mode === "local-open") {
+      if (initialAuth.mode !== "token") {
         authenticating = authenticate().catch(failAuthentication)
       } else {
         authTimer = setTimeout(() => failAuthentication(rpcUnavailable("UNAUTHENTICATED", "Authentication required")), AUTH_TIMEOUT_MS)
@@ -375,7 +379,7 @@ export function createRpcGateway(options: RpcGatewayOptions): {
         }
         if (message.op === "auth") {
           const auth = options.auth()
-          if (auth?.mode === "local-open" && authContext) {
+          if (auth && auth.mode !== "token" && authContext) {
             send({ op: "auth", ok: true })
             return
           }

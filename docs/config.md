@@ -91,13 +91,17 @@ is part of the application composition. For example, the worker supports:
 ```
 
 `nano.rpc-auth` is shared by the worker and control application and accepts
-`mode: "local-open"` or `"token"`. Token mode requires a non-empty `token`;
+`mode: "open"`, `"local-open"`, or `"token"`. The default `open` mode accepts
+clients on the configured listener, including remote browsers, without a token.
+Explicit `local-open` mode restricts access to loopback hosts and peers.
+Token mode requires a non-empty `token`;
 `permissions` and `allowedOrigins`, when specified, must be arrays of non-empty
 strings. In token mode each RPC descriptor's permission must be listed or the
-wildcard `"*"` granted. Local-open mode is intended for local callers and does
-not use the permissions list as an access-control list. Requests with an Origin
-must match an allowed origin, except the loopback local-open case. Missing RPC
-auth selection keeps the explicit local-open compatibility default.
+wildcard `"*"` granted. Open modes do not use the permissions list as an
+access-control list. Browser requests from the server's own host and port are
+accepted, including HTTPS terminated at a reverse proxy. Other origins must be
+listed in `allowedOrigins`, except loopback origins in `local-open` mode.
+Missing RPC auth selection preserves the pre-migration remote-access behavior.
 
 Worker plugin selection follows dependency declarations. Disabling a plugin
 withdraws its service and registrations, closes owned resources, and unloads

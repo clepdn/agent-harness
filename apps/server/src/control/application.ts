@@ -48,14 +48,14 @@ function pluginSelection(config: ConfigObject, name: string): Selection {
   return { enabled: raw.enabled !== false, config: raw.config }
 }
 
-/** An absent auth selection is the explicit local-open compatibility default. */
+/** Preserve remote access on the configured listener when auth is not selected. */
 function authConfig(config: ConfigObject): RpcAuthConfig {
   const all = isConfigObject(config.plugins) ? config.plugins : {}
   const raw = all["nano.rpc-auth"]
-  if (raw === undefined) return { mode: "local-open", allowedOrigins: [], permissions: [] }
+  if (raw === undefined) return { mode: "open", allowedOrigins: [], permissions: [] }
   if (!isConfigObject(raw)) throw new TypeError("nano.rpc-auth selection must be an object")
   const selected = "mode" in raw ? raw : raw.config
-  if (selected === undefined) return { mode: "local-open", allowedOrigins: [], permissions: [] }
+  if (selected === undefined) return { mode: "open", allowedOrigins: [], permissions: [] }
   return parseRpcAuthConfig(selected)
 }
 

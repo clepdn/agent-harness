@@ -772,7 +772,7 @@ export function App() {
       const [overviewData, eventData, discordData] = await Promise.all([
         callPanel(selected.panel, controlAgentOverview, { agentId: selected.agent.id }),
         callPanel(selected.panel, controlAgentEvents, { agentId: selected.agent.id, tail: true, limit: 1000, view: "chat" }),
-        callPanel(selected.panel, controlDiscordChannels, { agentId: selected.agent.id }),
+        callPanel(selected.panel, controlDiscordChannels, { agentId: selected.agent.id }).catch(() => ({ channels: [] })),
       ])
       setOverview(overviewData)
       setEvents(eventData.events ?? [])

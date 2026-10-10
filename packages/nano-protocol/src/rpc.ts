@@ -20,7 +20,7 @@ export interface StreamContribution<D extends StreamDescriptor = StreamDescripto
 }
 
 export interface RpcAuthConfig {
-  readonly mode: "local-open" | "token"
+  readonly mode: "open" | "local-open" | "token"
   readonly token?: string
   readonly allowedOrigins?: readonly string[]
   readonly permissions?: readonly string[]
@@ -103,9 +103,9 @@ export function parseRpcAuthConfig(value: unknown): RpcAuthConfig {
   const input = value as Record<string, unknown>
   const allowed: Record<string, true> = { mode: true, token: true, permissions: true, allowedOrigins: true }
   if (Object.keys(input).some((key) => !allowed[key])) throw new TypeError("RPC auth config contains an unsupported field")
-  if (input.mode !== "local-open" && input.mode !== "token") throw new TypeError("RPC auth mode must be local-open or token")
+  if (input.mode !== "open" && input.mode !== "local-open" && input.mode !== "token") throw new TypeError("RPC auth mode must be open, local-open or token")
   if (input.mode === "token" && (typeof input.token !== "string" || !input.token.trim())) throw new TypeError("Token RPC auth requires a token")
-  if (input.mode === "local-open" && input.token !== undefined) throw new TypeError("Local-open RPC auth must not specify a token")
+  if (input.mode !== "token" && input.token !== undefined) throw new TypeError("Open RPC auth must not specify a token")
   if (input.token !== undefined && typeof input.token !== "string") throw new TypeError("RPC auth token must be a string")
   const permissions = input.permissions === undefined ? [] : input.permissions
   const allowedOrigins = input.allowedOrigins === undefined ? [] : input.allowedOrigins

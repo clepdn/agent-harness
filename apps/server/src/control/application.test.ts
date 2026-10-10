@@ -26,7 +26,7 @@ test("control HTTP follows static UI arrival, withdrawal, and replacement", asyn
     await application.close()
     fs.rmSync(directory, { recursive: true, force: true })
   })
-  const request = (url: string) => application.server.inject({ method: "GET", url })
+  const request = (url: string) => application.server.inject({ method: "GET", url, remoteAddress: "192.0.2.10", headers: { host: "control.example" } })
   assert.equal((await request("/ui")).statusCode, 503)
   await application.fibers.get("control.static-ui")!.dispose()
   const first = await application.ctx.plugin(staticUiPlugin({ directory: firstDirectory }), { directory: firstDirectory, enabled: true })

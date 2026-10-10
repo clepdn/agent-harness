@@ -119,7 +119,7 @@ export async function createNanoApplication(options: NanoApplicationOptions = {}
       const name = pluginName(plugin)
       const selection = config.plugins?.[name]
       if (disabled.has(name) || selection?.enabled === false) continue
-      const raw = selection?.config ?? (name === "nano.rpc-auth" ? { mode: "local-open" } : undefined)
+      const raw = selection?.config ?? (name === "nano.rpc-auth" ? { mode: "open" } : undefined)
       const fiber = raw === undefined ? ctx.plugin(plugin) : ctx.plugin(plugin, raw)
       fibers.set(name, fiber)
       installedPlugins.push(plugin)

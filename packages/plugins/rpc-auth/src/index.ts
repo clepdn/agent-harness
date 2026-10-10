@@ -6,7 +6,7 @@ import { configSchema, nano } from "@nano/runtime-api"
 export const rpcAuthPlugin: Plugin<RpcAuthConfig> = {
   name: "nano.rpc-auth",
   provide: nano.rpcAuth.name,
-  Config: configSchema((raw) => parseRpcAuthConfig(raw ?? { mode: "local-open" })),
+  Config: configSchema((raw) => parseRpcAuthConfig(raw ?? { mode: "open" })),
   apply(ctx: CordisContext, config: RpcAuthConfig) {
     const auth: RpcAuthService = {
       mode: config.mode,

@@ -79,6 +79,7 @@ test("the public application composes plugins and recovers a fake provider", asy
   let app: NanoApplication | undefined
   try {
     app = await createNanoApplication({ config, replace: [fixtureProviderPlugin()] })
+    assert.equal(getService(app.ctx, nano.rpcAuth).mode, "open")
     const modelService = getService(app.ctx, nano.model)
     const current = modelService.current()
     const model = current.primaryModel ?? current.fallbackModel
