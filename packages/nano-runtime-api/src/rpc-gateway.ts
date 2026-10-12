@@ -319,7 +319,8 @@ export function createRpcGateway(options: RpcGatewayOptions): {
   }
 
   const websocketPlugin: FastifyPluginAsync = async (app) => {
-    await app.register(websocket, { options: { maxPayload: maxFrameBytes } })
+    // A host that serves other WebSocket routes registers the plugin once at its root.
+    if (!app.hasDecorator("websocketServer")) await app.register(websocket, { options: { maxPayload: maxFrameBytes } })
     app.get("/rpc/stream", { websocket: true }, (connection, request) => {
       const socket = connection as WebSocket
       const aborters = new Map<string, AbortController>()

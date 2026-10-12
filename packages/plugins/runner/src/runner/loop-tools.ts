@@ -1,4 +1,5 @@
 import { executeToolCall, pushToolMessage } from "./loop-tool-runtime"
+import { emitStream } from "./loop-shared"
 import type { FunctionToolCall, LoopHooks, LoopState } from "@nano/runtime-api/contracts/runner"
 
 export type ToolCallsOutcome = "continue" | "rest" | "wait"
@@ -21,7 +22,7 @@ function skipRemainingToolCalls(
   calls.slice(startIndex).forEach((pendingCall) => {
     const skippedContent = `skipped: interrupted by incoming ${source} event.`
     const result = pushToolMessage(convId, state, pendingCall, skippedContent)
-    state.services?.events?.emit({ type: "tool", name: pendingCall.name, args: { _skipped: true }, result })
+    emitStream(state, { type: "tool", name: pendingCall.name, args: { _skipped: true }, result })
   })
 }
 
@@ -63,7 +64,7 @@ export async function processToolCalls(
     if (state.modelSwap && !MODEL_SWAP_ALLOWED_TOOLS[call.name]) {
       const skippedContent = "skipped: model swap handoff permits only journaling and end_session tools."
       const result = pushToolMessage(convId, state, call, skippedContent)
-      state.services?.events?.emit({ type: "tool", name: call.name, args: { _skipped: true }, result })
+      emitStream(state, { type: "tool", name: call.name, args: { _skipped: true }, result })
       continue
     }
     const outcome = await executeToolCall(convId, state, hooks, call)

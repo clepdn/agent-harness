@@ -395,11 +395,11 @@ export function logMessageIn(
   publish: (type: WorkerEventType, payload: unknown) => WorkerEvent,
 ): void {
   const createdAt = new Date().toISOString()
-  database.prepare(
+  const result = database.prepare(
     "insert into messages (convId, role, content, toolCalls, toolCallId, createdAt) values (?, ?, ?, ?, ?, ?)",
   ).run(convId, role, content, toolCalls ? JSON.stringify(toolCalls) : null, toolCallId ?? null, createdAt)
   publish("conversation.message", {
-    conversationId: convId, role, content,
+    conversationId: convId, messageId: Number(result.lastInsertRowid), role, content,
     ...(toolCalls ? { toolCalls } : {}),
     ...(toolCallId ? { toolCallId } : {}),
     createdAt,

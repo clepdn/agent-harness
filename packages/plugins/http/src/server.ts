@@ -1,4 +1,5 @@
 import { formatEventStreamItem } from "@nano/plugin-events"
+import websocket from "@fastify/websocket"
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify"
 import { AGENT_ID } from "@nano/runtime-api/agent-config"
 import { rpcGatewayPlugin, invokeRpcOperation, prepareRpcStream, authenticateRpcRequest, rpcErrorStatus, rpcErrorValue } from "@nano/runtime-api/rpc-gateway"
@@ -71,7 +72,11 @@ export function createServer(options: { rpcGateway?: RpcGatewayOptions } = {}) {
 
   const imageMaxBytes = Math.max(1, Number.parseInt(process.env.IMAGE_TOOL_MAX_BYTES ?? "1000000", 10) || 1_000_000)
   const app = Fastify({ logger: false, bodyLimit: Math.max(2_000_000, imageMaxBytes * 2 + 1_000_000) })
-  if (options.rpcGateway) app.register(rpcGatewayPlugin(options.rpcGateway))
+  if (options.rpcGateway) {
+    // One upgrade listener for the whole server; RPC and contributed routes share it.
+    app.register(websocket, { options: { maxPayload: options.rpcGateway.maxFrameBytes ?? 1_000_000 } })
+    app.register(rpcGatewayPlugin(options.rpcGateway))
+  }
   app.addHook("onRequest", async (request, reply) => {
     if (request.method === "OPTIONS" || request.url.startsWith("/rpc/")) return
     const gateway = options.rpcGateway

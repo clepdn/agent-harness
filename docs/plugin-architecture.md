@@ -141,7 +141,7 @@ The result exposes `ctx`, native `fibers` keyed by name, installed `plugins`, an
 | `nano.worker-operations`, `nano.worker-discord-operations`, `nano.worker-client-operations`, `nano.worker-metrics-operations` | Worker RPC exports. |
 | `nano.conversation-operations`, `nano.model-operations`, `nano.tools-list-operations` | Generic typed RPC exports. |
 | `nano.rpc-auth` | RPC authentication/permissions. |
-| `nano.lifecycle`, `nano.observability`, `nano.http` | Conditional lifecycle/exporter/carrier additions. |
+| `nano.lifecycle`, `nano.observability`, `nano.dsh`, `nano.http` | Conditional lifecycle/exporter/carrier additions; `listen` installs `nano.dsh` before `nano.http`. |
 
 The separate control application composes `nano.rpc-auth`, `control.persistence`, `control.discovery`, `control.supervisor`, `control.operations`, `control.static-ui`, and `control.http` from their independent packages. Required control services cannot be disabled; static UI is optional.
 
@@ -152,3 +152,5 @@ The separate control application composes `nano.rpc-auth`, `control.persistence`
 The four public UI contracts are `WebPanel`, `WebView`, `WebEventRenderer`, and `WebAction`, with their slot tokens and `registerWeb*` helpers. Panels use `left | main | right`, views use `main | right`; event renderers match and render `ChatLine`, and actions receive `execute`. Observers refresh React slot views. Render failures are isolated by the actual React error surface; an unmatched event uses the existing message renderer. Built-ins retain connections/conversation/notes panels and status/history/Discord/compactions views. They do not install server plugins.
 
 Production Vite assets use `/ui/`; the dev proxy retains `/rpc` WebSocket and worker/control paths. Build with `npm run build:web`. The tool-client executor, TUI executor, and TUI chat lifecycle are likewise ordinary public plugins, not private host modules. Their hosts supply Cordis and compose them with the same native API.
+
+`@nano/plugin-dsh` serves the published DeepSeek Harness browser bundle at `/dsh/` and implements the browser's wire protocol (`api/<method>` RPC envelope and the `api/remote.mux` stream mux) over the main conversation. Durable `conversation.*` worker events become a dense DSH session journal; identity-stamped `stream.event` frames (`assistant-start`, text, thinking, `assistant-end`, `interrupted`) become `assistant-stream` frames. It mounts on the worker's existing listener through the `nanoHttpRoutes` slot from `@nano/runtime-api/http`, whose installers `nano.http` applies before listening. `control.http` proxies `/agents/:id/dsh/` to each worker.

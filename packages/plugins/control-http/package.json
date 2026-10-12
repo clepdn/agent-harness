@@ -6,11 +6,14 @@
   "files": ["src"],
   "scripts": { "typecheck": "tsc --noEmit -p tsconfig.json" },
   "dependencies": {
+    "@fastify/websocket": "^11.2.0",
     "@nano/control-api": "*",
     "@nano/plugins": "*",
     "@nano/protocol": "*",
     "@nano/runtime-api": "*",
-    "fastify": "^5.7.4"
+    "@types/ws": "^8.18.1",
+    "fastify": "^5.7.4",
+    "ws": "^8.19.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "4.0.4"

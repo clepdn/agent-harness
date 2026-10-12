@@ -26,6 +26,7 @@
     "@nano/plugin-context-management": "*",
     "@nano/plugin-context-strategies": "*",
     "@nano/plugin-discord": "*",
+    "@nano/plugin-dsh": "*",
     "@nano/plugin-embeddings": "*",
     "@nano/plugin-events": "*",
     "@nano/plugin-generic-operations": "*",

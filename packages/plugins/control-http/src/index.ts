@@ -1,10 +1,12 @@
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify"
+import websocket from "@fastify/websocket"
 import { findService, getService, listContributions, type Plugin } from "@nano/plugins"
 import { nanoOperations, nanoRpcAuth, nanoStreams, type RpcAuthService } from "@nano/protocol/rpc"
 import { controlAgentCompactions, controlAgentEvents, controlAgentOverview, controlAgentStatus, controlAgentStream, controlAgentsList, controlClientConnect, controlClientDisconnect, controlClientStatus, controlCron, controlDiscordChannels, controlDiscordMessages, controlEnqueue, controlShutdown, type OperationDescriptor, type OperationOutput, type StreamDescriptor } from "@nano/protocol"
 import type { JsonValue } from "@nano/protocol"
 import { authenticateRpcRequest, invokeRpcOperation, prepareRpcStream, registerRpcTransport, rpcErrorStatus, rpcErrorValue, type PreparedRpcStream, type RpcGatewayOptions, type RpcIdentity } from "@nano/runtime-api/rpc-gateway"
 import { CONTROL_AGENTS, CONTROL_HTTP, CONTROL_STATIC_UI, CONTROL_STORE, type ControlStaticUi, type ControlStore } from "@nano/control-api"
+import { registerDshProxy } from "./dsh-proxy"
 
 export type ControlHttpOptions = {
   staticUi?: boolean
@@ -103,6 +105,7 @@ export function registerControlRoutes(
   app.options("/*", async (_request, reply) => reply.code(204).send())
 
   app.get("/health", async () => ({ ok: true }))
+  registerDshProxy(app, (id) => agentExists(id) ? store.getAgent(id)?.baseUrl : undefined)
   app.get("/agents", async (request, reply) => routeOperation(gateway, request, reply, controlAgentsList, {}))
 
   app.get("/agents/:id/status", async (request, reply) => {
@@ -226,6 +229,8 @@ export function controlHttpPlugin(options: ControlHttpOptions): Plugin.Object<un
         maxBodyBytes: options.maxBodyBytes,
         maxFrameBytes: options.maxFrameBytes,
       }
+      // One upgrade listener for the whole server; RPC and the DSH proxy share it.
+      await app.register(websocket, { options: { maxPayload: options.maxFrameBytes ?? 1_000_000 } })
       installLegacyAuth(app, auth)
       registerControlRoutes(app, {
         store,

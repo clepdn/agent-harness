@@ -30,6 +30,7 @@
     "./contracts/tools": "./src/contracts/tools.ts",
     "./contracts/web-search": "./src/contracts/web-search.ts",
     "./durable-file": "./src/durable-file.ts",
+    "./http": "./src/http.ts",
     "./llm": "./src/llm.ts",
     "./media": "./src/media.ts",
     "./model": "./src/model-api.ts",

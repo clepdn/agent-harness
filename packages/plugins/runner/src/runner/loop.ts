@@ -17,6 +17,7 @@ import { assistantContentText, isFunctionToolCall } from "./loop-content"
 import type { AssistantMessage, TextContent, ToolCall } from "@nano/runtime-api/llm"
 import { buildTurnSignature, hasIncomingUserMessage } from "./loop-signatures"
 import type { CompactionResult, LoopHooks, LoopState, ManualCompactionRequest } from "@nano/runtime-api/contracts/runner"
+import { bindConversation, emitStream, liveIdentity } from "./loop-shared"
 import { processToolCalls } from "./loop-tools"
 
 const LLM_RECENT_MIN_KEEP = 6
@@ -142,7 +143,7 @@ async function applyLoopGuardNudge(state: LoopState, _hooks: LoopHooks, reason: 
     content: guardMessage,
     timestamp: Date.now(),
   })
-  state.services?.events?.emit({ type: "text", text: guardMessage })
+  emitStream(state, { type: "text", text: guardMessage })
 }
 
 async function processAssistantTurn(convId: number, state: LoopState, hooks: LoopHooks): Promise<CycleOutcome> {
@@ -152,6 +153,11 @@ async function processAssistantTurn(convId: number, state: LoopState, hooks: Loo
   if (state.toolCatalogFingerprint && fingerprint !== state.toolCatalogFingerprint) {
     throw new Error(`tool catalog epoch ${state.toolCatalogEpoch} mutated in place`)
   }
+  // Each assistant turn is exactly one assistant model request: step advances,
+  // the provider attempt counter resets and is advanced by the retry loop.
+  if (state.activeConversationId !== convId) state.activeConversationId = convId
+  state.stepIndex = (state.stepIndex ?? 0) + 1
+  state.attemptIndex = 0
   const response = await fetchCompletion(state, state.toolCatalog, state, state.operationSignal)
   // follow-up iterations that work through the same incoming event.
   state.memoryRecallPending = false
@@ -165,7 +171,7 @@ async function processAssistantTurn(convId: number, state: LoopState, hooks: Loo
 
   if (modelState.enableThinking) {
     if (!response.emittedThinking && response.bufferedThinking) {
-      state.services?.events?.emit({ type: "thinking", text: response.bufferedThinking })
+      emitStream(state, { type: "thinking", text: response.bufferedThinking })
     } else if (!response.emittedThinking) {
       emitThinking(msg, state)
     }
@@ -174,8 +180,12 @@ async function processAssistantTurn(convId: number, state: LoopState, hooks: Loo
   const toolCalls = msg.content.filter(isFunctionToolCall) as ToolCall[]
   if (!response.emittedText) {
     const text = msg.content.filter((c): c is TextContent => c.type === "text").map((c) => c.text).join("")
-    if (text) state.services?.events?.emit({ type: "text", text })
+    if (text) emitStream(state, { type: "text", text })
   }
+  // Durable assistant message is logged and all non-streamed fallback frames
+  // are emitted: the attempt is committed and closes the stream boundary.
+  const committedIdentity = liveIdentity(state)
+  if (committedIdentity) emitStream(state, { type: "assistant-end", identity: committedIdentity, outcome: "committed" })
   if (toolCalls.length === 0) return CycleOutcome.NoTools
 
   const toolOutcome = await processToolCalls(convId, state, hooks, toolCalls)
@@ -536,6 +546,7 @@ function clearDiscordTypingScope(state: LoopState): void {
 }
 
 export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks): Promise<RunLoopExit> {
+  bindConversation(state, convId)
   let turnCount = 0
   let previousTurnSignature: string | null = null
   let consecutiveIdenticalToolTurns = 0
@@ -579,7 +590,7 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
     if (state.modelSwap && !state.modelSwap.started) {
       state.context.append({ role: "user", content: state.modelSwap.prompt, timestamp: Date.now() })
       state.services?.persistence?.logMessage?.(convId, "user", state.modelSwap.prompt)
-      state.services?.events?.emit({ type: "user", source: "system", text: state.modelSwap.prompt, triggeredAt: new Date().toISOString() })
+      emitStream(state, { type: "user", source: "system", text: state.modelSwap.prompt, triggeredAt: new Date().toISOString() })
       state.modelSwap.started = true
       state.modelSwap.onStarted?.()
     }
@@ -684,6 +695,8 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       if (state.activeTurnController === turnController) state.activeTurnController = undefined
     }
     if (interrupted) {
+      const identity = liveIdentity(state)
+      if (identity) emitStream(state, { type: "interrupted", identity })
       await waitForNextEvent(convId, state, hooks)
       continue
     }
@@ -705,6 +718,8 @@ export async function runLoop(convId: number, state: LoopState, hooks: LoopHooks
       clearDiscordTypingScope(state)
       state.services?.discord?.setWorking?.(false)
       state.services?.metrics?.setWorking?.(false)
+      const identity = liveIdentity(state)
+      if (identity) emitStream(state, { type: "interrupted", identity })
       await waitForNextEvent(convId, state, hooks)
       continue
     }

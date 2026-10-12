@@ -1,8 +1,29 @@
+/**
+ * Attribution for a live streamed frame: which virtual agent and conversation
+ * it belongs to, and which assistant model request (step/attempt) produced it.
+ * Runtime-only; never persisted in a conversation snapshot.
+ */
+export interface StreamIdentity {
+  /** Which virtual agent owns the frame. */
+  runtimeKind: RuntimeKind
+  /** Conversation row (startConversation rowid) owning the frame. */
+  conversationId: number
+  /** Monotonic assistant-step index within the conversation (1-based). */
+  step: number
+  /** Provider attempt index within the step (1-based; retries increment). */
+  attempt: number
+}
+
+/**
+ * Live stream frame. Data frames carry an optional `identity`; explicit
+ * assistant lifecycle frames require it. Frames without `identity` are legacy
+ * wire and must keep decoding for existing consumers.
+ */
 export type StreamEvent =
-  | { type: "text"; text: string }
-  | { type: "user"; text: string; source: string; triggeredAt: string; clientId?: string }
-  | { type: "thinking"; text: string }
-  | { type: "tool"; name: string; args: Record<string, unknown>; result: string }
+  | { type: "text"; text: string; identity?: StreamIdentity }
+  | { type: "user"; text: string; source: string; triggeredAt: string; clientId?: string; identity?: StreamIdentity }
+  | { type: "thinking"; text: string; identity?: StreamIdentity }
+  | { type: "tool"; name: string; args: Record<string, unknown>; result: string; identity?: StreamIdentity }
   | {
       type: "usage"
       promptTokens?: number
@@ -12,7 +33,12 @@ export type StreamEvent =
       totalTokens?: number
       elapsedMs?: number
       tokensPerSecond?: number
+      identity?: StreamIdentity
     }
+  | { type: "assistant-start"; identity: StreamIdentity }
+  | { type: "assistant-end"; identity: StreamIdentity; outcome: "committed" | "abandoned" }
+  /** The operator interrupted the active turn; the loop now waits for the next event. */
+  | { type: "interrupted"; identity: StreamIdentity }
 
 export type TriggerSource = "discord" | "bsky" | "webhook" | "cron" | "chat"
 
@@ -453,8 +479,14 @@ const workerEventArrayValidator = defineValidator<readonly WorkerEvent[]>((value
   return value.map((event) => workerEventValidator.parse(event))
 })
 const workerStatusOutput = defineValidator<WorkerStatusSnapshot>((value) => workerStatusValidator.parse(value))
+const streamIdentityValidator = (value: unknown): value is StreamIdentity => {
+  if (!isRecord(value)) return false
+  if (value.runtimeKind !== "main" && value.runtimeKind !== "frontend") return false
+  return nonNegativeInteger(value.conversationId) && nonNegativeInteger(value.step) && nonNegativeInteger(value.attempt)
+}
 const streamEventValidator = defineValidator<StreamEvent>((value) => {
   if (!isRecord(value) || !hasString(value, "type")) throw new RpcValidationError("stream event is invalid")
+  if (value.identity !== undefined && !streamIdentityValidator(value.identity)) throw new RpcValidationError("stream event identity is invalid")
   if (value.type === "text" || value.type === "thinking") {
     if (!hasString(value, "text")) throw new RpcValidationError("stream text event is invalid")
   } else if (value.type === "user") {
@@ -465,6 +497,12 @@ const streamEventValidator = defineValidator<StreamEvent>((value) => {
     for (const field of ["promptTokens", "cachedPromptTokens", "cacheWriteTokens", "completionTokens", "totalTokens", "elapsedMs", "tokensPerSecond"]) {
       if (!optionalNumber(value, field)) throw new RpcValidationError("stream usage event is invalid")
     }
+  } else if (value.type === "assistant-start") {
+    if (!streamIdentityValidator(value.identity)) throw new RpcValidationError("stream assistant-start event is invalid")
+  } else if (value.type === "assistant-end") {
+    if (!streamIdentityValidator(value.identity) || (value.outcome !== "committed" && value.outcome !== "abandoned")) throw new RpcValidationError("stream assistant-end event is invalid")
+  } else if (value.type === "interrupted") {
+    if (!streamIdentityValidator(value.identity)) throw new RpcValidationError("stream interrupted event is invalid")
   } else throw new RpcValidationError("stream event type is invalid")
   return value as StreamEvent
 })

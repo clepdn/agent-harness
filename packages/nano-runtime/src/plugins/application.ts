@@ -26,6 +26,7 @@ import { workerOperationsPlugin, workerDiscordOperationsPlugin, workerClientOper
 import { conversationOperationsPlugin, modelOperationsPlugin, toolsListOperationsPlugin } from "@nano/plugin-generic-operations"
 import { createLifecyclePlugin } from "@nano/plugin-lifecycle"
 import { createHttpPlugin } from "@nano/plugin-http"
+import { dshPlugin } from "@nano/plugin-dsh"
 import type { LifecycleService } from "@nano/runtime-api"
 
 export interface NanoApplicationConfig {
@@ -99,7 +100,7 @@ export async function createNanoApplication(options: NanoApplicationOptions = {}
   const definitions = [...builtInPlugins]
   if (options.lifecycle) definitions.unshift(createLifecyclePlugin(options.lifecycle))
   if (options.observability) definitions.push(createObservabilityPlugin(options.observability))
-  if (options.listen) definitions.push(createHttpPlugin(options.listen))
+  if (options.listen) definitions.push(dshPlugin, createHttpPlugin(options.listen))
   for (const name of replacements.keys()) {
     if (!definitions.some((plugin) => pluginName(plugin) === name)) throw new Error(`Cannot replace unknown plugin "${name}"`)
   }

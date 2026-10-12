@@ -1,6 +1,7 @@
 import type { CordisContext, Plugin } from "@nano/plugins"
 import { createServer } from "./server"
 import { configSchema, getService, listContributions, nano } from "@nano/runtime-api"
+import { nanoHttpRoutes } from "@nano/runtime-api/http"
 
 export interface HttpPluginConfig {
   readonly port: number
@@ -27,6 +28,7 @@ export function createHttpPlugin(defaults: HttpPluginConfig): Plugin<HttpPluginC
           streams: () => listContributions(ctx, nano.streams),
         },
       })
+      for (const installer of listContributions(ctx, nanoHttpRoutes)) await installer.value(server)
       await server.listen(options)
       console.log(`[nano] listening at ${server.listeningOrigin}`)
       return async () => { await server.close() }

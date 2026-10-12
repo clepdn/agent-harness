@@ -27,6 +27,24 @@ configured, open `http://<control-host>:<services.nano.controlPort>/ui/`
 For a source checkout, `npm start` builds the UI before starting the server;
 you can also build it explicitly with `npm run build:web`.
 
+### DeepSeek Harness view
+
+Each worker also serves the DeepSeek Harness web UI (including the mobile shell)
+as a live view of its main conversation. Open
+`http://<control-host>:<controlPort>/agents/<agent-id>/dsh/`; a standalone
+worker serves it at `/dsh/` on its own port. The page is the published DSH
+browser bundle talking to Nano itself — there is no DSH backend process.
+
+- One session shows the main lane: history, streamed text and reasoning, tool
+  calls and results grouped per step, and running state.
+- The composer submits text prompts to the main conversation; Stop interrupts
+  the active turn.
+- Reasoning and token usage appear for replies produced while the worker is
+  running; older history shows text and tool calls. A stopped turn reloads as
+  completed after a worker restart.
+- The browser cannot send bearer tokens, so use RPC `open` (the default) or
+  `local-open` auth for this surface.
+
 
 ## Plugin extensions
 

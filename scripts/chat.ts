@@ -360,6 +360,8 @@ const handleStreamEvent = (event: StreamEvent) => {
     return
   }
 
+  // Assistant lifecycle frames carry no printable content for this terminal client.
+  if (event.type !== "text") return
   appendActiveStream("text", event.text)
   scheduleStreamSettleCheck()
 }

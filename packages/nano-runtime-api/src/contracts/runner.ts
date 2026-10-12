@@ -74,6 +74,15 @@ export interface LoopState {
   discordTypingChannelId?: string
   /** Rolling registry of the 16 most recently surfaced Discord message targets. */
   discordTargets?: DiscordMessageTarget[]
+  /**
+   * Conversation row currently owning this loop. Runtime-only; used to stamp
+   * live stream identity. Never persisted in a conversation snapshot.
+   */
+  activeConversationId?: number
+  /** 1-based assistant-step index within the active conversation. */
+  stepIndex?: number
+  /** 1-based provider attempt index within the active assistant step. */
+  attemptIndex?: number
 }
 
 /** Lifecycle hooks injected by the runner orchestrator into the loop. */

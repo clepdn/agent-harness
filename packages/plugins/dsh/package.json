@@ -1,0 +1,59 @@
+{
+  "name": "@nano/plugin-dsh",
+  "version": "0.1.0",
+  "description": "Serves the DeepSeek Harness web UI as a live view of Nano's main conversation",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "files": ["src"],
+  "scripts": {
+    "test": "node --import tsx --test 'src/**/*.test.ts'",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@canary-builds/dsh-mobile-ui": "1.1.2",
+    "@deepseek-ai/dsh-api-gateway": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-api-remotes": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-api-session-controller": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-api-workspace-controller": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-connection": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-file-upload": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-locale": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-modules": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-resources": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-shortcuts": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-brand-official": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-chat": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-input-trigger": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-layout": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-session": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-settings": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-sidebar-right": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-theme": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-tool": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-trajectory": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-client-ui-workspace": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-typert-registry": "0.2.0-rc.2",
+    "@deepseek-ai/dsh-web-frontend": "0.2.0-rc.2",
+    "@nano/plugins": "*",
+    "@nano/protocol": "*",
+    "@nano/runtime-api": "*",
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^25.5.0",
+    "@types/ws": "^8.18.1",
+    "better-sqlite3": "^12.8.0",
+    "fastify": "^5.8.4",
+    "ws": "^8.19.0"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "4.0.4"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.2"
+  }
+}

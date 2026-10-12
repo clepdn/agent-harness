@@ -12,6 +12,7 @@ import { createNiriToolCatalog, reconcileImageToolDefinition, reconcileMemoryFil
 import type { RunnerStateInternal } from "./types"
 import type { InterruptRequestResult } from "@nano/runtime-api/contracts/runner"
 import { createRuntimeContext } from "./context"
+import { bindConversation, emitStream } from "./loop-shared"
 import { getCompletionTools } from "@nano/plugin-tools"
 
 export type FrontendModelSwapOptions = {
@@ -100,7 +101,6 @@ export function createFrontendRunnerRuntime(services: RuntimeExecutionServices):
     if (!bootstrap) throw new Error("nano.frontend requires nano.bootstrap")
     return bootstrap.build(event, priorRest, options)
   }
-  function emit(event: Parameters<NonNullable<RuntimeExecutionServices["events"]>["emit"]>[0]): void { frontendServices.events?.emit(event) }
   function frontendModelConfig(kind: "frontend" | "main" = "frontend") {
     const model = frontendServices.model
     if (!model) throw new Error("nano.frontend requires nano.model")
@@ -600,7 +600,8 @@ export function createFrontendRunnerRuntime(services: RuntimeExecutionServices):
   const incomingMessage = `[incoming — ${event.source}]\n\n${event.content}`
   state.context.append({ role: "user", content: incomingMessage, imageReferences: frontendServices.discord?.discordEventImageReferences(event) ?? [], timestamp: Date.now() } as Message)
   logMessage(convId, "user", incomingMessage)
-  emit({ type: "user", source: event.source, text: event.content, triggeredAt: event.triggeredAt, clientId: event.clientId })
+  bindConversation(state, convId)
+  emitStream(state, { type: "user", source: event.source, text: event.content, triggeredAt: event.triggeredAt, clientId: event.clientId })
   state.memoryRecallPending = true
 }
   async function wakeFrontend(event: UserMessage): Promise<void> {
@@ -627,6 +628,8 @@ export function createFrontendRunnerRuntime(services: RuntimeExecutionServices):
   state.discardRequested = false
 
   let convId: number
+  // The trigger is the conversation's first user turn; record it exactly as the model sees it.
+  let wakeRecord: string
   try {
   const saved = await loadSession("frontend")
   if (saved) {
@@ -645,9 +648,10 @@ export function createFrontendRunnerRuntime(services: RuntimeExecutionServices):
     reconcileFileToolCatalog()
     applyDiscordTargets(event)
     autoSeeDiscordEvent(event)
+    wakeRecord = `[frontend harness restarted — ${event.source} @ ${event.triggeredAt}]\n\n${event.content}`
     state.context.append({
       role: "user",
-      content: `[frontend harness restarted — ${event.source} @ ${event.triggeredAt}]\n\n${event.content}`,
+      content: wakeRecord,
       imageReferences: frontendServices.discord?.discordEventImageReferences(event) ?? [],
       timestamp: Date.now(),
     } as Message)
@@ -655,6 +659,7 @@ export function createFrontendRunnerRuntime(services: RuntimeExecutionServices):
     state.discordTargets = []
     applyDiscordTargets(event)
     autoSeeDiscordEvent(event)
+    wakeRecord = `[incoming — ${event.source}]\n\n${event.content}`
     const restSnapshot = await loadRestSnapshot("frontend")
     const priorRest = restSnapshot
       ? { restedAt: restSnapshot.restedAt, note: restSnapshot.note, forest: restSnapshot.summary }
@@ -672,6 +677,9 @@ export function createFrontendRunnerRuntime(services: RuntimeExecutionServices):
     state.context = createRuntimeContext("frontend", bootstrap, state.toolCatalog, undefined, frontendServices.providerResolver, prepareFrontendMessages, frontendServices.model)
   }
   convId = startConversation(`frontend:${event.source}`, event.triggeredAt)
+  logMessage(convId, "user", wakeRecord)
+  bindConversation(state, convId)
+  emitStream(state, { type: "user", source: event.source, text: event.content, triggeredAt: event.triggeredAt, clientId: event.clientId })
   const swap = frontendModelSwap?.phase === "resuming" ? frontendModelSwap : undefined
   if (swap) {
     swap.replayConversation = convId

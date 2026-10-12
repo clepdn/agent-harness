@@ -2,12 +2,13 @@ import type { ToolResultMessage } from "@nano/runtime-api/llm"
 import { redactSecrets } from "@nano/runtime-api/config"
 import { latestAssistantContent } from "./loop-content"
 import { toolContextImageReferences } from "@nano/plugin-images/tool-context-images"
-import type {
-  ArgTuple,
-  ToolArgKey,
-  ToolArgs,
-  ToolExecutionContext,
-  ToolExecutionOutcome,
+import {
+  emitStream,
+  type ArgTuple,
+  type ToolArgKey,
+  type ToolArgs,
+  type ToolExecutionContext,
+  type ToolExecutionOutcome,
 } from "./loop-shared"
 import type { FunctionToolCall, LoopHooks, LoopState } from "@nano/runtime-api/contracts/runner"
 const NEVER_ABORTED = new AbortController().signal
@@ -68,7 +69,7 @@ export function recordToolResult(
   content: string,
 ): string {
   const result = pushToolMessage(convId, state, call, content)
-  state.services?.events?.emit({ type: "tool", name, args, result } as never)
+  emitStream(state, { type: "tool", name, args, result })
   return result
 }
 

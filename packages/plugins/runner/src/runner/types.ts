@@ -25,4 +25,7 @@ export interface RunnerStateInternal extends RunnerState {
   discordTypingTurnId?: string
   discordTypingChannelId?: string
   discordTargets?: DiscordMessageTarget[]
+  activeConversationId?: number
+  stepIndex?: number
+  attemptIndex?: number
 }

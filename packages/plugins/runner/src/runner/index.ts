@@ -12,6 +12,7 @@ import type { ToolDefinition } from "@nano/harness-core"
 import { createBoredomTimer } from "./boredom-timer"
 import { registerDiscordTargets, rewriteDiscordTargetLabels } from "@nano/plugin-discord/targets"
 import { createRuntimeContext } from "./context"
+import { bindConversation, emitStream } from "./loop-shared"
 import { getCompletionTools } from "@nano/plugin-tools"
 import type { ModelSwapSelection } from "@nano/runtime-api/contracts/model"
 import type { FrontendRunnerRuntime } from "./frontend"
@@ -740,8 +741,9 @@ function autoSeeDiscordEvent(event: UserMessage): void {
   }
 }
 
-function emitUserEvent(event: UserMessage): void {
-  services.events?.emit({ type: "user", source: event.source, text: event.content, triggeredAt: event.triggeredAt, clientId: event.clientId })
+function emitUserEvent(convId: number, event: UserMessage): void {
+  bindConversation(state, convId)
+  emitStream(state, { type: "user", source: event.source, text: event.content, triggeredAt: event.triggeredAt, clientId: event.clientId })
 }
 
 function injectIncomingEvent(convId: number, event: UserMessage): void {
@@ -758,7 +760,7 @@ function injectIncomingEvent(convId: number, event: UserMessage): void {
     timestamp: Date.now(),
   } as Message)
   logMessage(convId, "user", incomingMessage)
-  emitUserEvent(event)
+  emitUserEvent(convId, event)
   state.memoryRecallPending = true
   console.log("[runner] injected event from", event.source)
 }
@@ -801,6 +803,8 @@ async function wakeInternal(event: UserMessage): Promise<void> {
   state.interruptRequested = false
   state.discardRequested = false
   let convId: number
+  // The trigger is the conversation's first user turn; record it exactly as the model sees it.
+  let wakeRecord: string
   try {
 
   const saved = await loadSession()
@@ -821,9 +825,10 @@ async function wakeInternal(event: UserMessage): Promise<void> {
     reconcileAgentChannelCatalog()
     reconcileFileToolCatalog()
     autoSeeDiscordEvent(event)
+    wakeRecord = `[harness restarted — ${event.source} @ ${event.triggeredAt}]\n\n${event.content}`
     state.context.append({
       role: "user",
-      content: `[harness restarted — ${event.source} @ ${event.triggeredAt}]\n\n${event.content}`,
+      content: wakeRecord,
       imageReferences: getImageReferences(event),
       timestamp: Date.now(),
     } as Message)
@@ -831,6 +836,7 @@ async function wakeInternal(event: UserMessage): Promise<void> {
     state.discordTargets = []
     applyDiscordTargets(event)
     autoSeeDiscordEvent(event)
+    wakeRecord = formatIncomingEvent(event)
     const restSnapshot = await loadRestSnapshot()
     const priorRest = restSnapshot ? { restedAt: restSnapshot.restedAt, note: restSnapshot.note, forest: restSnapshot.summary } : null
     const bootstrap = await buildBootstrap(event, priorRest, {
@@ -845,6 +851,8 @@ async function wakeInternal(event: UserMessage): Promise<void> {
     state.context = createRuntimeContext("main", bootstrap, state.toolCatalog, undefined, services.providerResolver, prepareRuntimeMessages, model)
   }
   convId = startConversation(event.source, event.triggeredAt)
+  logMessage(convId, "user", wakeRecord)
+  emitUserEvent(convId, event)
   console.log("[runner] nano is awake")
 
   if (pendingModelSwap?.phase === "selected") {

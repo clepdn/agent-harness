@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@fastify/websocket": "^11.2.0",
     "@nano/plugin-events": "*",
     "@nano/harness-protocol": "*",
     "@nano/plugins": "*",

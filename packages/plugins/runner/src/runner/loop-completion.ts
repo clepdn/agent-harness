@@ -18,7 +18,7 @@ import {
   shouldFallback,
 } from "./messages"
 import { getCompletionTools } from "@nano/plugin-tools"
-import type { CompletionTurnResult } from "./loop-shared"
+import { emitStream, liveIdentity, type CompletionTurnResult } from "./loop-shared"
 import type { Model } from "@nano/runtime-api/llm"
 import { classifyApiError } from "../api-errors"
 
@@ -116,7 +116,7 @@ export function applyUsage(
     (usage.cacheWrite ? ` cache_write=${usage.cacheWrite}` : "") +
     rate,
   )
-  state.services?.events?.emit({
+  emitStream(state, {
     type: "usage",
     promptTokens: usage.input,
     completionTokens: usage.output,
@@ -138,7 +138,7 @@ export function emitThinking(msg: AssistantMessage, state: LoopState): void {
     .map((c) => c.thinking)
     .join("")
     .trim()
-  if (thinking) state.services?.events?.emit({ type: "thinking", text: thinking })
+  if (thinking) emitStream(state, { type: "thinking", text: thinking })
 }
 
 function sleep(ms: number): Promise<void> {
@@ -219,34 +219,48 @@ async function createStreamedCompletion(
   }
   configuredThinkingEfforts.set(state, configuredThinkingLevel)
 
+  // One provider attempt: advance the attempt counter and open the stream
+  // boundary immediately before the model request.
+  state.attemptIndex = (state.attemptIndex ?? 0) + 1
+  const attemptIdentity = liveIdentity(state)
+  if (attemptIdentity) emitStream(state, { type: "assistant-start", identity: attemptIdentity })
+
   let emittedText = false
   let emittedThinking = false
   let bufferedThinking = ""
   const completionContext = state.context
-  const finalMessage = await completionContext.complete({
-    captureCacheWarmRequest: modelState.cacheWarming && !modelState.useFallback,
-    ...(signal ? { signal } : {}),
-    onEvent: (event: AssistantMessageEvent) => {
-      if (event.type === "text_delta") {
-        state.services?.discord?.notifyModelActivity?.(state.discordTypingTurnId ?? "")
-        state.services?.events?.emit({ type: "text", text: event.delta })
-        emittedText = true
-      } else if (event.type === "thinking_start") {
-        state.services?.discord?.notifyModelActivity?.(state.discordTypingTurnId ?? "")
-        bufferedThinking = ""
-      } else if (event.type === "thinking_delta") {
-        state.services?.discord?.notifyModelActivity?.(state.discordTypingTurnId ?? "")
-        if (handoff || modelState.enableThinking) bufferedThinking += event.delta
-      } else if (event.type === "thinking_end") {
-        if ((handoff || modelState.enableThinking) && bufferedThinking) {
-          state.services?.events?.emit({ type: "thinking", text: bufferedThinking })
-          emittedThinking = true
+  let finalMessage: AssistantMessage
+  try {
+    finalMessage = await completionContext.complete({
+      captureCacheWarmRequest: modelState.cacheWarming && !modelState.useFallback,
+      ...(signal ? { signal } : {}),
+      onEvent: (event: AssistantMessageEvent) => {
+        if (event.type === "text_delta") {
+          state.services?.discord?.notifyModelActivity?.(state.discordTypingTurnId ?? "")
+          emitStream(state, { type: "text", text: event.delta })
+          emittedText = true
+        } else if (event.type === "thinking_start") {
+          state.services?.discord?.notifyModelActivity?.(state.discordTypingTurnId ?? "")
+          bufferedThinking = ""
+        } else if (event.type === "thinking_delta") {
+          state.services?.discord?.notifyModelActivity?.(state.discordTypingTurnId ?? "")
+          if (handoff || modelState.enableThinking) bufferedThinking += event.delta
+        } else if (event.type === "thinking_end") {
+          if ((handoff || modelState.enableThinking) && bufferedThinking) {
+            emitStream(state, { type: "thinking", text: bufferedThinking })
+            emittedThinking = true
+          }
         }
-      }
-    },
-  })
-  if (state.context !== completionContext) {
-    throw new ContextChangedError("Context was replaced while completion was in flight; refusing a stale assistant response")
+      },
+    })
+    if (state.context !== completionContext) {
+      throw new ContextChangedError("Context was replaced while completion was in flight; refusing a stale assistant response")
+    }
+  } catch (error) {
+    // Failed, retried, or cancelled generation: the attempt's stream ends
+    // abandoned before the caller reacts or retries.
+    if (attemptIdentity) emitStream(state, { type: "assistant-end", identity: attemptIdentity, outcome: "abandoned" })
+    throw error
   }
 
   const usage = finalMessage.usage
