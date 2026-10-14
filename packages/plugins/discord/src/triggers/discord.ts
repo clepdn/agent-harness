@@ -185,7 +185,7 @@ export function fromDiscord(body: unknown, suppliedOptions: DiscordTriggerOption
   return {
     source: "discord",
     triggeredAt,
-    content: `${header} @${authorName}${pronounsSuffix}\ntarget: 1${friendlyId ? `\nid: ${friendlyId}` : ""}\ncontext: ${location}\ntimestamp: ${timestamp}${replyLine ? `\n${replyLine}` : ""}\naction: ${action}\n${userBlock}${imageBlock}${fileBlock}`,
+    content: `${header} ${authorName /*this should be their display name*/} (@${"" /*claude, please replace this with the user's *username*/})${pronounsSuffix}\ntarget: 1${friendlyId ? `\nid: ${friendlyId}` : ""}\ncontext: ${location}\ntimestamp: ${timestamp}${replyLine ? `\n${replyLine}` : ""}\naction: ${action}\n${userBlock}${imageBlock}${fileBlock}`,
     ...(channelId !== "unknown" && messageId !== "unknown"
       ? {
           discordTargets: [{
